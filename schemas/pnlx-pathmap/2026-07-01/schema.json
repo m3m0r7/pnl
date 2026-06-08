@@ -1,0 +1,176 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "pnlx-pathmap.json",
+    "version": "2026-07-01"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Document": {
+        "title": "pnlx-pathmap.json",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "generated_at",
+          "platform",
+          "requires"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/schemaVersion"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/platform"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/resolvedHeader"
+            }
+          },
+          "bridges": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/resolvedBridge"
+            }
+          },
+          "requires": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/resolvedNativeLibrary"
+            }
+          }
+        }
+      },
+      "schemaVersion": {
+        "type": "string",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+      },
+      "semver": {
+        "type": "string",
+        "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+      },
+      "sha256": {
+        "type": "string",
+        "pattern": "^[A-Fa-f0-9]{64}$"
+      },
+      "platform": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "os",
+          "arch",
+          "libc",
+          "php_version",
+          "php_sapi",
+          "php_zts"
+        ],
+        "properties": {
+          "os": {
+            "enum": [
+              "darwin",
+              "linux",
+              "windows"
+            ]
+          },
+          "arch": {
+            "enum": [
+              "aarch64",
+              "x86_64"
+            ]
+          },
+          "libc": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "glibc",
+              "musl",
+              null
+            ]
+          },
+          "php_version": {
+            "$ref": "#/components/schemas/semver"
+          },
+          "php_sapi": {
+            "type": "string",
+            "minLength": 1
+          },
+          "php_zts": {
+            "type": "boolean"
+          }
+        }
+      },
+      "resolvedNativeLibrary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "resolved_name",
+          "path",
+          "version",
+          "sha256"
+        ],
+        "properties": {
+          "resolved_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "$ref": "#/components/schemas/semver"
+          },
+          "sha256": {
+            "$ref": "#/components/schemas/sha256"
+          }
+        }
+      },
+      "resolvedHeader": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/components/schemas/sha256"
+          }
+        }
+      },
+      "resolvedBridge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "library",
+          "sha256"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "library": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/components/schemas/sha256"
+          }
+        }
+      }
+    }
+  }
+}

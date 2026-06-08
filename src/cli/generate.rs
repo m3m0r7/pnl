@@ -1,0 +1,299 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use handlebars::Handlebars;
+use serde_json::{Map, Value};
+
+use crate::platform::GeneratedMetadata;
+
+mod aliases;
+mod bridge;
+mod names;
+mod php;
+mod types;
+
+use aliases::render_aliases;
+use bridge::{render_bridge_cdef, render_bridge_functions};
+use php::{render_global_functions, render_methods, runtime_variable_name};
+use types::sanitize_php_param_name;
+
+const FFI_TEMPLATE: &str = include_str!("templates/ffi.php.tpl");
+const ENTITY_TEMPLATE: &str = include_str!("templates/entity.php.tpl");
+const CONTEXT_TEMPLATE: &str = include_str!("templates/context.php.tpl");
+const INDEX_TEMPLATE: &str = include_str!("templates/index.php.tpl");
+const ALIASES_TEMPLATE: &str = include_str!("templates/aliases.php.tpl");
+const BRIDGE_TEMPLATE: &str = include_str!("templates/bridge.rs.tpl");
+
+pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert("CDEF".to_owned(), Value::String(cdef.to_owned()));
+    let generated = render_handlebars(FFI_TEMPLATE, context)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    println!("generated {}", out.display());
+    Ok(())
+}
+
+pub fn generate_bridge_ffi_php(signatures: &[FunctionSignature], out: &Path) -> Result<()> {
+    generate_ffi_php_from_cdef(&render_bridge_cdef(signatures), out)
+}
+
+#[derive(Debug, Clone)]
+pub struct PhpPackageTemplateOptions<'a> {
+    pub namespace: &'a str,
+    pub class_name: &'a str,
+    pub library_key: &'a str,
+    pub ffi_file: &'a str,
+    pub signatures: &'a [FunctionSignature],
+}
+
+pub fn generate_entity_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    write_template(out, ENTITY_TEMPLATE, options)
+}
+
+pub fn generate_context_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    write_template(out, CONTEXT_TEMPLATE, options)
+}
+
+pub fn generate_index_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    write_template(out, INDEX_TEMPLATE, options)
+}
+
+pub fn generate_aliases_php(out: &Path, signatures: &[FunctionSignature]) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert(
+        "ALIASES".to_owned(),
+        Value::String(render_aliases(signatures)),
+    );
+    let generated = render_handlebars(ALIASES_TEMPLATE, context)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    println!("generated {}", out.display());
+    Ok(())
+}
+
+pub fn generate_bridge_rs(
+    out: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    signatures: &[FunctionSignature],
+) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert(
+        "CLASS".to_owned(),
+        Value::String(options.class_name.to_owned()),
+    );
+    context.insert(
+        "FUNCTIONS".to_owned(),
+        Value::String(render_bridge_functions(signatures)),
+    );
+    let generated = render_handlebars(BRIDGE_TEMPLATE, context)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    println!("generated {}", out.display());
+    Ok(())
+}
+
+fn write_template(
+    out: &Path,
+    template: &str,
+    options: &PhpPackageTemplateOptions<'_>,
+) -> Result<()> {
+    let generated = render_template(template, options)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    println!("generated {}", out.display());
+    Ok(())
+}
+
+fn render_template(template: &str, options: &PhpPackageTemplateOptions<'_>) -> Result<String> {
+    let mut context = generated_template_context();
+    context.insert(
+        "NAMESPACE".to_owned(),
+        Value::String(options.namespace.to_owned()),
+    );
+    context.insert(
+        "CLASS".to_owned(),
+        Value::String(options.class_name.to_owned()),
+    );
+    context.insert(
+        "FQCN".to_owned(),
+        Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
+    );
+    context.insert(
+        "LIBRARY_KEY".to_owned(),
+        Value::String(options.library_key.to_owned()),
+    );
+    context.insert(
+        "FFI_FILE".to_owned(),
+        Value::String(options.ffi_file.to_owned()),
+    );
+    context.insert(
+        "RUNTIME_VAR".to_owned(),
+        Value::String(runtime_variable_name(options)),
+    );
+    context.insert(
+        "METHODS".to_owned(),
+        Value::String(render_methods(options.signatures)),
+    );
+    context.insert(
+        "FUNCTIONS".to_owned(),
+        Value::String(render_global_functions(options)),
+    );
+    render_handlebars(template, context)
+}
+
+fn generated_template_context() -> Map<String, Value> {
+    let metadata = GeneratedMetadata::current();
+    let mut context = Map::new();
+    context.insert(
+        "GENERATED_AT".to_owned(),
+        Value::String(metadata.generated_at),
+    );
+    context.insert("GENERATED_HOST".to_owned(), Value::String(metadata.host));
+    context.insert("GENERATED_OS".to_owned(), Value::String(metadata.os));
+    context.insert(
+        "GENERATED_PHP_VERSION".to_owned(),
+        Value::String(metadata.php_version),
+    );
+    context
+}
+
+fn render_handlebars(template: &str, context: Map<String, Value>) -> Result<String> {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(handlebars::no_escape);
+    handlebars
+        .render_template(template, &context)
+        .context("failed to render generated template")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub name: String,
+    pub(super) return_type: String,
+    pub(super) params: Vec<FunctionParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FunctionParam {
+    pub(super) name: String,
+    pub(super) type_name: String,
+}
+
+pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
+    let mut seen = BTreeSet::new();
+    cdef.lines()
+        .filter_map(parse_function_signature)
+        .filter(|signature| seen.insert(signature.name.clone()))
+        .collect()
+}
+
+fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
+    let line = line.trim();
+    if !line.ends_with(';')
+        || !line.contains('(')
+        || line.contains("(*")
+        || line.starts_with("typedef ")
+    {
+        return None;
+    }
+
+    let open = line.find('(')?;
+    let close = line.rfind(')')?;
+    let before = line[..open].trim();
+    let (return_type, name) = split_c_declaration_name(before)?;
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+
+    Some(FunctionSignature {
+        name,
+        return_type,
+        params: parse_params(line[open + 1..close].trim()),
+    })
+}
+
+fn split_c_declaration_name(declaration: &str) -> Option<(String, String)> {
+    let declaration = declaration.trim();
+    let end = declaration
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index + ch.len_utf8()))?;
+    let trimmed = &declaration[..end];
+    let mut start = trimmed.len();
+    for (index, ch) in trimmed.char_indices().rev() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            start = index;
+        } else {
+            break;
+        }
+    }
+    if start == trimmed.len() {
+        return None;
+    }
+
+    let name = trimmed[start..].to_owned();
+    let type_name = trimmed[..start].trim().to_owned();
+    if type_name.is_empty() {
+        None
+    } else {
+        Some((type_name, name))
+    }
+}
+
+fn parse_params(params: &str) -> Vec<FunctionParam> {
+    if params.trim().is_empty() || params.trim() == "void" {
+        return Vec::new();
+    }
+
+    let mut seen = BTreeMap::new();
+    params
+        .split(',')
+        .enumerate()
+        .map(|(index, param)| unique_param_name(parse_param(param, index), &mut seen))
+        .collect()
+}
+
+fn unique_param_name(
+    mut param: FunctionParam,
+    seen: &mut BTreeMap<String, usize>,
+) -> FunctionParam {
+    let count = seen.entry(param.name.clone()).or_default();
+    if *count > 0 {
+        param.name = format!("{}_{}", param.name, count);
+    }
+    *count += 1;
+
+    param
+}
+
+fn parse_param(param: &str, index: usize) -> FunctionParam {
+    let param = param.trim();
+    if let Some((type_name, name)) = split_c_declaration_name(param) {
+        return FunctionParam {
+            name: sanitize_php_param_name(&name, index),
+            type_name,
+        };
+    }
+
+    FunctionParam {
+        name: format!("arg{index}"),
+        type_name: param.to_owned(),
+    }
+}

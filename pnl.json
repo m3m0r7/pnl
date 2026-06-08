@@ -1,0 +1,29 @@
+{
+  "schema_version": "2026-07-01",
+  "repositories": [
+    {
+      "type": "file",
+      "url": "file://packages"
+    }
+  ],
+  "load_paths": [
+    "/opt/homebrew/lib"
+  ],
+  "enables": {
+    "use_functions": true
+  },
+  "extensions": {
+    "libnfc/libnfc": {
+      "version": "=1.8.0",
+      "required": true
+    },
+    "libsdl/libsdl": {
+      "version": "=2.32.10",
+      "required": true
+    },
+    "libusb/libusb": {
+      "version": ">=1.0.0 <2.0.0",
+      "required": true
+    }
+  }
+}

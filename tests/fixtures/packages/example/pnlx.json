@@ -1,0 +1,43 @@
+{
+  "schema_version": "2026-07-01",
+  "name": "example/example",
+  "version": "1.2.3",
+  "description": "Test fixture native library.",
+  "authors": [
+    {
+      "name": "pnl tests"
+    }
+  ],
+  "license": "MIT",
+  "entrypoint": "src/generated/index.php",
+  "class": "Pnlx\\Example\\Example",
+  "platforms": [
+    {
+      "os": "darwin",
+      "arch": "aarch64"
+    }
+  ],
+  "headers": [
+    {
+      "name": "example",
+      "path": "include/example.h",
+      "sha256": "787b9dd6187847cd1289232b14cbdcb362dca7dee9f67a8a4f989a4de600e194"
+    }
+  ],
+  "requires": {
+    "example": {
+      "symbol_prefix": "example",
+      "library_names": [
+        "libexample.dylib",
+        "libexample.so",
+        "example.dll"
+      ],
+      "header_names": [
+        "example.h"
+      ],
+      "version": ">=1.2.3 <2.0.0",
+      "required": true
+    }
+  },
+  "dependencies": {}
+}

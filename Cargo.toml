@@ -1,0 +1,28 @@
+[package]
+name = "pnl"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/cli/lib.rs"
+
+[[bin]]
+name = "pnl"
+path = "src/cli/bin/pnl.rs"
+
+[[bin]]
+name = "pnlx"
+path = "src/cli/bin/pnlx.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+clap = { version = "4.5.53", features = ["derive"] }
+handlebars = "6.3.2"
+jsonschema = { version = "0.18", default-features = false, features = ["draft201909"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+tempfile = "3.23.0"

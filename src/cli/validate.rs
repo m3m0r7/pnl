@@ -1,0 +1,208 @@
+use std::path::Path;
+
+use anyhow::{Result, bail};
+use chrono::{DateTime, NaiveDate, Utc};
+
+use crate::SCHEMA_VERSION;
+use crate::io::read_json;
+use crate::manifest::{Platform, PnlLock, PnlManifest, PnlxManifest, PnlxPathmap};
+use crate::platform::current_platform;
+
+pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
+    let manifest = read_json::<PnlManifest>(&root.join("pnl.json"))?;
+    validate_schema_version(&manifest.schema_version)?;
+    validate_pnl_manifest_values(&manifest)?;
+
+    let lock_path = root.join("@pnlx").join("pnlx-lock.json");
+    if lock_path.exists() {
+        let lock = read_json::<PnlLock>(&lock_path)?;
+        validate_schema_version(&lock.schema_version)?;
+        ensure_platform_matches(&lock.platform)?;
+        validate_pnl_lock_values(&lock)?;
+    }
+
+    let pathmap_path = root.join("@pnlx").join("pnlx-pathmap.json");
+    if pathmap_path.exists() {
+        let pathmap = read_json::<PnlxPathmap>(&pathmap_path)?;
+        validate_schema_version(&pathmap.schema_version)?;
+        ensure_platform_matches(&pathmap.platform)?;
+        validate_pnlx_pathmap_values(&pathmap)?;
+    }
+
+    println!("pnl workspace is valid");
+    Ok(())
+}
+
+pub fn validate_pnlx_workspace(root: &Path) -> Result<()> {
+    let manifest = read_json::<PnlxManifest>(&root.join("pnlx.json"))?;
+    validate_schema_version(&manifest.schema_version)?;
+    validate_pnlx_manifest_values(&manifest)?;
+
+    println!("pnlx workspace is valid");
+    Ok(())
+}
+
+pub fn validate_pnl_manifest_values(manifest: &PnlManifest) -> Result<()> {
+    for (name, requirement) in &manifest.extensions {
+        validate_package_name(name)?;
+        validate_version_constraint(&requirement.version)?;
+    }
+
+    Ok(())
+}
+
+pub fn validate_pnl_lock_values(lock: &PnlLock) -> Result<()> {
+    validate_rfc3339_datetime("generated_at", &lock.generated_at)?;
+    for (name, extension) in &lock.extensions {
+        validate_package_name(name)?;
+        validate_semver(&extension.version)?;
+        validate_version_constraint(&extension.constraint)?;
+        for (dependency, constraint) in &extension.dependencies {
+            validate_package_name(dependency)?;
+            validate_version_constraint(constraint)?;
+        }
+        for native in extension.requires.values() {
+            validate_semver(&native.version)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_pnlx_manifest_values(manifest: &PnlxManifest) -> Result<()> {
+    validate_package_name(&manifest.name)?;
+    validate_semver(&manifest.version)?;
+    if manifest.requires.is_empty() {
+        bail!("pnlx.json requires must contain at least one native library requirement");
+    }
+    for requirement in manifest.requires.values() {
+        validate_version_constraint(&requirement.version)?;
+    }
+    for (name, requirement) in &manifest.dependencies {
+        validate_package_name(name)?;
+        validate_version_constraint(&requirement.version)?;
+    }
+
+    Ok(())
+}
+
+pub fn validate_pnlx_pathmap_values(pathmap: &PnlxPathmap) -> Result<()> {
+    validate_rfc3339_datetime("generated_at", &pathmap.generated_at)?;
+    for native in pathmap.requires.values() {
+        validate_semver(&native.version)?;
+    }
+
+    Ok(())
+}
+
+pub fn validate_schema_version(version: &str) -> Result<()> {
+    if NaiveDate::parse_from_str(version, "%Y-%m-%d").is_err() {
+        bail!("schema_version must be a valid YYYY-MM-DD date: {version}");
+    }
+
+    if version != SCHEMA_VERSION {
+        bail!("unsupported schema_version {version}; expected {SCHEMA_VERSION}");
+    }
+
+    Ok(())
+}
+
+pub fn validate_rfc3339_datetime(field: &str, value: &str) -> Result<()> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map(|_| ())
+        .map_err(|_| anyhow::anyhow!("{field} must be an RFC3339 date-time: {value}"))
+}
+
+pub fn validate_semver(version: &str) -> Result<()> {
+    let suffix_start = version.find(|ch| ch == '-' || ch == '+');
+    let core = suffix_start.map_or(version, |index| &version[..index]);
+    let suffix = suffix_start.map(|index| &version[index + 1..]);
+
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        bail!("invalid semantic version: {version}");
+    }
+
+    if let Some(suffix) = suffix
+        && (suffix.is_empty()
+            || !suffix
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-')))
+    {
+        bail!("invalid semantic version suffix: {version}");
+    }
+
+    Ok(())
+}
+
+pub fn validate_version_constraint(constraint: &str) -> Result<()> {
+    if constraint.is_empty() || constraint.trim() != constraint {
+        bail!("invalid version constraint: {constraint}");
+    }
+
+    for part in constraint.split_whitespace() {
+        let version = strip_constraint_operator(part);
+        if version.is_empty() {
+            bail!("invalid version constraint: {constraint}");
+        }
+        validate_semver(version)?;
+    }
+
+    Ok(())
+}
+
+fn strip_constraint_operator(part: &str) -> &str {
+    for operator in ["<=", ">=", "==", "=", "<", ">", "^", "~"] {
+        if let Some(version) = part.strip_prefix(operator) {
+            return version;
+        }
+    }
+
+    part
+}
+
+pub fn ensure_platform_matches(platform: &Platform) -> Result<()> {
+    let current = current_platform();
+    if *platform == current {
+        Ok(())
+    } else {
+        bail!(
+            "platform mismatch: file is {:?}, current environment is {:?}",
+            platform,
+            current
+        );
+    }
+}
+
+pub fn validate_package_name(name: &str) -> Result<()> {
+    let mut parts = name.split('/');
+    let vendor = parts.next().unwrap_or_default();
+    let package = parts.next().unwrap_or_default();
+    if parts.next().is_some() || vendor.is_empty() || package.is_empty() {
+        bail!("package name must be vendor/extension: {name}");
+    }
+    sanitize_package_segment(vendor)?;
+    sanitize_package_segment(package)?;
+    Ok(())
+}
+
+pub fn sanitize_package_segment(value: &str) -> Result<String> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+        && normalized
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    {
+        Ok(normalized)
+    } else {
+        bail!("invalid package segment: {value}");
+    }
+}

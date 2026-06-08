@@ -1,0 +1,9 @@
+/@pnlx/
+/target/
+/vendor/
+/.phpunit.result.cache
+/.php-cs-fixer.cache
+/.phpstan-cache/
+/pnl-lock.json
+/pnlx-lock.json
+test*.php
