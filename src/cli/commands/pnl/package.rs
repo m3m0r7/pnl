@@ -14,7 +14,9 @@ pub(super) fn pnlx_workspace_dir(root: &Path) -> PathBuf {
 }
 
 pub(super) fn pnl_lock_path(root: &Path) -> PathBuf {
-    pnlx_workspace_dir(root).join("pnlx-lock.json")
+    // The lockfile lives next to pnl.json (not inside the configurable output
+    // dir) so it has a fixed, committable location independent of `output_dir`.
+    root.join("pnlx-lock.json")
 }
 
 pub(super) fn pnlx_pathmap_path(root: &Path) -> PathBuf {

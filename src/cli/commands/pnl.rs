@@ -16,7 +16,7 @@ mod package;
 
 pub(crate) use bridge::build_installed_bridges;
 
-use install::install;
+use install::{InstallOptions, install};
 use package::{installed_package_dir, pnl_lock_path, pnlx_pathmap_path, write_pnlx_autoload};
 
 #[derive(Debug, Parser)]
@@ -36,7 +36,17 @@ struct Cli {
 enum Command {
     Init,
     Install {
-        target: Option<String>,
+        /// One or more sources (URL, path, or bare package name). With none,
+        /// every extension is restored from the lockfile.
+        targets: Vec<String>,
+        /// Also define a `class_alias` so the extension can be referenced by this
+        /// class name in addition to the one declared in pnlx.json.
+        #[arg(long)]
+        alias_class: Option<String>,
+        /// Prefix added to every generated function and method name (replaces the
+        /// unprefixed names).
+        #[arg(long)]
+        function_prefix: Option<String>,
     },
     Update {
         package: Option<String>,
@@ -77,6 +87,9 @@ struct RepoAdd {
     url: String,
     #[arg(long)]
     key: Option<String>,
+    /// Resolution priority; higher is consulted first (defaults to 0).
+    #[arg(long)]
+    priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -91,7 +104,18 @@ pub fn run() -> Result<()> {
     let interaction = Interaction::new(cli.no_interaction);
     match cli.command {
         Command::Init => init_pnl(Path::new(".")),
-        Command::Install { target } => install(Path::new("."), target.as_deref()),
+        Command::Install {
+            targets,
+            alias_class,
+            function_prefix,
+        } => install(
+            Path::new("."),
+            &targets,
+            &InstallOptions {
+                alias_class,
+                function_prefix,
+            },
+        ),
         Command::Update { package } => update(Path::new("."), package.as_deref()),
         Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),
@@ -121,11 +145,19 @@ fn update(root: &Path, package: Option<&str>) -> Result<()> {
                 .extensions
                 .get(package)
                 .with_context(|| format!("{package} is not installed"))?;
-            install(root, Some(&entry.source.url))
+            install(
+                root,
+                std::slice::from_ref(&entry.source.url),
+                &InstallOptions::default(),
+            )
         }
         None => {
             for entry in lock.extensions.values() {
-                install(root, Some(&entry.source.url))?;
+                install(
+                    root,
+                    std::slice::from_ref(&entry.source.url),
+                    &InstallOptions::default(),
+                )?;
             }
             Ok(())
         }
@@ -218,6 +250,7 @@ fn repo(root: &Path, command: RepoCommand) -> Result<()> {
                 },
                 url: add.url,
                 key: add.key,
+                priority: add.priority,
             };
             if !manifest
                 .repositories

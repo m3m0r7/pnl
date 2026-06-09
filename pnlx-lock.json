@@ -1,0 +1,56 @@
+{
+  "schema_version": "2026-07-01",
+  "generated_at": "2026-06-09T08:59:20Z",
+  "platform": {
+    "os": "darwin",
+    "arch": "aarch64",
+    "libc": null,
+    "php_version": "8.5.2",
+    "php_sapi": "cli",
+    "php_zts": false
+  },
+  "extensions": {
+    "libnfc/libnfc": {
+      "version": "1.8.0",
+      "constraint": "=1.8.0",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc",
+        "reference": "ffb180fda10149359f83015d52a512b65189efc4"
+      },
+      "dist": {
+        "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc",
+        "sha256": "77d42be61cff8606edf95a2ab08bb4b501fcbfb954695506b290dd20bf1f1c1a"
+      },
+      "dependencies": {},
+      "requires": {
+        "libnfc": {
+          "name": "libnfc.dylib",
+          "version": "1.8.0",
+          "sha256": "75f3f09d93c65d1dec91fd08c01bd489493879301ff9a2d03d27112a243ebbbd"
+        }
+      }
+    },
+    "libusb/libusb": {
+      "version": "1.0.29",
+      "constraint": "=1.0.29",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb",
+        "reference": "ffb180fda10149359f83015d52a512b65189efc4"
+      },
+      "dist": {
+        "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb",
+        "sha256": "34ac03a886f75fa5c4fe3f9875fea295722ea954358ef87f190da55859cee4d5"
+      },
+      "dependencies": {},
+      "requires": {
+        "libusb-1.0": {
+          "name": "libusb-1.0.dylib",
+          "version": "1.0.29",
+          "sha256": "c9ab16fb3be9ae7d39f43feb6b3b0f35106b3d9b775351d171a1764adff43bf1"
+        }
+      }
+    }
+  }
+}

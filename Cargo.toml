@@ -19,6 +19,7 @@ anyhow = "1.0.100"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 clang = { version = "2.0.0", features = ["clang_10_0", "runtime"] }
 clap = { version = "4.5.53", features = ["derive"] }
+flate2 = "1.1.9"
 gethostname = "1.1.0"
 git-url-parse = "0.6.0"
 handlebars = "6.3.2"
@@ -29,8 +30,10 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 suppaftp = "8.0.4"
+tar = "0.4.46"
 ureq = "3.3.0"
 url = "2.5.8"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # git2 is split by target: on Unix we vendor OpenSSL + libgit2 for a
 # self-contained binary; on Windows OpenSSL is painful to build, so we vendor

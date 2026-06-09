@@ -123,6 +123,8 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         &class_name,
         &library_key,
         symbol_prefix_for_library(&manifest, &library_key).as_deref(),
+        None,
+        "",
         &entity_out,
         &context_out,
         &index_out,
@@ -131,12 +133,15 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_installed_package_artifacts(
     root: &Path,
     manifest: &PnlxManifest,
     target: &str,
     library_key: &str,
     headers: &[PathBuf],
+    alias_class: Option<&str>,
+    function_prefix: Option<&str>,
 ) -> Result<()> {
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(package_leaf);
@@ -151,6 +156,8 @@ pub(crate) fn generate_installed_package_artifacts(
         &class_name,
         library_key,
         symbol_prefix_for_library(manifest, library_key).as_deref(),
+        alias_class,
+        function_prefix.unwrap_or(""),
         &generated_dir.join(format!("{class_name}.php")),
         &generated_dir.join(format!("{class_name}Context.php")),
         &generated_dir.join("index.php"),
@@ -167,6 +174,8 @@ fn generate_all(
     class_name: &str,
     library_key: &str,
     symbol_prefix: Option<&str>,
+    alias_class: Option<&str>,
+    function_prefix: &str,
     entity_out: &Path,
     context_out: &Path,
     index_out: &Path,
@@ -197,6 +206,8 @@ fn generate_all(
         library_key,
         ffi_file,
         signatures: &signatures,
+        alias_class,
+        function_prefix,
     };
     generate_entity_php(entity_out, &template_options)?;
     generate_context_php(context_out, &template_options)?;

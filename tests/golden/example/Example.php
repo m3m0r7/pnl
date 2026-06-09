@@ -60,22 +60,22 @@ class Example
 
     public function ExampleVersion(): string
     {
-        return \Pnlx\Util::cString($this->__call(__FUNCTION__, func_get_args()));
+        return \Pnlx\Util::cString($this->__call('ExampleVersion', func_get_args()));
     }
 
     public function example_version(): string
     {
-        return \Pnlx\Util::cString($this->__call(__FUNCTION__, func_get_args()));
+        return \Pnlx\Util::cString($this->__call('example_version', func_get_args()));
     }
 
     public function ExampleAdd(int $left, int $right): int
     {
-        return (int) $this->__call(__FUNCTION__, func_get_args());
+        return (int) $this->__call('ExampleAdd', func_get_args());
     }
 
     public function example_add(int $left, int $right): int
     {
-        return (int) $this->__call(__FUNCTION__, func_get_args());
+        return (int) $this->__call('example_add', func_get_args());
     }
 
 

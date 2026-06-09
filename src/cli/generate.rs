@@ -51,6 +51,10 @@ pub struct PhpPackageTemplateOptions<'a> {
     pub library_key: &'a str,
     pub ffi_file: &'a str,
     pub signatures: &'a [FunctionSignature],
+    /// Optional extra class name to expose via `class_alias`.
+    pub alias_class: Option<&'a str>,
+    /// Prefix prepended to every generated method/function name ("" = none).
+    pub function_prefix: &'a str,
 }
 
 pub fn generate_entity_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
@@ -168,11 +172,26 @@ fn render_template(template: &str, options: &PhpPackageTemplateOptions<'_>) -> R
         "RUNTIME_VAR".to_owned(),
         Value::String(runtime_variable_name(options)),
     );
-    context.insert(
-        "METHODS".to_owned(),
-        Value::String(render_methods(options.signatures)),
-    );
+    context.insert("METHODS".to_owned(), Value::String(render_methods(options)));
+    // `--alias-class` exposes the generated class under an additional name while
+    // keeping the original. Emitted in index.php; empty for other templates.
+    let class_alias = match options.alias_class {
+        Some(alias) if !alias.is_empty() => format!(
+            "class_alias(\\{}\\{}::class, {});\n",
+            options.namespace,
+            options.class_name,
+            php_class_literal(alias),
+        ),
+        _ => String::new(),
+    };
+    context.insert("CLASS_ALIAS".to_owned(), Value::String(class_alias));
     render_handlebars(template, context)
+}
+
+/// Render a class name as a PHP `::class`-style string literal, e.g. `\Foo\Bar::class`.
+fn php_class_literal(class: &str) -> String {
+    let normalized = class.trim_start_matches('\\');
+    format!("\\{normalized}::class")
 }
 
 fn generated_template_context() -> Map<String, Value> {
@@ -344,12 +363,15 @@ double demo_scale(double value, int factor);\n";
             library_key: "demo",
             ffi_file: "demo.ffi.php",
             signatures,
+            alias_class: None,
+            function_prefix: "",
         }
     }
 
     #[test]
     fn renders_php_methods() {
-        insta::assert_snapshot!(render_methods(&sample_signatures()));
+        let signatures = sample_signatures();
+        insta::assert_snapshot!(render_methods(&sample_options(&signatures)));
     }
 
     #[test]

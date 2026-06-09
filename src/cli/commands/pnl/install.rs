@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
+use crate::archive::{extract_extension_archive, is_archive_source};
 use crate::commands::pnlx::generate_installed_package_artifacts;
+use crate::fetch::{fetch_asset, is_remote_source};
 use crate::git_source::{GitSource, install_git_source};
 use crate::io::{read_json, read_or_default, write_json};
 use crate::manifest::{
-    Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary, PnlManifest, PnlxManifest,
-    RepositoryType, Source,
+    DEFAULT_PACKAGES_REPOSITORY, Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary,
+    PnlManifest, PnlxManifest, Repository, RepositoryType, Source,
 };
 use crate::platform::now;
 use crate::validate::{
@@ -25,30 +27,53 @@ use super::package::{
     write_pnlx_autoload,
 };
 
-pub(super) fn install(root: &Path, target: Option<&str>) -> Result<()> {
+/// Codegen options supplied on the `pnl install` command line.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InstallOptions {
+    /// Define a `class_alias` for the generated extension class.
+    pub alias_class: Option<String>,
+    /// Prefix added to every generated function and method name.
+    pub function_prefix: Option<String>,
+}
+
+pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
     let mut manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
 
-    let Some(target) = target else {
+    if targets.is_empty() {
         // `pnl install` with no target restores every extension from the lockfile.
         return restore_from_lock(root, &mut manifest);
-    };
+    }
 
-    // An optional `@<version>` suffix pins the version (e.g. `…/libsdl@2.32.10`).
-    let (target, pinned_version) = split_version_pin(target);
-    let label = match pinned_version {
-        Some(version) => format!("install {target}@{version}"),
-        None => format!("install {target}"),
+    let label = if targets.len() == 1 {
+        format!("install {}", targets[0])
+    } else {
+        format!("install {} packages", targets.len())
     };
     crate::ui::heading("pnl", &label);
     let started = std::time::Instant::now();
 
-    // `@<version>` both checks out that git ref and asserts the resolved version.
-    install_one(root, &mut manifest, target, pinned_version, pinned_version)?;
+    for target in targets {
+        // An optional `@<version>` suffix pins the version (e.g. `…/libsdl@2.32.10`).
+        let (target, pinned_version) = split_version_pin(target);
+        if targets.len() > 1 {
+            crate::ui::step(target);
+        }
+        // `@<version>` both checks out that git ref and asserts the resolved version.
+        install_one(
+            root,
+            &mut manifest,
+            target,
+            pinned_version,
+            pinned_version,
+            options,
+        )?;
+    }
 
     crate::ui::summary(&format!(
-        "added 1 extension in {}",
+        "added {} extension(s) in {}",
+        targets.len(),
         crate::ui::elapsed(started.elapsed())
     ));
     Ok(())
@@ -66,6 +91,7 @@ fn install_one(
     target: &str,
     git_ref: Option<&str>,
     expected_version: Option<&str>,
+    options: &InstallOptions,
 ) -> Result<()> {
     // A bare package name (no scheme/slash, not a local package dir) is resolved
     // against the configured repositories, e.g. `pnl install libusb`.
@@ -74,7 +100,7 @@ fn install_one(
             .join("pnlx.json")
             .is_file()
     {
-        return install_bare_name(root, manifest, target, git_ref, expected_version);
+        return install_bare_name(root, manifest, target, git_ref, expected_version, options);
     }
 
     match resolve_install_source(root, target)? {
@@ -84,13 +110,14 @@ fn install_one(
             &path,
             ExtensionSource::File { source_url },
             expected_version,
+            options,
         ),
         InstallSource::Git(mut source) => {
             // Pin the clone to the requested tag/branch.
             if let Some(reference) = git_ref {
                 source.branch = Some(reference.to_owned());
             }
-            install_git_extension(root, manifest, target, source, expected_version)
+            install_git_extension(root, manifest, target, source, expected_version, options)
         }
     }
 }
@@ -114,10 +141,11 @@ fn restore_from_lock(root: &Path, manifest: &mut PnlManifest) -> Result<()> {
 
     crate::ui::heading("pnl", "install (restore from lockfile)");
     let started = std::time::Instant::now();
+    let options = InstallOptions::default();
     for (url, version) in &entries {
         crate::ui::step(&format!("{url} ({version})"));
         // Keep the source's branch; only assert the resolved version matches the lock.
-        install_one(root, manifest, url, None, Some(version))?;
+        install_one(root, manifest, url, None, Some(version), &options)?;
     }
 
     crate::ui::summary(&format!(
@@ -126,6 +154,33 @@ fn restore_from_lock(root: &Path, manifest: &mut PnlManifest) -> Result<()> {
         crate::ui::elapsed(started.elapsed())
     ));
     Ok(())
+}
+
+/// The repositories consulted for bare-name resolution, highest priority first.
+/// The built-in default repository is appended as the lowest-priority fallback
+/// unless the manifest already lists it.
+fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
+    fn same_url(a: &str, b: &str) -> bool {
+        a.trim_end_matches('/') == b.trim_end_matches('/')
+    }
+
+    let mut repositories = manifest.repositories.clone();
+    if !repositories
+        .iter()
+        .any(|repository| same_url(&repository.url, DEFAULT_PACKAGES_REPOSITORY))
+    {
+        repositories.push(Repository {
+            kind: RepositoryType::Git,
+            url: DEFAULT_PACKAGES_REPOSITORY.to_owned(),
+            key: None,
+            priority: Some(0),
+        });
+    }
+
+    // Stable sort by priority (default 0) descending: configured repositories of
+    // equal priority keep their order and stay ahead of the appended default.
+    repositories.sort_by(|a, b| b.priority.unwrap_or(0).cmp(&a.priority.unwrap_or(0)));
+    repositories
 }
 
 /// A bare package leaf name (e.g. `libusb`, `libusb-1.0`) — no URL scheme,
@@ -149,20 +204,24 @@ fn install_bare_name(
     name: &str,
     git_ref: Option<&str>,
     expected_version: Option<&str>,
+    options: &InstallOptions,
 ) -> Result<()> {
-    let repositories = manifest.repositories.clone();
-    if repositories.is_empty() {
-        bail!(
-            "no repositories are configured to resolve package \"{name}\"; \
-             add one to \"repositories\" in pnl.json or install from a URL/path."
-        );
-    }
+    // Configured repositories first (highest priority first), then the built-in
+    // default repository as the lowest-priority fallback.
+    let repositories = resolved_repositories(manifest);
 
     let mut failures = Vec::new();
     for repository in &repositories {
         let candidate = format!("{}/{name}", repository.url.trim_end_matches('/'));
         crate::ui::step(&format!("resolving {name} from {}", repository.url));
-        match install_one(root, manifest, &candidate, git_ref, expected_version) {
+        match install_one(
+            root,
+            manifest,
+            &candidate,
+            git_ref,
+            expected_version,
+            options,
+        ) {
             Ok(()) => return Ok(()),
             Err(error) => failures.push(format!("  - {}: {error}", repository.url)),
         }
@@ -210,6 +269,7 @@ fn install_git_extension(
     target: &str,
     source: GitSource,
     expected_version: Option<&str>,
+    options: &InstallOptions,
 ) -> Result<()> {
     let installed = install_git_source(&source)?;
     let extension_root = installed.destination.join(&source.package_path);
@@ -230,10 +290,30 @@ fn install_git_extension(
             dist_url: target.to_owned(),
         },
         expected_version,
+        options,
     )
 }
 
 fn resolve_install_source(root: &Path, target: &str) -> Result<InstallSource> {
+    // Archive distributions (.tar.gz/.tgz/.tar/.zip), local or remote: fetch if
+    // needed, extract, and install from the directory that holds pnlx.json.
+    if is_archive_source(target) {
+        let archive = if is_remote_source(target) {
+            fetch_asset(target).with_context(|| format!("failed to download archive {target}"))?
+        } else {
+            let path = absolutize(root, Path::new(target));
+            if !path.is_file() {
+                bail!("archive {target} does not exist");
+            }
+            path
+        };
+        let extension_root = extract_extension_archive(&archive)?;
+        return Ok(InstallSource::Local {
+            source_url: target.to_owned(),
+            path: extension_root,
+        });
+    }
+
     if target.starts_with("ftp://") || target.starts_with("ftps://") {
         bail!(
             "ftp install sources are not implemented yet; use a local path, file:// URL, or git URL"
@@ -282,6 +362,7 @@ fn install_local_extension(
     extension_root: &Path,
     source: ExtensionSource,
     expected_version: Option<&str>,
+    options: &InstallOptions,
 ) -> Result<()> {
     let extension = read_json::<PnlxManifest>(&extension_root.join("pnlx.json"))?;
     validate_schema_version(&extension.schema_version)?;
@@ -347,6 +428,8 @@ fn install_local_extension(
             extension.name.rsplit('/').next().unwrap_or(key),
             key,
             &generation_headers,
+            options.alias_class.as_deref(),
+            options.function_prefix.as_deref(),
         )?;
         if let Some(bridge) = compile_bridge_for_library(
             root,
@@ -520,8 +603,7 @@ mod tests {
                 requires: BTreeMap::new(),
             },
         );
-        let lock_path = dir.path().join("@pnlx").join("pnlx-lock.json");
-        crate::io::write_json(&lock_path, &lock).unwrap();
+        crate::io::write_json(&super::pnl_lock_path(dir.path()), &lock).unwrap();
 
         let mut extension = PnlxManifest {
             name: "vendor/example".to_owned(),

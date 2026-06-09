@@ -12,6 +12,10 @@ pub struct Repository {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Higher values are consulted first when resolving a bare package name.
+    /// Defaults to 0; the built-in default repository sits at 0 as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,8 +55,9 @@ pub struct PnlFeatures {
     pub use_functions: bool,
 }
 
-/// The default package repository — bare names like `pnl install libusb`
-/// resolve against it.
+/// The default package repository. It is not written into `pnl.json`; pnl keeps
+/// it internally as the lowest-priority fallback so bare names like
+/// `pnl install libusb` resolve out of the box.
 pub const DEFAULT_PACKAGES_REPOSITORY: &str =
     "https://github.com/m3m0r7/pnl-packages/tree/main/packages";
 
@@ -60,11 +65,7 @@ impl Default for PnlManifest {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
-            repositories: vec![Repository {
-                kind: RepositoryType::Git,
-                url: DEFAULT_PACKAGES_REPOSITORY.to_owned(),
-                key: None,
-            }],
+            repositories: Vec::new(),
             load_paths: Vec::new(),
             output_dir: default_output_dir(),
             features: PnlFeatures::default(),

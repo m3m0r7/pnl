@@ -4,25 +4,29 @@ use sha2::{Digest, Sha256};
 
 use super::names::alias_names;
 use super::types::{is_char_pointer, normalize_c_type, php_param_type, php_return_type};
-use super::{FunctionParam, FunctionSignature, PhpPackageTemplateOptions};
+use super::{FunctionParam, PhpPackageTemplateOptions};
 
-pub(super) fn render_methods(signatures: &[FunctionSignature]) -> String {
+pub(super) fn render_methods(options: &PhpPackageTemplateOptions<'_>) -> String {
+    let prefix = options.function_prefix;
     let mut lines = String::new();
     let mut emitted = BTreeMap::new();
 
-    for signature in signatures {
+    for signature in options.signatures {
         for name in alias_names(&signature.name) {
             if emitted.insert(name.to_ascii_lowercase(), true).is_some() {
                 continue;
             }
+            // `--function-prefix` renames the public method but dispatch still
+            // uses the original symbol name (the alias map is keyed by it).
             lines.push_str("    public function ");
+            lines.push_str(prefix);
             lines.push_str(&name);
             lines.push('(');
             lines.push_str(&php_params(&signature.params));
             lines.push_str("): ");
             lines.push_str(php_return_type(&signature.return_type));
             lines.push_str("\n    {\n");
-            lines.push_str(&php_method_body(&signature.return_type));
+            lines.push_str(&php_method_body(&signature.return_type, &name));
             lines.push_str("    }\n\n");
         }
     }
@@ -36,6 +40,7 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
     }
 
     let variable = runtime_variable_name(options);
+    let prefix = options.function_prefix;
     let mut out = String::new();
     let mut emitted = BTreeSet::new();
     for signature in options.signatures {
@@ -43,16 +48,20 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             continue;
         }
 
+        // `--function-prefix` renames the function; it dispatches to the matching
+        // (also-prefixed) entity method.
+        let function_name = format!("{prefix}{}", signature.name);
+
         // Functions live under `namespace Pnlx\Func\<Class>`, so `function_exists`
         // must be given the fully-qualified name (an unqualified string would test
         // the global namespace instead).
         out.push_str("if (!function_exists('Pnlx\\\\Func\\\\");
         out.push_str(options.class_name);
         out.push_str("\\\\");
-        out.push_str(&signature.name);
+        out.push_str(&function_name);
         out.push_str("')) {\n");
         out.push_str("    function ");
-        out.push_str(&signature.name);
+        out.push_str(&function_name);
         out.push('(');
         out.push_str(&php_params(&signature.params));
         out.push_str("): ");
@@ -61,7 +70,7 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
         out.push_str(&php_global_function_body(
             &signature.return_type,
             &variable,
-            &signature.name,
+            &function_name,
         ));
         out.push_str("    }\n");
         out.push_str("}\n\n");
@@ -88,19 +97,21 @@ pub(super) fn php_params(params: &[FunctionParam]) -> String {
         .join(", ")
 }
 
-fn php_method_body(c_type: &str) -> String {
+fn php_method_body(c_type: &str, dispatch_name: &str) -> String {
+    // Dispatch by the original symbol name (not `__FUNCTION__`, which would be the
+    // prefixed method name under `--function-prefix`).
+    let call = format!("$this->__call('{dispatch_name}', func_get_args())");
     let c_type = normalize_c_type(c_type);
     if c_type == "void" {
-        "        $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
+        format!("        {call};\n")
     } else if is_char_pointer(&c_type) {
-        "        return \\Pnlx\\Util::cString($this->__call(__FUNCTION__, func_get_args()));\n"
-            .to_owned()
+        format!("        return \\Pnlx\\Util::cString({call});\n")
     } else if php_return_type(&c_type) == "int" {
-        "        return (int) $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
+        format!("        return (int) {call};\n")
     } else if php_return_type(&c_type) == "float" {
-        "        return (float) $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
+        format!("        return (float) {call};\n")
     } else {
-        "        return $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
+        format!("        return {call};\n")
     }
 }
 

@@ -27,10 +27,10 @@
     }
   },
   "scripts": {
-    "analyse": "phpstan analyse",
-    "cs": "php-cs-fixer fix --dry-run --diff",
-    "cs:fix": "php-cs-fixer fix",
-    "test": "phpunit"
+    "analyse": "vendor/bin/phpstan analyse",
+    "cs": "vendor/bin/php-cs-fixer fix --dry-run --diff",
+    "cs:fix": "vendor/bin/php-cs-fixer fix",
+    "test": "vendor/bin/phpunit"
   },
   "require": {
     "cebe/php-openapi": "^1.8"

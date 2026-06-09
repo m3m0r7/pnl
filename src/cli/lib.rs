@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod commands;
 pub mod fetch;
 pub mod generate;
@@ -196,12 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn default_pnl_manifest_ships_packages_repository() {
-        use crate::manifest::{PnlManifest, RepositoryType};
+    fn default_pnl_manifest_has_no_repositories() {
+        use crate::manifest::PnlManifest;
+        // The default repository is kept internally, not written into pnl.json.
         let manifest = PnlManifest::default();
-        assert_eq!(manifest.repositories.len(), 1);
-        assert_eq!(manifest.repositories[0].kind, RepositoryType::Git);
-        assert!(manifest.repositories[0].url.contains("pnl-packages"));
+        assert!(manifest.repositories.is_empty());
         assert!(!manifest.features.use_functions);
     }
 

@@ -125,7 +125,7 @@ RS,
      */
     public function lockExtension(string $name): array
     {
-        $lock = $this->readJson($this->projectRoot . '/@pnlx/pnlx-lock.json');
+        $lock = $this->readJson($this->projectRoot . '/pnlx-lock.json');
         $extensions = $lock['extensions'] ?? null;
         $extension = is_array($extensions) ? ($extensions[$name] ?? null) : null;
         if (!is_array($extension)) {

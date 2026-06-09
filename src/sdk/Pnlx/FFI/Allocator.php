@@ -26,6 +26,19 @@ class Allocator
     }
 
     /**
+     * Allocate a new C value of a well-known scalar type, returning the FFI data.
+     *
+     * Prefer this over {@see self::new()} when a typed enum reads better than a
+     * raw C type string, e.g. `$allocator->make(AllocationType::Int64)`.
+     *
+     * @throws ExtensionLoadException When FFI cannot allocate the requested type.
+     */
+    public function make(AllocationType $type): CData
+    {
+        return $this->new($type->cType());
+    }
+
+    /**
      * Allocate a new C value of the given type declaration (e.g. `int`, `char[16]`).
      *
      * @throws ExtensionLoadException When FFI cannot allocate the requested type.

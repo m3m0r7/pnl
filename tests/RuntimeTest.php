@@ -41,7 +41,7 @@ class RuntimeTest extends TestCase
         Verifier::shouldMatchSchema('pnlx', self::$workspace->installedPackageRoot . '/pnlx.json');
         Verifier::shouldMatchSchema('pnlx-pathmap', self::$workspace->projectRoot . '/@pnlx/pnlx-pathmap.json');
 
-        self::assertFileExists(self::$workspace->projectRoot . '/@pnlx/pnlx-lock.json');
+        self::assertFileExists(self::$workspace->projectRoot . '/pnlx-lock.json');
         self::assertFileExists(self::$workspace->projectRoot . '/@pnlx/autoload.php');
         self::assertFileExists(self::$workspace->installedPackageRoot . '/README.md');
         self::assertFileDoesNotExist(self::$workspace->installedPackageRoot . '/src/generated/stale.php');
@@ -254,6 +254,12 @@ class RuntimeTest extends TestCase
         $buffer = $runtime->allocator()->voidPointerArray(1);
 
         self::assertInstanceOf(\FFI\CData::class, $buffer);
+        // Typed allocation via FFI::new returns FFI\CData.
+        self::assertInstanceOf(
+            \FFI\CData::class,
+            $runtime->allocator()->make(\Pnlx\FFI\AllocationType::Int64)
+        );
+        self::assertSame('int64_t', \Pnlx\FFI\AllocationType::Int64->cType());
         self::assertSame('ok', \Pnlx\Util::cString('ok'));
         // \Pnlx\Util\is_null() falls back to PHP's is_null for non-CData values.
         self::assertTrue(\Pnlx\Util\is_null(null));

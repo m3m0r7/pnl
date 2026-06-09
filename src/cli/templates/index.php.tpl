@@ -21,7 +21,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/{{CLASS}}Context.php';
 require_once __DIR__ . '/{{CLASS}}.php';
-
+{{CLASS_ALIAS}}
 $runtimeVarName = '{{RUNTIME_VAR}}';
 $runtime = new \Pnlx\Runtime();
 
