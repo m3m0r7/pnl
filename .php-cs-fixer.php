@@ -6,7 +6,9 @@ $finder = PhpCsFixer\Finder::create()
     ->in([
         __DIR__ . '/src/sdk',
         __DIR__ . '/tests',
-    ]);
+    ])
+    // Golden snapshots of generated code are fixtures, not source to format.
+    ->exclude('golden');
 
 return (new PhpCsFixer\Config())
     ->setRiskyAllowed(true)

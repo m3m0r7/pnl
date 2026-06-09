@@ -6,7 +6,10 @@
   "autoload": {
     "psr-4": {
       "Pnlx\\": "src/sdk/Pnlx/"
-    }
+    },
+    "files": [
+      "src/sdk/Pnlx/Util/functions.php"
+    ]
   },
   "autoload-dev": {
     "psr-4": {
@@ -17,6 +20,11 @@
     "phpunit/phpunit": "^12.0",
     "friendsofphp/php-cs-fixer": "^3.0",
     "phpstan/phpstan": "^2.0"
+  },
+  "config": {
+    "platform": {
+      "php": "8.3.0"
+    }
   },
   "scripts": {
     "analyse": "phpstan analyse",

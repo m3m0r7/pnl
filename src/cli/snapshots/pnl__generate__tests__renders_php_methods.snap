@@ -1,0 +1,43 @@
+---
+source: src/cli/generate.rs
+expression: render_methods(&sample_signatures())
+---
+    public function DemoName(): string
+    {
+        return \Pnlx\Util::cString($this->__call(__FUNCTION__, func_get_args()));
+    }
+
+    public function demo_name(): string
+    {
+        return \Pnlx\Util::cString($this->__call(__FUNCTION__, func_get_args()));
+    }
+
+    public function DemoAdd(int $left, int $right): int
+    {
+        return (int) $this->__call(__FUNCTION__, func_get_args());
+    }
+
+    public function demo_add(int $left, int $right): int
+    {
+        return (int) $this->__call(__FUNCTION__, func_get_args());
+    }
+
+    public function DemoLog(string|\FFI\CData|null $message): void
+    {
+        $this->__call(__FUNCTION__, func_get_args());
+    }
+
+    public function demo_log(string|\FFI\CData|null $message): void
+    {
+        $this->__call(__FUNCTION__, func_get_args());
+    }
+
+    public function DemoScale(float $value, int $factor): float
+    {
+        return (float) $this->__call(__FUNCTION__, func_get_args());
+    }
+
+    public function demo_scale(float $value, int $factor): float
+    {
+        return (float) $this->__call(__FUNCTION__, func_get_args());
+    }

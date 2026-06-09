@@ -24,6 +24,7 @@ const ENTITY_TEMPLATE: &str = include_str!("templates/entity.php.tpl");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/context.php.tpl");
 const INDEX_TEMPLATE: &str = include_str!("templates/index.php.tpl");
 const ALIASES_TEMPLATE: &str = include_str!("templates/aliases.php.tpl");
+const FUNCTIONS_TEMPLATE: &str = include_str!("templates/functions.php.tpl");
 const BRIDGE_TEMPLATE: &str = include_str!("templates/bridge.rs.tpl");
 
 pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
@@ -35,7 +36,7 @@ pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
-    println!("generated {}", out.display());
+    crate::ui::created("generated", out);
     Ok(())
 }
 
@@ -76,7 +77,29 @@ pub fn generate_aliases_php(out: &Path, signatures: &[FunctionSignature]) -> Res
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
-    println!("generated {}", out.display());
+    crate::ui::created("generated", out);
+    Ok(())
+}
+
+pub fn generate_functions_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    let mut context = generated_template_context();
+    // Built in Rust so the backslashes never sit next to a `{{ }}` placeholder
+    // (Handlebars treats `\{{` as an escape).
+    context.insert(
+        "FUNC_NAMESPACE".to_owned(),
+        Value::String(format!("Pnlx\\Func\\{}", options.class_name)),
+    );
+    context.insert(
+        "FUNCTIONS".to_owned(),
+        Value::String(render_global_functions(options)),
+    );
+    let generated = render_handlebars(FUNCTIONS_TEMPLATE, context)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    crate::ui::created("generated", out);
     Ok(())
 }
 
@@ -100,7 +123,7 @@ pub fn generate_bridge_rs(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
-    println!("generated {}", out.display());
+    crate::ui::created("generated", out);
     Ok(())
 }
 
@@ -115,7 +138,7 @@ fn write_template(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
-    println!("generated {}", out.display());
+    crate::ui::created("generated", out);
     Ok(())
 }
 
@@ -148,10 +171,6 @@ fn render_template(template: &str, options: &PhpPackageTemplateOptions<'_>) -> R
     context.insert(
         "METHODS".to_owned(),
         Value::String(render_methods(options.signatures)),
-    );
-    context.insert(
-        "FUNCTIONS".to_owned(),
-        Value::String(render_global_functions(options)),
     );
     render_handlebars(template, context)
 }
@@ -207,6 +226,13 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         || !line.contains('(')
         || line.contains("(*")
         || line.starts_with("typedef ")
+        // Struct/enum/union definitions and aggregates carry braces; never a
+        // plain function prototype.
+        || line.contains('{')
+        || line.contains('}')
+        || line.starts_with("struct ")
+        || line.starts_with("union ")
+        || line.starts_with("enum ")
     {
         return None;
     }
@@ -295,5 +321,81 @@ fn parse_param(param: &str, index: usize) -> FunctionParam {
     FunctionParam {
         name: format!("arg{index}"),
         type_name: param.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_CDEF: &str = "const char *demo_name(void);\n\
+int demo_add(int left, int right);\n\
+void demo_log(const char *message);\n\
+double demo_scale(double value, int factor);\n";
+
+    fn sample_signatures() -> Vec<FunctionSignature> {
+        parse_function_signatures(SAMPLE_CDEF)
+    }
+
+    fn sample_options(signatures: &[FunctionSignature]) -> PhpPackageTemplateOptions<'_> {
+        PhpPackageTemplateOptions {
+            namespace: "Demo\\Native",
+            class_name: "Demo",
+            library_key: "demo",
+            ffi_file: "demo.ffi.php",
+            signatures,
+        }
+    }
+
+    #[test]
+    fn renders_php_methods() {
+        insta::assert_snapshot!(render_methods(&sample_signatures()));
+    }
+
+    #[test]
+    fn renders_php_global_functions() {
+        let signatures = sample_signatures();
+        insta::assert_snapshot!(render_global_functions(&sample_options(&signatures)));
+    }
+
+    #[test]
+    fn renders_php_aliases() {
+        insta::assert_snapshot!(render_aliases(&sample_signatures()));
+    }
+
+    #[test]
+    fn renders_bridge_cdef() {
+        insta::assert_snapshot!(render_bridge_cdef(&sample_signatures()));
+    }
+
+    #[test]
+    fn renders_bridge_functions() {
+        insta::assert_snapshot!(render_bridge_functions(&sample_signatures()));
+    }
+
+    #[test]
+    fn bridge_escapes_rust_keyword_parameters() {
+        // `fn` is a Rust keyword; the bridge must rename it (SDL_CreateThread has
+        // a parameter literally named `fn`).
+        let signatures = parse_function_signatures("void demo_thread(int fn, void *data);\n");
+        let bridge = render_bridge_functions(&signatures);
+
+        assert!(bridge.contains("fn_: c_int"), "{bridge}");
+        assert!(!bridge.contains("(fn:"), "{bridge}");
+        assert!(
+            bridge.contains("native::demo_thread(fn_, data)"),
+            "{bridge}"
+        );
+    }
+
+    #[test]
+    fn struct_definitions_are_not_parsed_as_functions() {
+        // A one-line struct definition contains `(` (e.g. inside a field type)
+        // but must never be read as a function prototype.
+        let cdef = "struct ex_bind { int kind; union { int a; int b; } value; };\n\
+int ex_real(int x);\n";
+        let signatures = parse_function_signatures(cdef);
+        let names: Vec<&str> = signatures.iter().map(|sig| sig.name.as_str()).collect();
+        assert_eq!(names, vec!["ex_real"]);
     }
 }

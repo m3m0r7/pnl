@@ -19,6 +19,9 @@ class CommandRunner
      */
     public function run(array $command, ?array $env = null): void
     {
+        /** @var array<string, string>|null $envVars */
+        $envVars = $env === null ? null : array_merge($_ENV, $env);
+
         $process = proc_open(
             $command,
             [
@@ -27,7 +30,7 @@ class CommandRunner
             ],
             $pipes,
             $this->cwd,
-            $env === null ? null : array_merge($_ENV, $env)
+            $envVars
         );
 
         if (!is_resource($process)) {

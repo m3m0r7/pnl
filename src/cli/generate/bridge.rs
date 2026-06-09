@@ -118,9 +118,69 @@ fn rust_arg_names(signature: &FunctionSignature) -> String {
 
 fn rust_param_name(name: &str, index: usize) -> String {
     let candidate = sanitize_php_param_name(name, index);
-    match candidate.as_str() {
-        "type" | "match" | "ref" | "loop" | "move" | "async" | "await" | "crate" | "self"
-        | "super" => format!("r#{candidate}"),
-        _ => candidate,
+    // Suffix Rust keywords with `_`; this is always a valid identifier, unlike
+    // raw identifiers which `crate`/`self`/`super`/`Self` cannot use.
+    if is_rust_keyword(&candidate) {
+        format!("{candidate}_")
+    } else {
+        candidate
     }
+}
+
+fn is_rust_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "union"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "gen"
+    )
 }

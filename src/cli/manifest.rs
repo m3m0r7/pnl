@@ -28,28 +28,46 @@ pub struct ExtensionRequirement {
     pub required: bool,
 }
 
+fn default_output_dir() -> String {
+    "@pnlx".to_owned()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlManifest {
     pub schema_version: String,
     pub repositories: Vec<Repository>,
     pub load_paths: Vec<String>,
+    /// Directory (relative to the project root) for generated workspace files
+    /// — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`.
+    #[serde(default = "default_output_dir")]
+    pub output_dir: String,
     #[serde(default)]
-    pub enables: PnlEnables,
+    pub features: PnlFeatures,
     pub extensions: BTreeMap<String, ExtensionRequirement>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PnlEnables {
+pub struct PnlFeatures {
     pub use_functions: bool,
 }
+
+/// The default package repository — bare names like `pnl install libusb`
+/// resolve against it.
+pub const DEFAULT_PACKAGES_REPOSITORY: &str =
+    "https://github.com/m3m0r7/pnl-packages/tree/main/packages";
 
 impl Default for PnlManifest {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_owned(),
-            repositories: Vec::new(),
+            repositories: vec![Repository {
+                kind: RepositoryType::Git,
+                url: DEFAULT_PACKAGES_REPOSITORY.to_owned(),
+                key: None,
+            }],
             load_paths: Vec::new(),
-            enables: PnlEnables::default(),
+            output_dir: default_output_dir(),
+            features: PnlFeatures::default(),
             extensions: BTreeMap::new(),
         }
     }
@@ -79,11 +97,13 @@ pub struct Dist {
     pub sha256: String,
 }
 
+/// A native library as recorded in the lockfile: identity, version, and content
+/// hash only. Install-time file paths live in the pathmap, not the lock, so the
+/// lock stays portable and path-independent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedNativeLibrary {
     pub name: String,
     pub version: String,
-    pub path: String,
     pub sha256: String,
 }
 
@@ -131,13 +151,58 @@ pub struct PlatformRequirement {
     pub libc: Option<String>,
 }
 
+/// A candidate library file name. A plain string is an ordinary on-disk library;
+/// the object form `{ "name": "libc.dylib", "virtual": true }` marks a library
+/// provided by the system (e.g. libc, which on macOS lives only in the dyld
+/// shared cache) — it is linked by name and never required to exist as a file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LibraryName {
+    Plain(String),
+    Tagged {
+        name: String,
+        #[serde(rename = "virtual", default)]
+        is_virtual: bool,
+    },
+}
+
+impl LibraryName {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Plain(name) => name,
+            Self::Tagged { name, .. } => name,
+        }
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        matches!(
+            self,
+            Self::Tagged {
+                is_virtual: true,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeRequirement {
-    pub library_names: Vec<String>,
+    pub library_names: Vec<LibraryName>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol_prefix: Option<String>,
+    /// Remote source (http/https/ftp/git) to fetch the native library from
+    /// instead of searching the local library path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_url: Option<String>,
+    /// Remote source (http/https/ftp/git) to fetch the C header from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_url: Option<String>,
+    /// C header content embedded directly in the manifest, used as-is for
+    /// binding generation when no header file is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_inline: Option<String>,
     pub version: String,
     pub required: bool,
 }
@@ -174,9 +239,15 @@ impl Default for PnlxManifest {
         requires.insert(
             "native".to_owned(),
             NativeRequirement {
-                library_names: vec!["libnative.so".to_owned(), "native.dll".to_owned()],
+                library_names: vec![
+                    LibraryName::Plain("libnative.so".to_owned()),
+                    LibraryName::Plain("native.dll".to_owned()),
+                ],
                 header_names: Vec::new(),
                 symbol_prefix: None,
+                library_url: None,
+                header_url: None,
+                header_inline: None,
                 version: ">=0.0.0".to_owned(),
                 required: true,
             },

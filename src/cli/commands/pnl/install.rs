@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::commands::pnlx::generate_installed_package_artifacts;
 use crate::git_source::{GitSource, install_git_source};
@@ -21,25 +21,169 @@ use super::native::{
 };
 use super::package::{
     absolutize, file_url_for_path, install_extension_files, pnl_lock_path,
-    read_lock_for_current_platform, read_pathmap_for_current_platform, sha256_file, sha256_hex,
-    write_pathmap, write_pnlx_autoload,
+    read_lock_for_current_platform, read_pathmap_for_current_platform, tree_sha256, write_pathmap,
+    write_pnlx_autoload,
 };
 
 pub(super) fn install(root: &Path, target: Option<&str>) -> Result<()> {
-    let target = target.context("install target is required for the current implementation")?;
     let mut manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
 
+    let Some(target) = target else {
+        // `pnl install` with no target restores every extension from the lockfile.
+        return restore_from_lock(root, &mut manifest);
+    };
+
+    // An optional `@<version>` suffix pins the version (e.g. `…/libsdl@2.32.10`).
+    let (target, pinned_version) = split_version_pin(target);
+    let label = match pinned_version {
+        Some(version) => format!("install {target}@{version}"),
+        None => format!("install {target}"),
+    };
+    crate::ui::heading("pnl", &label);
+    let started = std::time::Instant::now();
+
+    // `@<version>` both checks out that git ref and asserts the resolved version.
+    install_one(root, &mut manifest, target, pinned_version, pinned_version)?;
+
+    crate::ui::summary(&format!(
+        "added 1 extension in {}",
+        crate::ui::elapsed(started.elapsed())
+    ));
+    Ok(())
+}
+
+/// Resolve a single install target and install it.
+///
+/// `git_ref` (when set) checks out that branch/tag for git sources. `expected_version`
+/// (when set) asserts the resolved package version — these differ for a lockfile
+/// restore, where the git ref stays on the source's branch but the version must
+/// still match what was locked.
+fn install_one(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    target: &str,
+    git_ref: Option<&str>,
+    expected_version: Option<&str>,
+) -> Result<()> {
+    // A bare package name (no scheme/slash, not a local package dir) is resolved
+    // against the configured repositories, e.g. `pnl install libusb`.
+    if is_bare_package_name(target)
+        && !absolutize(root, Path::new(target))
+            .join("pnlx.json")
+            .is_file()
+    {
+        return install_bare_name(root, manifest, target, git_ref, expected_version);
+    }
+
     match resolve_install_source(root, target)? {
         InstallSource::Local { path, source_url } => install_local_extension(
             root,
-            &mut manifest,
+            manifest,
             &path,
             ExtensionSource::File { source_url },
+            expected_version,
         ),
-        InstallSource::Git(source) => install_git_extension(root, &mut manifest, target, source),
+        InstallSource::Git(mut source) => {
+            // Pin the clone to the requested tag/branch.
+            if let Some(reference) = git_ref {
+                source.branch = Some(reference.to_owned());
+            }
+            install_git_extension(root, manifest, target, source, expected_version)
+        }
     }
+}
+
+/// Reinstall every extension recorded in the lockfile, pinned to its locked
+/// version. The per-extension content digest is verified against the lock, so a
+/// source whose content has drifted from the recorded sha256 aborts the install.
+fn restore_from_lock(root: &Path, manifest: &mut PnlManifest) -> Result<()> {
+    let lock = read_lock_for_current_platform(root)?;
+    if lock.extensions.is_empty() {
+        bail!(
+            "nothing to install: the lockfile has no extensions. Run `pnl install <source>` to add one."
+        );
+    }
+
+    let entries = lock
+        .extensions
+        .values()
+        .map(|extension| (extension.source.url.clone(), extension.version.clone()))
+        .collect::<Vec<_>>();
+
+    crate::ui::heading("pnl", "install (restore from lockfile)");
+    let started = std::time::Instant::now();
+    for (url, version) in &entries {
+        crate::ui::step(&format!("{url} ({version})"));
+        // Keep the source's branch; only assert the resolved version matches the lock.
+        install_one(root, manifest, url, None, Some(version))?;
+    }
+
+    crate::ui::summary(&format!(
+        "restored {} extension(s) in {}",
+        entries.len(),
+        crate::ui::elapsed(started.elapsed())
+    ));
+    Ok(())
+}
+
+/// A bare package leaf name (e.g. `libusb`, `libusb-1.0`) — no URL scheme,
+/// path separator, or `git@` host — to be resolved against the repositories.
+fn is_bare_package_name(target: &str) -> bool {
+    !target.is_empty()
+        && !target.contains("://")
+        && !target.contains('/')
+        && !target.contains('\\')
+        && !target.contains('@')
+        && target
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+}
+
+/// Resolve a bare package name by appending it to each configured repository URL
+/// and installing the first one that exists.
+fn install_bare_name(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    name: &str,
+    git_ref: Option<&str>,
+    expected_version: Option<&str>,
+) -> Result<()> {
+    let repositories = manifest.repositories.clone();
+    if repositories.is_empty() {
+        bail!(
+            "no repositories are configured to resolve package \"{name}\"; \
+             add one to \"repositories\" in pnl.json or install from a URL/path."
+        );
+    }
+
+    let mut failures = Vec::new();
+    for repository in &repositories {
+        let candidate = format!("{}/{name}", repository.url.trim_end_matches('/'));
+        crate::ui::step(&format!("resolving {name} from {}", repository.url));
+        match install_one(root, manifest, &candidate, git_ref, expected_version) {
+            Ok(()) => return Ok(()),
+            Err(error) => failures.push(format!("  - {}: {error}", repository.url)),
+        }
+    }
+
+    bail!(
+        "could not find package \"{name}\" in any configured repository:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Split a trailing `@<version>` pin off an install target. The version must
+/// start with a digit so host parts like `git@github.com` are left untouched.
+fn split_version_pin(target: &str) -> (&str, Option<&str>) {
+    if let Some((source, version)) = target.rsplit_once('@')
+        && !version.is_empty()
+        && version.starts_with(|ch: char| ch.is_ascii_digit())
+    {
+        return (source, Some(version));
+    }
+    (target, None)
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +209,7 @@ fn install_git_extension(
     manifest: &mut PnlManifest,
     target: &str,
     source: GitSource,
+    expected_version: Option<&str>,
 ) -> Result<()> {
     let installed = install_git_source(&source)?;
     let extension_root = installed.destination.join(&source.package_path);
@@ -84,6 +229,7 @@ fn install_git_extension(
             reference: installed.revision.clone(),
             dist_url: target.to_owned(),
         },
+        expected_version,
     )
 }
 
@@ -115,9 +261,11 @@ fn resolve_install_source(root: &Path, target: &str) -> Result<InstallSource> {
 }
 
 fn path_from_file_url(value: &str) -> Option<PathBuf> {
-    let path = value.strip_prefix("file://")?;
-    let path = path.strip_prefix("localhost").unwrap_or(path);
-    Some(PathBuf::from(path))
+    let url = url::Url::parse(value).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()
 }
 
 fn ensure_extension_source_path(path: &Path, original: &str) -> Result<()> {
@@ -133,11 +281,30 @@ fn install_local_extension(
     manifest: &mut PnlManifest,
     extension_root: &Path,
     source: ExtensionSource,
+    expected_version: Option<&str>,
 ) -> Result<()> {
     let extension = read_json::<PnlxManifest>(&extension_root.join("pnlx.json"))?;
     validate_schema_version(&extension.schema_version)?;
     validate_pnlx_manifest_values(&extension)?;
-    let installed_extension_root = install_extension_files(root, extension_root, &extension.name)?;
+
+    // Enforce an `@<version>` pin or a lockfile restore against the resolved version.
+    if let Some(expected) = expected_version
+        && extension.version != expected
+    {
+        bail!(
+            "expected {} version {expected}, but the resolved package is version {}",
+            extension.name,
+            extension.version
+        );
+    }
+
+    // Integrity signature: hash the package content and reject it if a prior
+    // lock pinned the same version to a different digest (tampered download).
+    let content_hash = tree_sha256(extension_root)?;
+    verify_locked_integrity(root, &extension, &content_hash)?;
+
+    let installed_extension_root =
+        install_extension_files(root, extension_root, &extension.name, &extension.version)?;
 
     manifest
         .extensions
@@ -155,13 +322,13 @@ fn install_local_extension(
     pathmap.generated_at = now();
 
     for (key, requirement) in &extension.requires {
-        let native = resolve_native_library(root, manifest, key, &requirement.library_names)?;
-        let header = resolve_header_for_native(
-            extension_root,
-            &native.path,
-            key,
-            &requirement.header_names,
-        )?;
+        let native = resolve_native_library(root, manifest, key, requirement)?;
+        crate::ui::success(&format!(
+            "resolved {key} {} {}",
+            native.version,
+            crate::ui::dim(&native.resolved_name)
+        ));
+        let header = resolve_header_for_native(extension_root, &native.path, key, requirement)?;
         let generation_headers =
             generation_headers_from_resolved_header(&header, &requirement.header_names);
         locked_requires.insert(
@@ -169,7 +336,6 @@ fn install_local_extension(
             LockedNativeLibrary {
                 name: native.resolved_name.clone(),
                 version: native.version.clone(),
-                path: native.path.clone(),
                 sha256: native.sha256.clone(),
             },
         );
@@ -192,7 +358,7 @@ fn install_local_extension(
         }
     }
 
-    let (source, dist) = source.lock_source(extension_root, &extension)?;
+    let (source, dist) = source.lock_source(&extension, &content_hash);
     lock.extensions.insert(
         extension.name.clone(),
         LockedExtension {
@@ -208,18 +374,14 @@ fn install_local_extension(
     write_json(&pnl_lock_path(root), &lock)?;
     write_pathmap(root, &pathmap)?;
     write_pnlx_autoload(root)?;
-    println!("installed extension {}", extension.name);
+    crate::ui::success(&format!("installed extension {}", extension.name));
     Ok(())
 }
 
 impl ExtensionSource {
-    fn lock_source(
-        &self,
-        extension_root: &Path,
-        extension: &PnlxManifest,
-    ) -> Result<(Source, Dist)> {
+    fn lock_source(&self, extension: &PnlxManifest, content_hash: &str) -> (Source, Dist) {
         match self {
-            Self::File { source_url } => Ok((
+            Self::File { source_url } => (
                 Source {
                     kind: RepositoryType::File,
                     url: source_url.clone(),
@@ -227,14 +389,14 @@ impl ExtensionSource {
                 },
                 Dist {
                     url: source_url.clone(),
-                    sha256: sha256_file(&extension_root.join("pnlx.json"))?,
+                    sha256: content_hash.to_owned(),
                 },
-            )),
+            ),
             Self::Git {
                 source_url,
                 reference,
                 dist_url,
-            } => Ok((
+            } => (
                 Source {
                     kind: RepositoryType::Git,
                     url: source_url.clone(),
@@ -242,16 +404,157 @@ impl ExtensionSource {
                 },
                 Dist {
                     url: dist_url.clone(),
-                    sha256: sha256_hex(format!("{source_url}:{reference}").as_bytes()),
+                    sha256: content_hash.to_owned(),
                 },
-            )),
+            ),
         }
     }
 }
 
+/// Reject an install whose content digest differs from a previously locked
+/// digest for the *same* version — the hallmark of tampered-with content. A new
+/// version is treated as a legitimate update and is allowed through.
+fn verify_locked_integrity(
+    root: &Path,
+    extension: &PnlxManifest,
+    content_hash: &str,
+) -> Result<()> {
+    let lock = read_lock_for_current_platform(root)?;
+    let Some(existing) = lock.extensions.get(&extension.name) else {
+        return Ok(());
+    };
+
+    if existing.version == extension.version && existing.dist.sha256 != content_hash {
+        bail!(
+            "integrity check failed for {name}: the content does not match the signature recorded in the lockfile.\n  \
+             expected sha256: {expected}\n  \
+             actual sha256:   {actual}\n\
+             The package content may have been modified or tampered with; aborting install.\n\
+             If this change is intentional, bump the version or remove the {name} entry from {lock} and reinstall.",
+            name = extension.name,
+            expected = existing.dist.sha256,
+            actual = content_hash,
+            lock = pnl_lock_path(root).display(),
+        );
+    }
+
+    crate::ui::success(&format!("verified {} integrity", extension.name));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InstallSource, path_from_file_url, resolve_install_source};
+    use super::super::package::tree_sha256;
+    use super::{InstallSource, path_from_file_url, resolve_install_source, split_version_pin};
+
+    #[test]
+    fn recognizes_bare_package_names() {
+        use super::is_bare_package_name;
+        assert!(is_bare_package_name("libusb"));
+        assert!(is_bare_package_name("libusb-1.0"));
+        assert!(!is_bare_package_name("vendor/pkg"));
+        assert!(!is_bare_package_name("./pkg"));
+        assert!(!is_bare_package_name("https://example.com/pkg"));
+        assert!(!is_bare_package_name("git@github.com:o/r.git"));
+        assert!(!is_bare_package_name(""));
+    }
+
+    #[test]
+    fn splits_trailing_version_pin_but_not_host_at() {
+        assert_eq!(
+            split_version_pin("https://github.com/o/libsdl@2.32.10"),
+            ("https://github.com/o/libsdl", Some("2.32.10"))
+        );
+        assert_eq!(
+            split_version_pin("git@github.com:o/repo@1.2.3"),
+            ("git@github.com:o/repo", Some("1.2.3"))
+        );
+        // A bare scp host must not be mistaken for a version pin.
+        assert_eq!(
+            split_version_pin("git@github.com:o/repo.git"),
+            ("git@github.com:o/repo.git", None)
+        );
+        assert_eq!(split_version_pin("/local/path"), ("/local/path", None));
+        assert_eq!(split_version_pin("./pkg"), ("./pkg", None));
+    }
+
+    #[test]
+    fn tree_hash_is_deterministic_and_content_sensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.txt"), "beta").unwrap();
+
+        let baseline = tree_sha256(dir.path()).unwrap();
+        assert_eq!(baseline, tree_sha256(dir.path()).unwrap());
+
+        std::fs::write(dir.path().join("sub").join("b.txt"), "BETA").unwrap();
+        assert_ne!(baseline, tree_sha256(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn integrity_check_rejects_tampered_same_version() {
+        use super::verify_locked_integrity;
+        use crate::manifest::{Dist, LockedExtension, PnlLock, PnlxManifest, Source};
+        use crate::platform::current_platform;
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked_hash = "a".repeat(64);
+        let mut lock = PnlLock::empty(current_platform());
+        lock.extensions.insert(
+            "vendor/example".to_owned(),
+            LockedExtension {
+                version: "1.0.0".to_owned(),
+                constraint: "=1.0.0".to_owned(),
+                source: Source {
+                    kind: crate::manifest::RepositoryType::File,
+                    url: "file:///pkg".to_owned(),
+                    reference: "1.0.0".to_owned(),
+                },
+                dist: Dist {
+                    url: "file:///pkg".to_owned(),
+                    sha256: locked_hash.clone(),
+                },
+                dependencies: BTreeMap::new(),
+                requires: BTreeMap::new(),
+            },
+        );
+        let lock_path = dir.path().join("@pnlx").join("pnlx-lock.json");
+        crate::io::write_json(&lock_path, &lock).unwrap();
+
+        let mut extension = PnlxManifest {
+            name: "vendor/example".to_owned(),
+            version: "1.0.0".to_owned(),
+            ..PnlxManifest::default()
+        };
+
+        // Same version + matching digest is fine.
+        assert!(verify_locked_integrity(dir.path(), &extension, &locked_hash).is_ok());
+        // Same version + different digest is a tamper and must be rejected.
+        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64)).is_err());
+        // A new version is a legitimate update and is allowed through.
+        extension.version = "2.0.0".to_owned();
+        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn tree_hash_ignores_generated_and_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pnlx.json"), "{}").unwrap();
+        let baseline = tree_sha256(dir.path()).unwrap();
+
+        std::fs::create_dir_all(dir.path().join("src").join("generated")).unwrap();
+        std::fs::write(
+            dir.path().join("src").join("generated").join("x.php"),
+            "<?php",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), "ref: x").unwrap();
+
+        assert_eq!(baseline, tree_sha256(dir.path()).unwrap());
+    }
 
     #[test]
     fn resolves_absolute_file_url_as_local_install_source() {

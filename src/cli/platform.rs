@@ -92,12 +92,11 @@ fn generated_host() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .or_else(|| {
-            Command::new("hostname")
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-                .filter(|value| !value.is_empty())
+            let host = gethostname::gethostname()
+                .to_string_lossy()
+                .trim()
+                .to_owned();
+            (!host.is_empty()).then_some(host)
         })
         .unwrap_or_else(|| "unknown".to_owned())
 }

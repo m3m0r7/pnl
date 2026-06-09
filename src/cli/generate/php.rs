@@ -43,19 +43,28 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             continue;
         }
 
-        out.push_str("    if (!function_exists('");
+        // Functions live under `namespace Pnlx\Func\<Class>`, so `function_exists`
+        // must be given the fully-qualified name (an unqualified string would test
+        // the global namespace instead).
+        out.push_str("if (!function_exists('Pnlx\\\\Func\\\\");
+        out.push_str(options.class_name);
+        out.push_str("\\\\");
         out.push_str(&signature.name);
         out.push_str("')) {\n");
-        out.push_str("        function ");
+        out.push_str("    function ");
         out.push_str(&signature.name);
         out.push('(');
         out.push_str(&php_params(&signature.params));
         out.push_str("): ");
         out.push_str(php_return_type(&signature.return_type));
-        out.push_str("\n        {\n");
-        out.push_str(&php_global_function_body(&signature.return_type, &variable));
-        out.push_str("        }\n");
-        out.push_str("    }\n\n");
+        out.push_str("\n    {\n");
+        out.push_str(&php_global_function_body(
+            &signature.return_type,
+            &variable,
+            &signature.name,
+        ));
+        out.push_str("    }\n");
+        out.push_str("}\n\n");
     }
     out
 }
@@ -84,7 +93,7 @@ fn php_method_body(c_type: &str) -> String {
     if c_type == "void" {
         "        $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
     } else if is_char_pointer(&c_type) {
-        "        return $this->runtime->utilities()->cString($this->__call(__FUNCTION__, func_get_args()));\n"
+        "        return \\Pnlx\\Util::cString($this->__call(__FUNCTION__, func_get_args()));\n"
             .to_owned()
     } else if php_return_type(&c_type) == "int" {
         "        return (int) $this->__call(__FUNCTION__, func_get_args());\n".to_owned()
@@ -95,12 +104,12 @@ fn php_method_body(c_type: &str) -> String {
     }
 }
 
-fn php_global_function_body(c_type: &str, variable: &str) -> String {
+fn php_global_function_body(c_type: &str, variable: &str, name: &str) -> String {
+    // Emit the literal method name; `__FUNCTION__` would expand to the
+    // namespaced `Pnlx\Func\<name>` and would not resolve as a method.
     if normalize_c_type(c_type) == "void" {
-        format!("            $GLOBALS['{variable}']->{{__FUNCTION__}}(...func_get_args());\n")
+        format!("        $GLOBALS['{variable}']->{{'{name}'}}(...func_get_args());\n")
     } else {
-        format!(
-            "            return $GLOBALS['{variable}']->{{__FUNCTION__}}(...func_get_args());\n"
-        )
+        format!("        return $GLOBALS['{variable}']->{{'{name}'}}(...func_get_args());\n")
     }
 }

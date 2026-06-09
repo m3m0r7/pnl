@@ -1,0 +1,20 @@
+---
+source: src/cli/generate.rs
+expression: render_aliases(&sample_signatures())
+---
+    'DemoAdd' => 'pnlx_bridge_demo_add',
+    'DemoLog' => 'pnlx_bridge_demo_log',
+    'DemoName' => 'pnlx_bridge_demo_name',
+    'DemoScale' => 'pnlx_bridge_demo_scale',
+    'demoAdd' => 'pnlx_bridge_demo_add',
+    'demoLog' => 'pnlx_bridge_demo_log',
+    'demoName' => 'pnlx_bridge_demo_name',
+    'demoScale' => 'pnlx_bridge_demo_scale',
+    'demo_add' => 'pnlx_bridge_demo_add',
+    'demo_log' => 'pnlx_bridge_demo_log',
+    'demo_name' => 'pnlx_bridge_demo_name',
+    'demo_scale' => 'pnlx_bridge_demo_scale',
+    'demoadd' => 'pnlx_bridge_demo_add',
+    'demolog' => 'pnlx_bridge_demo_log',
+    'demoname' => 'pnlx_bridge_demo_name',
+    'demoscale' => 'pnlx_bridge_demo_scale',

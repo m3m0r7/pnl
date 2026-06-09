@@ -7,8 +7,20 @@ namespace Pnlx\FFI;
 use FFI;
 use Pnlx\Exception\FFIUnavailableException;
 
+/**
+ * Guards that the PHP FFI runtime needed to load native bridges is present.
+ *
+ * Invoked early (via {@see \Pnlx\Verifier::shouldEnabledFFI()} from
+ * {@see \Pnlx\Runtime}) so the SDK fails fast with a clear message instead of a
+ * fatal error deep inside an FFI call.
+ */
 class FFIVerifier
 {
+    /**
+     * Assert that the FFI extension is loaded and not disabled via `ffi.enable=0`.
+     *
+     * @throws FFIUnavailableException When FFI is missing or disabled.
+     */
     public function shouldBeEnabled(): void
     {
         if (!class_exists(FFI::class)) {

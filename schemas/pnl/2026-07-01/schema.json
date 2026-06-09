@@ -36,8 +36,12 @@
             },
             "uniqueItems": true
           },
-          "enables": {
-            "$ref": "#/components/schemas/enables"
+          "output_dir": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "$ref": "#/components/schemas/features"
           },
           "extensions": {
             "type": "object",
@@ -50,7 +54,7 @@
           }
         }
       },
-      "enables": {
+      "features": {
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -72,7 +76,7 @@
       },
       "versionConstraint": {
         "type": "string",
-        "pattern": "^(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?(?:\\s+(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)*$"
+        "pattern": "^\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*(?:\\s*[&|]\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*)*\\s*$"
       },
       "repository": {
         "type": "object",

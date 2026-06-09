@@ -6,34 +6,32 @@ namespace Pnlx;
 
 use FFI;
 use FFI\CData;
-use Throwable;
 
+/**
+ * Static helpers for working with FFI values returned by native bridges.
+ *
+ * Used by generated extension code to convert C string pointers to PHP strings.
+ * The null-pointer check lives as a function instead — see
+ * {@see \Pnlx\Util\is_null()} in Util/functions.php.
+ */
 class Util
 {
-    public function cString(mixed $value): string
+    /**
+     * Convert a value to a PHP string, dereferencing FFI C string pointers.
+     *
+     * @param mixed $value Either a PHP string (returned as-is) or an {@see CData} pointer.
+     * @throws \InvalidArgumentException When the value is neither a string nor a CData pointer.
+     */
+    public static function cString(mixed $value): string
     {
-        return self::toString($value);
-    }
-
-    public static function toString(mixed $value): string
-    {
-        return is_string($value) ? $value : FFI::string($value);
-    }
-
-    public static function isNull(mixed $value): bool
-    {
-        if ($value === null) {
-            return true;
+        if (is_string($value)) {
+            return $value;
         }
 
         if (!$value instanceof CData) {
-            return false;
+            throw new \InvalidArgumentException('Value must be a string or FFI\CData pointer.');
         }
 
-        try {
-            return FFI::isNull($value);
-        } catch (Throwable) {
-            return false;
-        }
+        return FFI::string($value);
     }
 }

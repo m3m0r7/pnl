@@ -1,12 +1,17 @@
 pub mod commands;
+pub mod fetch;
 pub mod generate;
 pub mod git_source;
 pub mod header_adapter;
+pub mod interaction;
 pub mod io;
 pub mod manifest;
 pub mod platform;
 pub mod schema;
+pub mod ui;
 pub mod validate;
+pub mod version;
+pub mod workspace;
 
 pub const SCHEMA_VERSION: &str = "2026-07-01";
 
@@ -76,19 +81,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_scp_like_git_source_with_unusual_host() {
-        let source = GitSource::parse("git@git@github.com:xxxxx/zzzzz/path/to/").unwrap();
-        assert_eq!(source.url, "git@git@github.com:xxxxx/zzzzz.git");
-        assert_eq!(source.package_name(), "xxxxx/zzzzz");
-        assert_eq!(source.branch, None);
-        assert_eq!(source.package_path, std::path::PathBuf::from("path/to"));
+    fn rejects_malformed_scp_like_git_source() {
+        // A doubled `git@git@…` user component is not a valid scp-like git URL.
+        assert!(GitSource::parse("git@git@github.com:xxxxx/zzzzz/path/to/").is_err());
     }
 
     #[test]
     fn parses_scp_like_git_source_root_repository() {
-        let source = GitSource::parse("git@github.com:sunng87/handlebars-rust.git").unwrap();
-        assert_eq!(source.url, "git@github.com:sunng87/handlebars-rust.git");
-        assert_eq!(source.package_name(), "sunng87/handlebars-rust");
+        let source = GitSource::parse("git@github.com:m3m0r7/pnl-packages.git").unwrap();
+        assert_eq!(source.url, "git@github.com:m3m0r7/pnl-packages.git");
+        assert_eq!(source.package_name(), "m3m0r7/pnl-packages");
         assert_eq!(source.branch, None);
         assert!(source.package_path.as_os_str().is_empty());
     }
@@ -118,8 +120,89 @@ mod tests {
     }
 
     #[test]
+    fn parses_gitlab_tree_source_with_package_subpath() {
+        let source =
+            GitSource::parse("https://gitlab.com/group/project/-/tree/main/packages/libusb")
+                .unwrap();
+        assert_eq!(source.url, "https://gitlab.com/group/project.git");
+        assert_eq!(source.package_name(), "group/project");
+        assert_eq!(source.branch.as_deref(), Some("main"));
+        assert_eq!(
+            source.package_path,
+            std::path::PathBuf::from("packages/libusb")
+        );
+    }
+
+    #[test]
+    fn parses_gitlab_root_source() {
+        let source = GitSource::parse("https://gitlab.com/group/project").unwrap();
+        assert_eq!(source.url, "https://gitlab.com/group/project.git");
+        assert_eq!(source.branch, None);
+        assert!(source.package_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn parses_bitbucket_src_source_with_package_subpath() {
+        let source =
+            GitSource::parse("https://bitbucket.org/team/repo/src/develop/packages/lib").unwrap();
+        assert_eq!(source.url, "https://bitbucket.org/team/repo.git");
+        assert_eq!(source.package_name(), "team/repo");
+        assert_eq!(source.branch.as_deref(), Some("develop"));
+        assert_eq!(
+            source.package_path,
+            std::path::PathBuf::from("packages/lib")
+        );
+    }
+
+    #[test]
+    fn parses_unknown_host_web_url_as_generic() {
+        let source = GitSource::parse("https://git.example.test/vendor/native-ext").unwrap();
+        assert_eq!(source.url, "https://git.example.test/vendor/native-ext.git");
+        assert_eq!(source.package_name(), "vendor/native-ext");
+        assert_eq!(source.branch, None);
+
+        let with_subpath =
+            GitSource::parse("https://git.example.test/vendor/native-ext/packages/lib").unwrap();
+        assert_eq!(
+            with_subpath.package_path,
+            std::path::PathBuf::from("packages/lib")
+        );
+    }
+
+    #[test]
     fn default_pnlx_manifest_has_schema_version() {
         assert_eq!(PnlxManifest::default().schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn parses_plain_and_virtual_library_names() {
+        use crate::manifest::LibraryName;
+        let names: Vec<LibraryName> = serde_json::from_str(
+            r#"["libusb-1.0.dylib", {"name": "libc.dylib", "virtual": true}, {"name": "x.so"}]"#,
+        )
+        .unwrap();
+        assert_eq!(names[0].name(), "libusb-1.0.dylib");
+        assert!(!names[0].is_virtual());
+        assert_eq!(names[1].name(), "libc.dylib");
+        assert!(names[1].is_virtual());
+        // The object form without `virtual` defaults to non-virtual.
+        assert_eq!(names[2].name(), "x.so");
+        assert!(!names[2].is_virtual());
+        // A plain string round-trips back to a JSON string, not an object.
+        assert_eq!(
+            serde_json::to_string(&names[0]).unwrap(),
+            "\"libusb-1.0.dylib\""
+        );
+    }
+
+    #[test]
+    fn default_pnl_manifest_ships_packages_repository() {
+        use crate::manifest::{PnlManifest, RepositoryType};
+        let manifest = PnlManifest::default();
+        assert_eq!(manifest.repositories.len(), 1);
+        assert_eq!(manifest.repositories[0].kind, RepositoryType::Git);
+        assert!(manifest.repositories[0].url.contains("pnl-packages"));
+        assert!(!manifest.features.use_functions);
     }
 
     #[test]
@@ -134,20 +217,25 @@ mod tests {
         validate_semver("1.2.3").unwrap();
         validate_semver("1.2.3-alpha.1").unwrap();
         validate_semver("1.2.3+build.1").unwrap();
-        assert!(validate_semver("1.2").is_err());
+        // Real C libraries omit the patch (74.2) or use a bare date (20190702).
+        validate_semver("1.5").unwrap();
+        validate_semver("74.2").unwrap();
+        validate_semver("20190702").unwrap();
         assert!(validate_semver("1.2.x").is_err());
         assert!(validate_semver("1.2.3-").is_err());
+        assert!(validate_semver("").is_err());
     }
 
     #[test]
     fn validates_version_constraints() {
         validate_version_constraint("1.2.3").unwrap();
         validate_version_constraint("=1.2.3").unwrap();
-        validate_version_constraint(">=1.2.0 <2.0.0").unwrap();
+        validate_version_constraint(">=1.2.0 & <2.0.0").unwrap();
+        validate_version_constraint(">=1.2.0 & <2.0.0 | >=3.0.0").unwrap();
         validate_version_constraint("^1.2.3").unwrap();
         validate_version_constraint("~1.2.3").unwrap();
         assert!(validate_version_constraint("").is_err());
-        assert!(validate_version_constraint(" >=1.2.3").is_err());
+        assert!(validate_version_constraint(">=1.2.0 <2.0.0").is_err());
         assert!(validate_version_constraint(">=1.2").is_err());
     }
 

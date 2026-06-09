@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use crate::interaction::Interaction;
 use crate::io::{read_json, read_or_default, write_json, write_json_if_missing};
 use crate::manifest::{PnlLock, PnlManifest, PnlxPathmap, Repository, RepositoryType};
 use crate::validate::{ensure_platform_matches, validate_pnl_workspace};
@@ -16,13 +17,17 @@ mod package;
 pub(crate) use bridge::build_installed_bridges;
 
 use install::install;
-use package::{installed_extension_dir, pnl_lock_path, pnlx_pathmap_path, write_pnlx_autoload};
+use package::{installed_package_dir, pnl_lock_path, pnlx_pathmap_path, write_pnlx_autoload};
 
 #[derive(Debug, Parser)]
 #[command(name = "pnl")]
 #[command(about = "Manage PHP native-library extensions")]
 #[command(version)]
 struct Cli {
+    /// Do not ask interactive questions; accept the default answer for each prompt.
+    #[arg(short = 'n', long, global = true)]
+    no_interaction: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -83,11 +88,12 @@ enum RepoKind {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    let interaction = Interaction::new(cli.no_interaction);
     match cli.command {
         Command::Init => init_pnl(Path::new(".")),
         Command::Install { target } => install(Path::new("."), target.as_deref()),
         Command::Update { package } => update(Path::new("."), package.as_deref()),
-        Command::Uninstall { package } => uninstall(Path::new("."), &package),
+        Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),
         Command::Repo { command } => repo(Path::new("."), command),
         Command::Validate => validate_pnl_workspace(Path::new(".")),
@@ -102,7 +108,7 @@ pub fn run() -> Result<()> {
 fn init_pnl(root: &Path) -> Result<()> {
     let manifest_path = root.join("pnl.json");
     write_json_if_missing(&manifest_path, &PnlManifest::default())?;
-    println!("initialized {}", manifest_path.display());
+    crate::ui::success(&format!("initialized {}", manifest_path.display()));
     Ok(())
 }
 
@@ -126,8 +132,15 @@ fn update(root: &Path, package: Option<&str>) -> Result<()> {
     }
 }
 
-fn uninstall(root: &Path, package: &str) -> Result<()> {
+fn uninstall(root: &Path, package: &str, interaction: Interaction) -> Result<()> {
     let mut manifest = read_json::<PnlManifest>(&root.join("pnl.json"))?;
+    if !manifest.extensions.contains_key(package) {
+        bail!("{package} is not installed");
+    }
+    if !interaction.confirm(&format!("Remove extension {package}?"), true)? {
+        crate::ui::warn("aborted");
+        return Ok(());
+    }
     manifest.extensions.remove(package);
     write_json(&root.join("pnl.json"), &manifest)?;
 
@@ -140,14 +153,14 @@ fn uninstall(root: &Path, package: &str) -> Result<()> {
         write_json(&lock_path, &lock)?;
     }
 
-    let install_dir = installed_extension_dir(root, package);
+    let install_dir = installed_package_dir(root, package);
     if install_dir.exists() {
         fs::remove_dir_all(&install_dir)
             .with_context(|| format!("failed to remove {}", install_dir.display()))?;
     }
 
     write_pnlx_autoload(root)?;
-    println!("uninstalled {package}");
+    crate::ui::summary(&format!("removed {package}"));
     Ok(())
 }
 

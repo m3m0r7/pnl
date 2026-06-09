@@ -1,0 +1,31 @@
+---
+source: src/cli/generate.rs
+expression: render_global_functions(&sample_options(&signatures))
+---
+if (!function_exists('Pnlx\\Func\\Demo\\demo_name')) {
+    function demo_name(): string
+    {
+        return $GLOBALS['runtime_afd48edc8ebb6044ac204b321679e7d05a321b511df2be292ee963592757625f']->{'demo_name'}(...func_get_args());
+    }
+}
+
+if (!function_exists('Pnlx\\Func\\Demo\\demo_add')) {
+    function demo_add(int $left, int $right): int
+    {
+        return $GLOBALS['runtime_afd48edc8ebb6044ac204b321679e7d05a321b511df2be292ee963592757625f']->{'demo_add'}(...func_get_args());
+    }
+}
+
+if (!function_exists('Pnlx\\Func\\Demo\\demo_log')) {
+    function demo_log(string|\FFI\CData|null $message): void
+    {
+        $GLOBALS['runtime_afd48edc8ebb6044ac204b321679e7d05a321b511df2be292ee963592757625f']->{'demo_log'}(...func_get_args());
+    }
+}
+
+if (!function_exists('Pnlx\\Func\\Demo\\demo_scale')) {
+    function demo_scale(float $value, int $factor): float
+    {
+        return $GLOBALS['runtime_afd48edc8ebb6044ac204b321679e7d05a321b511df2be292ee963592757625f']->{'demo_scale'}(...func_get_args());
+    }
+}

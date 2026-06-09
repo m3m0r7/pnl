@@ -6,9 +6,19 @@ namespace Pnlx;
 
 use Pnlx\Exception\ExtensionLoadException;
 
+/**
+ * Discovers installed extensions on disk and exposes them as definitions.
+ *
+ * Given an extension class name, it walks every candidate root (project root,
+ * installed packages under the configured output dir, and `file` repositories
+ * declared in `pnl.json`), reads each `pnlx.json` via the
+ * {@see WorkspaceRepositoryInterface}, and returns the matching
+ * {@see ExtensionDefinition}. Resolved definitions are memoised. Collaborates
+ * with {@see Runtime} which uses it to load entrypoints and native bridges.
+ */
 class ExtensionRegistry implements ExtensionRegistryInterface
 {
-    /** @var array<string, ExtensionDefinition> */
+    /** @var array<string, ExtensionDefinition> Resolved definitions keyed by requested class name. */
     private array $definitions = [];
 
     public function __construct(
@@ -17,6 +27,11 @@ class ExtensionRegistry implements ExtensionRegistryInterface
     ) {
     }
 
+    /**
+     * Resolve the installed extension whose manifest declares the given class.
+     *
+     * @throws ExtensionLoadException When no candidate root contains a matching manifest.
+     */
     public function definition(string $class): ExtensionDefinition
     {
         if (isset($this->definitions[$class])) {
@@ -43,6 +58,11 @@ class ExtensionRegistry implements ExtensionRegistryInterface
         throw new ExtensionLoadException(sprintf('Extension class %s is not installed.', $class));
     }
 
+    /**
+     * Include the extension's entrypoint file so its generated classes are defined.
+     *
+     * @throws ExtensionLoadException When the manifest lacks an `entrypoint` or it does not exist on disk.
+     */
     public function loadEntrypoint(string $class): void
     {
         $definition = $this->definition($class);
@@ -61,7 +81,13 @@ class ExtensionRegistry implements ExtensionRegistryInterface
     }
 
     /**
-     * @return list<string>
+     * Collect every directory that may contain an extension manifest, in priority order.
+     *
+     * Order matters: the project root and installed packages are scanned first
+     * (installed packages are authoritative at runtime), then `file` repository
+     * roots act as a fallback. Results are de-duplicated by realpath.
+     *
+     * @return list<string> Unique, existing absolute directory paths.
      */
     private function candidateExtensionRoots(): array
     {
@@ -71,12 +97,20 @@ class ExtensionRegistry implements ExtensionRegistryInterface
         }
 
         // Installed packages are authoritative at runtime; repository roots are only a fallback.
-        foreach (glob($this->config->projectRoot() . '/@pnlx/packages/*/*/' . $this->config->pnlxManifestFile()) ?: [] as $manifestPath) {
+        // Layout: <output>/packages/<vendor>/<package>/<version>/pnlx.json.
+        $packagesGlob = $this->config->projectRoot() . '/' . $this->config->outputDir()
+            . '/packages/*/*/*/' . $this->config->pnlxManifestFile();
+        foreach (glob($packagesGlob) ?: [] as $manifestPath) {
             $roots[] = dirname($manifestPath);
         }
 
         $manifest = $this->repository->pnlManifest();
-        foreach (($manifest['repositories'] ?? []) as $repository) {
+        $repositories = $manifest['repositories'] ?? [];
+        if (!is_array($repositories)) {
+            $repositories = [];
+        }
+
+        foreach ($repositories as $repository) {
             if (!is_array($repository) || ($repository['type'] ?? null) !== 'file') {
                 continue;
             }
@@ -93,6 +127,7 @@ class ExtensionRegistry implements ExtensionRegistryInterface
             }
         }
 
+        // De-duplicate by realpath so the same root reached via different paths is scanned once.
         $normalized = [];
         foreach ($roots as $root) {
             $realpath = realpath($root);
@@ -105,7 +140,13 @@ class ExtensionRegistry implements ExtensionRegistryInterface
     }
 
     /**
+     * Derive the effective extension class name from a manifest.
+     *
+     * Applies the optional `class_prefix` to the final segment of the namespaced
+     * `class`, so e.g. prefix `My` turns `Vendor\Pkg\Thing` into `Vendor\Pkg\MyThing`.
+     *
      * @param array<string, mixed> $manifest
+     * @throws ExtensionLoadException When the manifest is missing a string `class`.
      */
     private function manifestClass(array $manifest): string
     {
@@ -130,6 +171,11 @@ class ExtensionRegistry implements ExtensionRegistryInterface
         return substr($class, 0, $separator + 1) . $prefix . substr($class, $separator + 1);
     }
 
+    /**
+     * Resolve a possibly-relative repository path against the project root.
+     *
+     * Empty paths fall back to the project root; absolute paths are returned as-is.
+     */
     private function absolutePath(string $path): string
     {
         if ($path === '') {

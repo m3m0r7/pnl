@@ -17,12 +17,35 @@ path = "src/cli/bin/pnlx.rs"
 [dependencies]
 anyhow = "1.0.100"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+clang = { version = "2.0.0", features = ["clang_10_0", "runtime"] }
 clap = { version = "4.5.53", features = ["derive"] }
+gethostname = "1.1.0"
+git-url-parse = "0.6.0"
 handlebars = "6.3.2"
+include_dir = "0.7.4"
 jsonschema = { version = "0.18", default-features = false, features = ["draft201909"] }
+semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+suppaftp = "8.0.4"
+ureq = "3.3.0"
+url = "2.5.8"
+
+# git2 is split by target: on Unix we vendor OpenSSL + libgit2 for a
+# self-contained binary; on Windows OpenSSL is painful to build, so we vendor
+# only libgit2 and let it use the native WinHTTP transport for HTTPS.
+[target.'cfg(not(target_os = "windows"))'.dependencies.git2]
+version = "0.21.0"
+default-features = false
+features = ["https", "ssh", "vendored-libgit2", "vendored-openssl"]
+
+[target.'cfg(target_os = "windows")'.dependencies.git2]
+version = "0.21.0"
+default-features = false
+# `cred` (no OpenSSL) keeps Cred::credential_helper available for HTTPS auth.
+features = ["vendored-libgit2", "cred"]
 
 [dev-dependencies]
+insta = "1.47.2"
 tempfile = "3.23.0"

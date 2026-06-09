@@ -13,7 +13,9 @@ pub(super) fn resolve_headers_from_pathmap(
     let Some(project_root) = find_project_root(root) else {
         return Ok(None);
     };
-    let pathmap = read_json::<PnlxPathmap>(&project_root.join("@pnlx").join("pnlx-pathmap.json"))?;
+    let pathmap = read_json::<PnlxPathmap>(
+        &crate::workspace::workspace_dir(&project_root).join("pnlx-pathmap.json"),
+    )?;
     let Some(header) = pathmap.headers.get(library_key) else {
         return Ok(None);
     };
@@ -117,10 +119,10 @@ pub(super) fn sanitize_artifact_stem(value: &str) -> String {
 
 pub(super) fn symbol_prefix_from_library_key(value: &str) -> String {
     let mut prefix = value;
-    if let Some((head, tail)) = value.rsplit_once('-') {
-        if tail.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
-            prefix = head;
-        }
+    if let Some((head, tail)) = value.rsplit_once('-')
+        && tail.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+    {
+        prefix = head;
     }
 
     prefix
@@ -140,7 +142,10 @@ pub(super) fn symbol_prefix_from_library_key(value: &str) -> String {
 fn find_project_root(root: &Path) -> Option<PathBuf> {
     let mut current = std::fs::canonicalize(root).ok()?;
     loop {
-        if current.join("@pnlx").join("pnlx-pathmap.json").is_file() {
+        if crate::workspace::workspace_dir(&current)
+            .join("pnlx-pathmap.json")
+            .is_file()
+        {
             return Some(current);
         }
         if !current.pop() {

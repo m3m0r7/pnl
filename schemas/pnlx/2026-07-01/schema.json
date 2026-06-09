@@ -102,7 +102,7 @@
       },
       "semver": {
         "type": "string",
-        "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        "pattern": "^[0-9]+(?:\\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.-]+)?$"
       },
       "sha256": {
         "type": "string",
@@ -110,7 +110,7 @@
       },
       "versionConstraint": {
         "type": "string",
-        "pattern": "^(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?(?:\\s+(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)*$"
+        "pattern": "^\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*(?:\\s*[&|]\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*)*\\s*$"
       },
       "header": {
         "type": "object",
@@ -192,8 +192,28 @@
           "library_names": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "virtual": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              ]
             },
             "minItems": 1,
             "uniqueItems": true
@@ -208,7 +228,19 @@
           },
           "symbol_prefix": {
             "type": "string",
-            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            "pattern": "^([A-Za-z_][A-Za-z0-9_]*)?$"
+          },
+          "library_url": {
+            "type": "string",
+            "minLength": 1
+          },
+          "header_url": {
+            "type": "string",
+            "minLength": 1
+          },
+          "header_inline": {
+            "type": "string",
+            "minLength": 1
           },
           "version": {
             "$ref": "#/components/schemas/versionConstraint"

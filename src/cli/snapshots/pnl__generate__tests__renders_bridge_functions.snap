@@ -1,0 +1,33 @@
+---
+source: src/cli/generate.rs
+expression: render_bridge_functions(&sample_signatures())
+---
+mod native {
+    use super::*;
+    unsafe extern "C" {
+        pub fn demo_name() -> *mut c_char;
+        pub fn demo_add(left: c_int, right: c_int) -> c_int;
+        pub fn demo_log(message: *mut c_char);
+        pub fn demo_scale(value: c_double, factor: c_int) -> c_double;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pnlx_bridge_demo_name() -> *mut c_char {
+    unsafe { native::demo_name() }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pnlx_bridge_demo_add(left: c_int, right: c_int) -> c_int {
+    unsafe { native::demo_add(left, right) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pnlx_bridge_demo_log(message: *mut c_char) {
+    unsafe { native::demo_log(message) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pnlx_bridge_demo_scale(value: c_double, factor: c_int) -> c_double {
+    unsafe { native::demo_scale(value, factor) }
+}

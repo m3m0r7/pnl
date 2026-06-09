@@ -2,27 +2,18 @@
   "schema_version": "2026-07-01",
   "repositories": [
     {
-      "type": "file",
-      "url": "file://packages"
+      "type": "git",
+      "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages"
     }
   ],
-  "load_paths": [
-    "/opt/homebrew/lib"
-  ],
-  "enables": {
-    "use_functions": true
+  "load_paths": [],
+  "output_dir": "@pnlx",
+  "features": {
+    "use_functions": false
   },
   "extensions": {
-    "libnfc/libnfc": {
-      "version": "=1.8.0",
-      "required": true
-    },
-    "libsdl/libsdl": {
-      "version": "=2.32.10",
-      "required": true
-    },
-    "libusb/libusb": {
-      "version": ">=1.0.0 <2.0.0",
+    "libc/libc": {
+      "version": "=1.0.0",
       "required": true
     }
   }

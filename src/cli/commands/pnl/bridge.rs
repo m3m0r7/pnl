@@ -8,8 +8,7 @@ use crate::io::{read_json, write_json};
 use crate::manifest::{PnlLock, PnlxManifest, ResolvedBridge, ResolvedNativeLibrary};
 use crate::platform::now;
 use crate::validate::{
-    ensure_platform_matches, sanitize_package_segment, validate_pnlx_manifest_values,
-    validate_schema_version,
+    ensure_platform_matches, validate_pnlx_manifest_values, validate_schema_version,
 };
 
 use super::native::key_without_version;
@@ -31,7 +30,12 @@ pub(crate) fn build_installed_bridges(root: &Path, packages: &[String]) -> Resul
     let mut built = 0usize;
 
     for package in packages {
-        let extension_root = installed_extension_dir(root, &package);
+        let version = &lock
+            .extensions
+            .get(&package)
+            .with_context(|| format!("{package} is not in the lockfile; run pnl install first"))?
+            .version;
+        let extension_root = installed_extension_dir(root, &package, version);
         let manifest_path = extension_root.join("pnlx.json");
         if !manifest_path.is_file() {
             bail!(
@@ -66,7 +70,7 @@ pub(crate) fn build_installed_bridges(root: &Path, packages: &[String]) -> Resul
 
     pathmap.generated_at = now();
     write_json(&pnlx_pathmap_path(root), &pathmap)?;
-    println!("built {built} bridge(s)");
+    crate::ui::summary(&format!("built {built} bridge(s)"));
     Ok(())
 }
 
@@ -80,14 +84,10 @@ pub(super) fn compile_bridge_for_library(
         Some(path) => path,
         None => return Ok(None),
     };
-    let bridge_dir = root
-        .join("@pnlx")
-        .join("bridges")
-        .join(sanitize_package_segment(library_key)?);
-    if bridge_dir.exists() {
-        fs::remove_dir_all(&bridge_dir)
-            .with_context(|| format!("failed to remove {}", bridge_dir.display()))?;
-    }
+    // Bridge artifacts live inside the installed package version directory; a
+    // fresh install wipes that directory first, so we never need to clear it
+    // here (which would also break packages that build several bridges).
+    let bridge_dir = extension_root.join("bridge");
     fs::create_dir_all(&bridge_dir)
         .with_context(|| format!("failed to create {}", bridge_dir.display()))?;
 
@@ -130,19 +130,29 @@ fn compile_bridge(
 
     let library = bridge_dir.join(bridge_library_file(library_key));
     let native_path = Path::new(&native.path);
-    let native_dir = native_path
-        .parent()
-        .with_context(|| format!("native library has no parent directory: {}", native.path))?;
     let mut command = ProcessCommand::new("rustc");
-    command
-        .arg("--crate-type")
-        .arg("cdylib")
-        .arg(&crate_source)
-        .arg("-L")
-        .arg(format!("native={}", native_dir.display()))
-        .arg("-l")
-        .arg(format!("dylib={}", native_link_name(native_path)));
-    add_native_rpath(&mut command, native_dir);
+    command.arg("--crate-type").arg("cdylib").arg(&crate_source);
+    // A bare file name (no directory) is a virtual/system library (e.g. libc):
+    // link it by name and let the linker find it in the default search path,
+    // with no `-L` directory or rpath.
+    match native_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(native_dir) => {
+            command
+                .arg("-L")
+                .arg(format!("native={}", native_dir.display()))
+                .arg("-l")
+                .arg(format!("dylib={}", native_link_name(native_path)));
+            add_native_rpath(&mut command, native_dir);
+        }
+        None => {
+            command
+                .arg("-l")
+                .arg(format!("dylib={}", native_link_name(native_path)));
+        }
+    }
     let status = command
         .arg("-o")
         .arg(&library)

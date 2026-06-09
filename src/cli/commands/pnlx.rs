@@ -6,9 +6,11 @@ use clap::{Parser, Subcommand};
 use crate::commands::pnl::build_installed_bridges;
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_bridge_ffi_php, generate_bridge_rs,
-    generate_context_php, generate_entity_php, generate_index_php, parse_function_signatures,
+    generate_context_php, generate_entity_php, generate_functions_php, generate_index_php,
+    parse_function_signatures,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
+use crate::interaction::Interaction;
 use crate::io::{read_json, write_json_if_missing};
 use crate::manifest::PnlxManifest;
 use crate::validate::{validate_pnlx_manifest_values, validate_pnlx_workspace};
@@ -25,6 +27,10 @@ use resolution::{
 #[command(about = "Develop PHP native-library extensions")]
 #[command(version)]
 struct Cli {
+    /// Do not ask interactive questions; accept the default answer for each prompt.
+    #[arg(short = 'n', long, global = true)]
+    no_interaction: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -47,6 +53,9 @@ enum Command {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    // pnlx has no interactive prompts yet, but it accepts --no-interaction so
+    // scripts can pass the same flags to both binaries.
+    let _interaction = Interaction::new(cli.no_interaction);
     match cli.command {
         Command::Init => init_pnlx(Path::new(".")),
         Command::Validate => validate_pnlx_workspace(Path::new(".")),
@@ -174,7 +183,7 @@ fn generate_all(
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| symbol_prefix_from_library_key(library_key)),
             },
-        )
+        )?
     };
     let signatures = parse_function_signatures(&cdef);
     generate_bridge_ffi_php(&signatures, out)?;
@@ -192,6 +201,9 @@ fn generate_all(
     generate_entity_php(entity_out, &template_options)?;
     generate_context_php(context_out, &template_options)?;
     generate_index_php(index_out, &template_options)?;
+    if let Some(generated_dir) = index_out.parent() {
+        generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
+    }
     generate_aliases_php(aliases_out, &signatures)?;
     generate_bridge_rs(bridge_out, &template_options, &signatures)?;
     Ok(())
@@ -235,6 +247,6 @@ fn read_headers(headers: &[PathBuf]) -> Result<String> {
 fn init_pnlx(root: &Path) -> Result<()> {
     let manifest_path = root.join("pnlx.json");
     write_json_if_missing(&manifest_path, &PnlxManifest::default())?;
-    println!("initialized {}", manifest_path.display());
+    crate::ui::success(&format!("initialized {}", manifest_path.display()));
     Ok(())
 }

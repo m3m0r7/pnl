@@ -1,6 +1,16 @@
 parameters:
-  level: 5
+  level: max
   paths:
     - src/sdk
     - tests
+  excludePaths:
+    # Golden snapshots of generated code are fixtures, not source to analyse.
+    - tests/golden/*
   tmpDir: .phpstan-cache
+  ignoreErrors:
+    # The runtime returns an `object` whose methods (example_version, example_add,
+    # exampleAdd, ExampleAdd) are generated dynamically by the compiled FFI bridge
+    # and cannot be known statically. These direct-call assertions are intentional
+    # coverage of dynamic dispatch on the generated proxy.
+    - message: '#Call to an undefined method object::#'
+      path: tests/RuntimeTest.php

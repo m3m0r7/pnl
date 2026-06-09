@@ -13,7 +13,8 @@ pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
 
-    let lock_path = root.join("@pnlx").join("pnlx-lock.json");
+    let workspace = crate::workspace::workspace_dir(root);
+    let lock_path = workspace.join("pnlx-lock.json");
     if lock_path.exists() {
         let lock = read_json::<PnlLock>(&lock_path)?;
         validate_schema_version(&lock.schema_version)?;
@@ -21,7 +22,7 @@ pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
         validate_pnl_lock_values(&lock)?;
     }
 
-    let pathmap_path = root.join("@pnlx").join("pnlx-pathmap.json");
+    let pathmap_path = workspace.join("pnlx-pathmap.json");
     if pathmap_path.exists() {
         let pathmap = read_json::<PnlxPathmap>(&pathmap_path)?;
         validate_schema_version(&pathmap.schema_version)?;
@@ -29,7 +30,7 @@ pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
         validate_pnlx_pathmap_values(&pathmap)?;
     }
 
-    println!("pnl workspace is valid");
+    crate::ui::success("pnl workspace is valid");
     Ok(())
 }
 
@@ -38,7 +39,7 @@ pub fn validate_pnlx_workspace(root: &Path) -> Result<()> {
     validate_schema_version(&manifest.schema_version)?;
     validate_pnlx_manifest_values(&manifest)?;
 
-    println!("pnlx workspace is valid");
+    crate::ui::success("pnlx workspace is valid");
     Ok(())
 }
 
@@ -115,56 +116,36 @@ pub fn validate_rfc3339_datetime(field: &str, value: &str) -> Result<()> {
 }
 
 pub fn validate_semver(version: &str) -> Result<()> {
-    let suffix_start = version.find(|ch| ch == '-' || ch == '+');
-    let core = suffix_start.map_or(version, |index| &version[..index]);
-    let suffix = suffix_start.map(|index| &version[index + 1..]);
+    normalize_semver(version).map(|_| ())
+}
 
-    let parts = core.split('.').collect::<Vec<_>>();
-    if parts.len() != 3
+/// Parse a version string, tolerating the partial versions real C libraries use
+/// (e.g. `1.5`, `74.2`) and bare numeric versions (e.g. argon2's `20190702`) by
+/// padding the missing components with zero.
+pub fn normalize_semver(version: &str) -> Result<semver::Version> {
+    let (core, suffix) = match version.find(['-', '+']) {
+        Some(index) => (&version[..index], &version[index..]),
+        None => (version, ""),
+    };
+
+    let mut parts = core.split('.').collect::<Vec<_>>();
+    if parts.is_empty()
         || parts
             .iter()
             .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
     {
         bail!("invalid semantic version: {version}");
     }
-
-    if let Some(suffix) = suffix
-        && (suffix.is_empty()
-            || !suffix
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-')))
-    {
-        bail!("invalid semantic version suffix: {version}");
+    while parts.len() < 3 {
+        parts.push("0");
     }
 
-    Ok(())
+    let normalized = format!("{}{suffix}", parts[..3].join("."));
+    semver::Version::parse(&normalized)
+        .map_err(|err| anyhow::anyhow!("invalid semantic version {version}: {err}"))
 }
 
-pub fn validate_version_constraint(constraint: &str) -> Result<()> {
-    if constraint.is_empty() || constraint.trim() != constraint {
-        bail!("invalid version constraint: {constraint}");
-    }
-
-    for part in constraint.split_whitespace() {
-        let version = strip_constraint_operator(part);
-        if version.is_empty() {
-            bail!("invalid version constraint: {constraint}");
-        }
-        validate_semver(version)?;
-    }
-
-    Ok(())
-}
-
-fn strip_constraint_operator(part: &str) -> &str {
-    for operator in ["<=", ">=", "==", "=", "<", ">", "^", "~"] {
-        if let Some(version) = part.strip_prefix(operator) {
-            return version;
-        }
-    }
-
-    part
-}
+pub use crate::version::validate_version_constraint;
 
 pub fn ensure_platform_matches(platform: &Platform) -> Result<()> {
     let current = current_platform();

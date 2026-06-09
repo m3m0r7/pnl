@@ -1,8 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use include_dir::{Dir, include_dir};
 use jsonschema::{Draft, JSONSchema};
 use serde_json::{Map, Value};
+
+/// The JSON schemas are embedded into the binary at build time so validation
+/// works no matter where the executable is run from.
+static SCHEMAS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/schemas");
 
 #[derive(Debug, Clone, Copy)]
 pub enum SchemaKind {
@@ -41,22 +46,16 @@ pub fn validate_json_value(kind: SchemaKind, path: &Path, value: &Value) -> Resu
         .get("schema_version")
         .and_then(Value::as_str)
         .with_context(|| format!("{} is missing schema_version", path.display()))?;
-    let schema_path = schema_path(kind, version);
-    let schema_content = std::fs::read_to_string(&schema_path)
-        .with_context(|| format!("failed to read schema {}", schema_path.display()))?;
-    let openapi: Value = serde_json::from_str(&schema_content)
-        .with_context(|| format!("failed to parse schema {}", schema_path.display()))?;
+    let schema_ref = format!("{}/{version}/schema.json", kind.directory());
+    let schema_content = embedded_schema(&schema_ref)?;
+    let openapi: Value = serde_json::from_str(schema_content)
+        .with_context(|| format!("failed to parse schema {schema_ref}"))?;
     let schema = validation_schema_from_openapi(&openapi)
-        .with_context(|| format!("failed to load OpenAPI schema {}", schema_path.display()))?;
+        .with_context(|| format!("failed to load OpenAPI schema {schema_ref}"))?;
     let compiled = JSONSchema::options()
         .with_draft(Draft::Draft201909)
         .compile(&schema)
-        .map_err(|error| {
-            anyhow!(
-                "failed to compile schema {}: {error}",
-                schema_path.display()
-            )
-        })?;
+        .map_err(|error| anyhow!("failed to compile schema {schema_ref}: {error}"))?;
 
     if let Err(errors) = compiled.validate(value) {
         let messages = errors
@@ -65,22 +64,20 @@ pub fn validate_json_value(kind: SchemaKind, path: &Path, value: &Value) -> Resu
             .collect::<Vec<_>>()
             .join("; ");
         bail!(
-            "{} does not match {}: {}",
+            "{} does not match schema {schema_ref}: {messages}",
             path.display(),
-            schema_path.display(),
-            messages
         );
     }
 
     Ok(())
 }
 
-fn schema_path(kind: SchemaKind, version: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("schemas")
-        .join(kind.directory())
-        .join(version)
-        .join("schema.json")
+/// Look up a schema embedded in the binary by its `<kind>/<version>/schema.json` path.
+fn embedded_schema(schema_ref: &str) -> Result<&'static str> {
+    SCHEMAS
+        .get_file(schema_ref)
+        .and_then(|file| file.contents_utf8())
+        .with_context(|| format!("unknown or unsupported schema: {schema_ref}"))
 }
 
 fn validation_schema_from_openapi(openapi: &Value) -> Result<Value> {
@@ -143,16 +140,14 @@ fn normalize_openapi_schema(value: &Value) -> Value {
                     }
                 }
             }
-            if nullable {
-                if let Some(Value::String(type_name)) = out.get("type") {
-                    out.insert(
-                        "type".to_owned(),
-                        Value::Array(vec![
-                            Value::String(type_name.clone()),
-                            Value::String("null".to_owned()),
-                        ]),
-                    );
-                }
+            if nullable && let Some(Value::String(type_name)) = out.get("type") {
+                out.insert(
+                    "type".to_owned(),
+                    Value::Array(vec![
+                        Value::String(type_name.clone()),
+                        Value::String("null".to_owned()),
+                    ]),
+                );
             }
             Value::Object(out)
         }

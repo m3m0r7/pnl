@@ -23,7 +23,7 @@ class RuntimeWorkspace
         $this->repoRoot = dirname(__DIR__, 2);
         $this->projectRoot = sys_get_temp_dir() . '/pnl-runtime-test-' . bin2hex(random_bytes(6));
         $this->packageSourceRoot = $this->projectRoot . '/packages/example';
-        $this->installedPackageRoot = $this->projectRoot . '/@pnlx/packages/example/example';
+        $this->installedPackageRoot = $this->projectRoot . '/@pnlx/packages/example/example/1.2.3';
         $this->nativeLibraryPath = $this->projectRoot . '/native/' . self::libraryName();
     }
 
@@ -112,6 +112,46 @@ RS,
         return $this->readJson($this->projectRoot . '/@pnlx/pnlx-pathmap.json');
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    public function pnlManifest(): array
+    {
+        return $this->readJson($this->projectRoot . '/pnl.json');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function lockExtension(string $name): array
+    {
+        $lock = $this->readJson($this->projectRoot . '/@pnlx/pnlx-lock.json');
+        $extensions = $lock['extensions'] ?? null;
+        $extension = is_array($extensions) ? ($extensions[$name] ?? null) : null;
+        if (!is_array($extension)) {
+            throw new \RuntimeException(sprintf('Extension %s is missing from the lockfile.', $name));
+        }
+
+        /** @var array<string, mixed> $extension */
+        return $extension;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function pathmapBridge(string $name): array
+    {
+        $pathmap = $this->pathmap();
+        $bridges = $pathmap['bridges'] ?? null;
+        $bridge = is_array($bridges) ? ($bridges[$name] ?? null) : null;
+        if (!is_array($bridge)) {
+            throw new \RuntimeException(sprintf('Bridge %s is missing from pathmap.', $name));
+        }
+
+        /** @var array<string, mixed> $bridge */
+        return $bridge;
+    }
+
     private function copyPackageFixture(): void
     {
         Filesystem::copyDirectory(
@@ -147,7 +187,7 @@ RS,
             'load_paths' => [
                 dirname($this->nativeLibraryPath),
             ],
-            'enables' => [
+            'features' => [
                 'use_functions' => true,
             ],
             'extensions' => [
@@ -192,7 +232,9 @@ PHP);
     private function resolveBridgeLibraryPath(): string
     {
         $pathmap = $this->pathmap();
-        $library = $pathmap['bridges']['example']['library'];
+        $bridges = $pathmap['bridges'] ?? null;
+        $example = is_array($bridges) ? ($bridges['example'] ?? null) : null;
+        $library = is_array($example) ? ($example['library'] ?? null) : null;
         if (!is_string($library) || $library === '') {
             throw new \RuntimeException('Example bridge library is missing from pathmap.');
         }
@@ -253,6 +295,7 @@ PHP);
             throw new \RuntimeException(sprintf('%s did not contain a JSON object.', $path));
         }
 
+        /** @var array<string, mixed> $data */
         return $data;
     }
 

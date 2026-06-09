@@ -52,7 +52,7 @@ where
     T: Serialize,
 {
     if path.exists() {
-        println!("{} already exists", path.display());
+        crate::ui::info(&format!("{} already exists", path.display()));
         return Ok(());
     }
     write_json(path, value)
