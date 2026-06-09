@@ -179,7 +179,7 @@ fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
 
     // Stable sort by priority (default 0) descending: configured repositories of
     // equal priority keep their order and stay ahead of the appended default.
-    repositories.sort_by(|a, b| b.priority.unwrap_or(0).cmp(&a.priority.unwrap_or(0)));
+    repositories.sort_by_key(|repository| std::cmp::Reverse(repository.priority.unwrap_or(0)));
     repositories
 }
 
@@ -409,7 +409,13 @@ fn install_local_extension(
             native.version,
             crate::ui::dim(&native.resolved_name)
         ));
-        let header = resolve_header_for_native(extension_root, &native.path, key, requirement)?;
+        let header = resolve_header_for_native(
+            extension_root,
+            &installed_extension_root,
+            &native.path,
+            key,
+            requirement,
+        )?;
         let generation_headers =
             generation_headers_from_resolved_header(&header, &requirement.header_names);
         locked_requires.insert(
@@ -458,6 +464,17 @@ fn install_local_extension(
     write_pathmap(root, &pathmap)?;
     write_pnlx_autoload(root)?;
     crate::ui::success(&format!("installed extension {}", extension.name));
+
+    // Show the package's optional PHP usage examples so users see how to call it.
+    for (index, example) in extension.examples.iter().enumerate() {
+        let label = if extension.examples.len() > 1 {
+            format!("example {} — {}", index + 1, extension.name)
+        } else {
+            format!("usage — {}", extension.name)
+        };
+        crate::ui::example_block(&label, example);
+    }
+
     Ok(())
 }
 

@@ -227,6 +227,9 @@ pub struct PnlxManifest {
     pub class: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub class_prefix: String,
+    /// Optional PHP usage snippets shown when the package finishes installing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
     #[serde(default)]
     pub headers: Vec<PnlxHeader>,
     pub platforms: Vec<PlatformRequirement>,
@@ -264,6 +267,7 @@ impl Default for PnlxManifest {
             entrypoint: "src/generated/index.php".to_owned(),
             class: "Example\\Extension\\Extension".to_owned(),
             class_prefix: String::new(),
+            examples: Vec::new(),
             headers: Vec::new(),
             platforms: vec![current_platform_requirement()],
             requires,

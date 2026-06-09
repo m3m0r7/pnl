@@ -4,7 +4,7 @@ use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result, bail};
 
-use crate::fetch::{fetch_asset, materialize_inline_header};
+use crate::fetch::fetch_asset;
 use crate::manifest::{
     LibraryName, NativeRequirement, PnlManifest, ResolvedHeader, ResolvedNativeLibrary,
 };
@@ -128,15 +128,30 @@ fn native_library_not_found_message(
     message
 }
 
+/// Write an inline header into the installed package's generated directory and
+/// return its path.
+fn write_inline_header(installed_root: &Path, key: &str, contents: &str) -> Result<PathBuf> {
+    let dir = installed_root.join("src").join("generated");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let file_name = format!("{}.h", key.replace(['/', '\\'], "_"));
+    let path = dir.join(file_name);
+    std::fs::write(&path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
 pub(super) fn resolve_header_for_native(
     extension_root: &Path,
+    installed_root: &Path,
     native_path: &str,
     key: &str,
     requirement: &NativeRequirement,
 ) -> Result<ResolvedHeader> {
     if let Some(contents) = &requirement.header_inline {
-        let path = materialize_inline_header(key, contents)
-            .with_context(|| format!("failed to materialize inline header for {key}"))?;
+        // Inline headers belong to the installed package (so they live and die
+        // with it), not a shared user cache.
+        let path = write_inline_header(installed_root, key, contents)
+            .with_context(|| format!("failed to write inline header for {key}"))?;
         return Ok(ResolvedHeader {
             sha256: sha256_file(&path)?,
             path: path.display().to_string(),

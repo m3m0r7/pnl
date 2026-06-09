@@ -48,22 +48,6 @@ pub fn fetch_asset(url: &str) -> Result<PathBuf> {
     Ok(destination)
 }
 
-/// Write inline header content to the cache and return the file path so the rest
-/// of the pipeline (which reads header files) can consume it unchanged.
-pub fn materialize_inline_header(key: &str, contents: &str) -> Result<PathBuf> {
-    let destination = cache_root()
-        .join("inline")
-        .join(short_hash(contents))
-        .join(format!("{}.h", sanitize_file_stem(key)));
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create cache directory {}", parent.display()))?;
-    }
-    fs::write(&destination, contents)
-        .with_context(|| format!("failed to write {}", destination.display()))?;
-    Ok(destination)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceKind {
     Http,
@@ -188,24 +172,6 @@ fn file_name_from_url(url: &str) -> String {
     }
 }
 
-fn sanitize_file_stem(value: &str) -> String {
-    let stem: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if stem.is_empty() {
-        "asset".to_owned()
-    } else {
-        stem
-    }
-}
-
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     digest
@@ -265,15 +231,5 @@ mod tests {
             "libfoo.so"
         );
         assert_eq!(file_name_from_url("git@github.com:o/r.git"), "r");
-    }
-
-    #[test]
-    fn materializes_inline_headers() {
-        let path = materialize_inline_header("demo-1.0", "int demo_add(int a, int b);\n").unwrap();
-        assert!(path.is_file());
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            "int demo_add(int a, int b);\n"
-        );
     }
 }

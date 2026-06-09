@@ -83,6 +83,14 @@ pub fn summary(message: &str) {
     println!("\n{}", bold(message));
 }
 
+/// Print a labeled usage-example block (the example body is shown verbatim).
+pub fn example_block(label: &str, body: &str) {
+    println!("\n  {} {}", dim("›"), bold(label));
+    for line in body.lines() {
+        println!("    {line}");
+    }
+}
+
 /// Format a `Duration` like npm's `in 1.234s`.
 pub fn elapsed(duration: std::time::Duration) -> String {
     format!("{:.2}s", duration.as_secs_f64())
