@@ -1,6 +1,6 @@
 {
   "schema_version": "2026-07-01",
-  "generated_at": "2026-06-09T08:59:20Z",
+  "generated_at": "2026-06-09T09:01:29Z",
   "platform": {
     "os": "darwin",
     "arch": "aarch64",
@@ -16,7 +16,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc",
-        "reference": "ffb180fda10149359f83015d52a512b65189efc4"
+        "reference": "7f9d516b5a730b915b76c653bc26d1676f230cb9"
       },
       "dist": {
         "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc",
@@ -37,7 +37,7 @@
       "source": {
         "type": "git",
         "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb",
-        "reference": "ffb180fda10149359f83015d52a512b65189efc4"
+        "reference": "7f9d516b5a730b915b76c653bc26d1676f230cb9"
       },
       "dist": {
         "url": "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb",

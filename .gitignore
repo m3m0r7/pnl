@@ -6,3 +6,4 @@
 /.phpstan-cache/
 test*.php
 pnl.json
+pnlx-lock.json
