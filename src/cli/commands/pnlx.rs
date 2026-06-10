@@ -55,7 +55,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     // pnlx has no interactive prompts yet, but it accepts --no-interaction so
     // scripts can pass the same flags to both binaries.
-    let _interaction = Interaction::new(cli.no_interaction);
+    let _interaction = Interaction::new(cli.no_interaction, false);
     match cli.command {
         Command::Init => init_pnlx(Path::new(".")),
         Command::Validate => validate_pnlx_workspace(Path::new(".")),

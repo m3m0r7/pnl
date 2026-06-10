@@ -30,7 +30,8 @@
     "analyse": "vendor/bin/phpstan analyse",
     "cs": "vendor/bin/php-cs-fixer fix --dry-run --diff",
     "cs:fix": "vendor/bin/php-cs-fixer fix",
-    "test": "vendor/bin/phpunit"
+    "test": "vendor/bin/phpunit",
+    "validate:schemas": "vendor/bin/phpunit --filter SchemaFormatTest"
   },
   "require": {
     "cebe/php-openapi": "^1.8"

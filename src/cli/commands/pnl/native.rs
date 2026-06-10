@@ -89,13 +89,14 @@ pub(super) fn resolve_native_library(
 
     bail!(
         "{}",
-        native_library_not_found_message(key, names, &searched)
+        native_library_not_found_message(key, names, &requirement.header_names, &searched)
     );
 }
 
 fn native_library_not_found_message(
     key: &str,
     names: &[LibraryName],
+    header_names: &[String],
     searched: &[PathBuf],
 ) -> String {
     let stem = key_without_version(key);
@@ -106,23 +107,39 @@ fn native_library_not_found_message(
     } else {
         format!("lib{stem}-dev")
     };
-    let mut message = format!("could not find the native library for \"{key}\".\n\n");
     let name_list = names
         .iter()
         .map(LibraryName::name)
         .collect::<Vec<_>>()
         .join(", ");
-    message.push_str(&format!("  looked for: {name_list}\n"));
-    message.push_str("  in:\n");
+    let header_list = if header_names.is_empty() {
+        "(none declared)".to_owned()
+    } else {
+        header_names.join(", ")
+    };
+
+    // This package does not declare an `installation` recipe, so the user must
+    // provide the native library and headers themselves.
+    let mut message = format!(
+        "could not find the native library for \"{key}\".\n\n\
+         This package has no \"installation\" commands, so you must place the\n\
+         library and its headers somewhere on your search path yourself.\n\n\
+         pnlx is looking for:\n  \
+         - library : {name_list}\n  \
+         - headers : {header_list}\n\n\
+         It searched these directories:\n"
+    );
     for dir in searched {
         message.push_str(&format!("    - {}\n", dir.display()));
     }
     message.push_str(&format!(
-        "\nInstall the library and make it discoverable, e.g.:\n  \
+        "\nMake them discoverable, e.g.:\n  \
          - brew install {stem}   (macOS)\n  \
          - apt-get install {dev_package}   (Debian/Ubuntu)\n  \
-         - add its directory to \"load_paths\" in pnl.json\n  \
-         - or export DYLD_LIBRARY_PATH / LD_LIBRARY_PATH to point at it\n\n\
+         - or copy the files into a directory that is already on your path,\n    \
+         e.g. the library into /usr/local/lib and the headers into /usr/local/include\n  \
+         - or add their directory to \"load_paths\" in pnl.json, or export\n    \
+         DYLD_LIBRARY_PATH / LD_LIBRARY_PATH\n\n\
          If the file name differs, set \"library_names\" for \"{key}\" in pnlx.json."
     ));
     message

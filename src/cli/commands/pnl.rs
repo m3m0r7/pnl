@@ -28,6 +28,10 @@ struct Cli {
     #[arg(short = 'n', long, global = true)]
     no_interaction: bool,
 
+    /// Answer "yes" to every confirmation (e.g. native-dependency installation).
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -101,7 +105,7 @@ enum RepoKind {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let interaction = Interaction::new(cli.no_interaction);
+    let interaction = Interaction::new(cli.no_interaction, cli.yes);
     match cli.command {
         Command::Init => init_pnl(Path::new(".")),
         Command::Install {
@@ -114,6 +118,7 @@ pub fn run() -> Result<()> {
             &InstallOptions {
                 alias_class,
                 function_prefix,
+                interaction,
             },
         ),
         Command::Update { package } => update(Path::new("."), package.as_deref()),

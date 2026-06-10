@@ -67,6 +67,8 @@ The source can be a URL, a local path, a **bare package name**, or a **distribut
 
 A bare name is resolved against your configured `repositories`, highest [`priority`](configuration.md#writing-pnljson) first, falling back to the built-in default repository `https://github.com/m3m0r7/pnl-packages` (kept internally at priority 0 — it is *not* written into `pnl.json`). Append `@<version>` to pin a version — for git sources that checks out the matching tag/branch, and the resolved package version must match. Running `pnl install` with **no source** restores every extension from the lockfile at its locked version, re-verifying each package's content against the recorded sha256.
 
+If the package declares an `installation` recipe for your OS, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `checkIfExists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default).
+
 Two flags adjust the generated PHP:
 
 - `--alias-class <Class>` additionally exposes the extension under `<Class>` via `class_alias`, keeping the original class.

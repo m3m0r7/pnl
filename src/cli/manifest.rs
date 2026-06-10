@@ -215,6 +215,21 @@ pub struct PnlxHeader {
     pub sha256: String,
 }
 
+/// One platform's native-dependency installation recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallationEntry {
+    /// Shell command lines that install the native libraries/headers.
+    pub install: Vec<String>,
+    /// Shell command lines that succeed (exit 0) when the dependency is already
+    /// present; if they all pass, installation is skipped.
+    #[serde(
+        rename = "checkIfExists",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub check_if_exists: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlxManifest {
     pub schema_version: String,
@@ -230,6 +245,10 @@ pub struct PnlxManifest {
     /// Optional PHP usage snippets shown when the package finishes installing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
+    /// Optional per-OS commands that install the native dependencies, keyed by
+    /// the platform OS name (`darwin`, `linux`, `windows`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub installation: BTreeMap<String, InstallationEntry>,
     #[serde(default)]
     pub headers: Vec<PnlxHeader>,
     pub platforms: Vec<PlatformRequirement>,
@@ -268,6 +287,7 @@ impl Default for PnlxManifest {
             class: "Example\\Extension\\Extension".to_owned(),
             class_prefix: String::new(),
             examples: Vec::new(),
+            installation: BTreeMap::new(),
             headers: Vec::new(),
             platforms: vec![current_platform_requirement()],
             requires,

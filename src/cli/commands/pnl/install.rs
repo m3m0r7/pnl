@@ -27,13 +27,15 @@ use super::package::{
     write_pnlx_autoload,
 };
 
-/// Codegen options supplied on the `pnl install` command line.
+/// Options supplied on the `pnl install` command line.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InstallOptions {
     /// Define a `class_alias` for the generated extension class.
     pub alias_class: Option<String>,
     /// Prefix added to every generated function and method name.
     pub function_prefix: Option<String>,
+    /// Drives confirmation prompts (e.g. native-dependency installation).
+    pub interaction: crate::interaction::Interaction,
 }
 
 pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
@@ -43,7 +45,7 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
 
     if targets.is_empty() {
         // `pnl install` with no target restores every extension from the lockfile.
-        return restore_from_lock(root, &mut manifest);
+        return restore_from_lock(root, &mut manifest, options);
     }
 
     let label = if targets.len() == 1 {
@@ -125,7 +127,11 @@ fn install_one(
 /// Reinstall every extension recorded in the lockfile, pinned to its locked
 /// version. The per-extension content digest is verified against the lock, so a
 /// source whose content has drifted from the recorded sha256 aborts the install.
-fn restore_from_lock(root: &Path, manifest: &mut PnlManifest) -> Result<()> {
+fn restore_from_lock(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    options: &InstallOptions,
+) -> Result<()> {
     let lock = read_lock_for_current_platform(root)?;
     if lock.extensions.is_empty() {
         bail!(
@@ -141,11 +147,10 @@ fn restore_from_lock(root: &Path, manifest: &mut PnlManifest) -> Result<()> {
 
     crate::ui::heading("pnl", "install (restore from lockfile)");
     let started = std::time::Instant::now();
-    let options = InstallOptions::default();
     for (url, version) in &entries {
         crate::ui::step(&format!("{url} ({version})"));
         // Keep the source's branch; only assert the resolved version matches the lock.
-        install_one(root, manifest, url, None, Some(version), &options)?;
+        install_one(root, manifest, url, None, Some(version), options)?;
     }
 
     crate::ui::summary(&format!(
@@ -231,6 +236,84 @@ fn install_bare_name(
         "could not find package \"{name}\" in any configured repository:\n{}",
         failures.join("\n")
     );
+}
+
+/// The `installation` key for the current platform (matches the pnl OS names).
+fn current_os_key() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "windows",
+        other => other,
+    }
+}
+
+/// Run a shell command line, inheriting stdio so the user sees its output.
+fn run_shell(command_line: &str) -> std::io::Result<std::process::ExitStatus> {
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C");
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    command.arg(command_line).status()
+}
+
+/// If the package declares `installation` for this platform, optionally run its
+/// install commands. A passing `checkIfExists` short-circuits (already present);
+/// otherwise the user confirms (auto-yes under `--yes`/`--no-interaction`).
+fn maybe_install_native_dependencies(
+    extension: &PnlxManifest,
+    interaction: &crate::interaction::Interaction,
+) -> Result<()> {
+    let Some(entry) = extension.installation.get(current_os_key()) else {
+        return Ok(());
+    };
+
+    if !entry.check_if_exists.is_empty()
+        && entry.check_if_exists.iter().all(|cmd| {
+            run_shell(cmd)
+                .map(|status| status.success())
+                .unwrap_or(false)
+        })
+    {
+        crate::ui::info(&format!(
+            "{} native dependencies already present",
+            extension.name
+        ));
+        return Ok(());
+    }
+
+    let listed = entry
+        .install
+        .iter()
+        .map(|cmd| format!("    {cmd}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let proceed = interaction.confirm(
+        &format!(
+            "{} needs native dependencies. Run the following to install them?\n{listed}\n",
+            extension.name
+        ),
+        true,
+    )?;
+    if !proceed {
+        crate::ui::warn("skipped native dependency installation; resolution may fail");
+        return Ok(());
+    }
+
+    for cmd in &entry.install {
+        crate::ui::step(&format!("running: {cmd}"));
+        let status =
+            run_shell(cmd).with_context(|| format!("failed to run install command: {cmd}"))?;
+        if !status.success() {
+            bail!("install command failed ({status}): {cmd}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Split a trailing `@<version>` pin off an install target. The version must
@@ -395,6 +478,10 @@ fn install_local_extension(
             required: true,
         });
     write_json(&root.join("pnl.json"), manifest)?;
+
+    // Offer to install the package's native dependencies (e.g. `brew install …`)
+    // before we try to resolve them from disk.
+    maybe_install_native_dependencies(&extension, &options.interaction)?;
 
     let mut lock = read_lock_for_current_platform(root)?;
     lock.generated_at = now();

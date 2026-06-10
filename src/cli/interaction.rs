@@ -9,17 +9,24 @@ use anyhow::Result;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Interaction {
     no_interaction: bool,
+    assume_yes: bool,
 }
 
 impl Interaction {
-    pub fn new(no_interaction: bool) -> Self {
-        Self { no_interaction }
+    pub fn new(no_interaction: bool, assume_yes: bool) -> Self {
+        Self {
+            no_interaction,
+            assume_yes,
+        }
     }
 
-    /// Ask a yes/no question. Returns `default` without prompting when
-    /// `--no-interaction` was given or stdin is not interactive; an empty answer
-    /// also selects the default.
+    /// Ask a yes/no question. Returns `true` without prompting when `--yes` was
+    /// given; returns `default` without prompting when `--no-interaction` was
+    /// given or stdin is not interactive; an empty answer also selects the default.
     pub fn confirm(&self, question: &str, default: bool) -> Result<bool> {
+        if self.assume_yes {
+            return Ok(true);
+        }
         if self.no_interaction || !io::stdin().is_terminal() {
             return Ok(default);
         }

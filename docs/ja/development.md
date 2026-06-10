@@ -63,3 +63,5 @@ schemas/repository-index/2026-07-01/schema.json
 ```
 
 Rust の CLI と PHP の SDK は、独自の検証を行う前に、これらのスキーマで検証します。
+
+スキーマファイル自体も検証されます。`composer validate:schemas`（`composer test` の一部）は、`schemas/*/*/schema.json` を `cebe/php-openapi` で読み込み、正しい OpenAPI ドキュメントであることを検証します。スキーマが壊れていれば CI が失敗します。

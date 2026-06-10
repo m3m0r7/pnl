@@ -63,3 +63,5 @@ schemas/repository-index/2026-07-01/schema.json
 ```
 
 Both the Rust CLI and the PHP SDK validate against these schemas before running their own domain validation.
+
+The schema files themselves are checked too: `composer validate:schemas` (part of `composer test`) loads every `schemas/*/*/schema.json` with `cebe/php-openapi` and asserts it is a valid OpenAPI document, so a malformed schema fails CI.
