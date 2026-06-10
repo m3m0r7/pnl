@@ -97,5 +97,8 @@ jobs:
       - name: PHP-CS-Fixer
         run: composer cs
 
+      - name: Validate schemas (OpenAPI)
+        run: composer validate:schemas
+
       - name: PHPUnit
         run: composer test
