@@ -33,7 +33,7 @@ Whether PHP can use FFI is checked at runtime. If PHP cannot use FFI, the SDK ra
 
 ## Install Via Composer
 
-In a PHP project, the simplest path is the composer package, which ships the SDK and builds the CLI binaries into `vendor/bin` on install (see [PHP Usage](php-usage.md#install-via-composer)):
+In a PHP project, the simplest path is the composer package, which ships the SDK and installs `vendor/bin/pnl` / `vendor/bin/pnlx`. It is a plain library (no plugin, no `allow-plugins`); the native binary is built or downloaded on first use (see [PHP Usage](php-usage.md#install-via-composer)):
 
 ```sh
 composer require m3m0r7/pnl

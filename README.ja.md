@@ -6,7 +6,9 @@
 
 ```sh
 pnl init
+pnl find 'lib*'      # 利用可能なパッケージを一覧（既定リポジトリ＋自分のリポジトリ）
 pnl install libc
+pnl list 'lib*'      # インストール済みを確認
 ```
 
 1 分で C の `printf` を PHP から呼ぶには [クイックスタート](docs/ja/quick-start.md) をどうぞ。
@@ -22,7 +24,7 @@ pnl install libc
 - [PHP からの使い方](docs/ja/php-usage.md) — 拡張の読み込みと生成されるファイル。
 - [開発](docs/ja/development.md) — 検証・テスト・JSON スキーマ。
 
-既定のパッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。
+既定のパッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl find` はクローンせずに一覧できます。
 
 ## ライセンス
 

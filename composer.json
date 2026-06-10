@@ -1,9 +1,13 @@
 {
   "name": "m3m0r7/pnl",
   "description": "PHP native-library extension manager: FFI runtime SDK plus the pnl/pnlx CLI built from the bundled Rust sources on install.",
-  "type": "composer-plugin",
+  "type": "library",
   "license": "MIT",
   "homepage": "https://github.com/m3m0r7/pnl",
+  "bin": [
+    "bin/pnl",
+    "bin/pnlx"
+  ],
   "autoload": {
     "psr-4": {
       "Pnlx\\": "src/sdk/Pnlx/"
@@ -18,7 +22,6 @@
     }
   },
   "require-dev": {
-    "composer/composer": "^2.7",
     "phpunit/phpunit": "^12.0",
     "friendsofphp/php-cs-fixer": "^3.0",
     "phpstan/phpstan": "^2.0"
@@ -27,9 +30,6 @@
     "platform": {
       "php": "8.3.0"
     }
-  },
-  "extra": {
-    "class": "Pnlx\\Composer\\Plugin"
   },
   "scripts": {
     "analyse": "vendor/bin/phpstan analyse --memory-limit=512M",

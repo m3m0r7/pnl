@@ -10,23 +10,14 @@ SDK と CLI は 1 つの composer パッケージとして導入できます。
 composer require m3m0r7/pnl
 ```
 
-このパッケージは composer プラグインです。composer に確認されたら許可してください（事前に設定しておくこともできます）。
+pnl はただの composer ライブラリです。プラグインではないため composer に `allow-plugins` の許可を求められることはなく、あなたの `composer.json` に手を入れる必要もありません。phpunit が `vendor/bin/phpunit` を入れるのと同じように、`vendor/bin/pnl` / `vendor/bin/pnlx` がインストールされます。
 
-```json
-"config": {
-  "allow-plugins": {
-    "m3m0r7/pnl": true
-  }
-}
-```
+ネイティブバイナリは **CLI を初めて実行したとき** に遅延生成されます。
 
-パッケージのインストール後、プラグインが同梱の Rust ソースから CLI をビルドし、プロジェクトにリンクします。
+1. Rust ツールチェイン（https://rustup.rs）があれば同梱ソースからビルドします（プラットフォームに確実に一致）。
+2. 無ければ、インストール済みバージョンに対応するリリースのプリビルトバイナリを `https://github.com/m3m0r7/pnl/releases` からダウンロードします。
 
-1. `make validate` … インストール前のゲート。ビルドできる環境か（Rust ツールチェイン・C コンパイラの有無）を検証します。
-2. `make build` … リリース版の `pnl` / `pnlx` をビルドします。
-3. `make install BIN_DIR=vendor/bin` … `$PNL_HOME`（デフォルト `~/.local/share/pnl`）にインストールし、`vendor/bin/pnl` / `vendor/bin/pnlx` をリンクします。
-
-Rust ツールチェイン（https://rustup.rs）が必要です。無い場合は何もコンパイルされる前に validate が案内付きで失敗します。リンク済みバイナリが同梱バージョンと一致している場合は全体がスキップされるため、2 回目以降の `composer install` は高速です。
+結果は `vendor/m3m0r7/pnl/bin/.native/<version>/` にキャッシュされるため、2 回目以降はビルドもダウンロードもなくそのまま実行されます。
 
 ```sh
 vendor/bin/pnl version

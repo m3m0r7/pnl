@@ -33,7 +33,7 @@ PHP の FFI が使えるかどうかは実行時にチェックされます。�
 
 ## Composer でのインストール
 
-PHP プロジェクトでは composer パッケージが最も簡単です。SDK が入り、インストール時に CLI バイナリが `vendor/bin` にビルドされます（[PHP からの使い方](php-usage.md#composer-でのインストール) を参照）。
+PHP プロジェクトでは composer パッケージが最も簡単です。SDK が入り、`vendor/bin/pnl` / `vendor/bin/pnlx` がインストールされます。プラグインではないただのライブラリなので `allow-plugins` は不要で、ネイティブバイナリは初回実行時にビルド（無ければダウンロード）されます（[PHP からの使い方](php-usage.md#composer-でのインストール) を参照）。
 
 ```sh
 composer require m3m0r7/pnl

@@ -27,6 +27,15 @@ const ALIASES_TEMPLATE: &str = include_str!("templates/aliases.php.tpl");
 const FUNCTIONS_TEMPLATE: &str = include_str!("templates/functions.php.tpl");
 const BRIDGE_TEMPLATE: &str = include_str!("templates/bridge.rs.tpl");
 
+// Inner templates: the repeated, per-symbol bodies that used to be assembled
+// with `format!`/`push_str` in Rust now live here as Handlebars `{{#each}}`
+// loops, so the generated layout is editable without touching code.
+const METHODS_TEMPLATE: &str = include_str!("templates/methods.php.tpl");
+const GLOBAL_FUNCTIONS_TEMPLATE: &str = include_str!("templates/global_functions.php.tpl");
+const ALIASES_ENTRIES_TEMPLATE: &str = include_str!("templates/aliases_entries.php.tpl");
+const BRIDGE_CDEF_TEMPLATE: &str = include_str!("templates/bridge_cdef.c.tpl");
+const BRIDGE_FUNCTIONS_TEMPLATE: &str = include_str!("templates/bridge_functions.rs.tpl");
+
 pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
     let mut context = generated_template_context();
     context.insert("CDEF".to_owned(), Value::String(cdef.to_owned()));
@@ -216,6 +225,18 @@ fn render_handlebars(template: &str, context: Map<String, Value>) -> Result<Stri
     handlebars
         .render_template(template, &context)
         .context("failed to render generated template")
+}
+
+/// Render one of the static inner templates (methods, functions, aliases,
+/// bridge) from a serializable context. These templates ship with the binary
+/// and have fixed shapes, so a render failure is a build-time bug, not a runtime
+/// condition — hence the panic rather than a propagated error.
+fn render_inner_template(template: &str, context: Value) -> String {
+    let mut handlebars = Handlebars::new();
+    handlebars.register_escape_fn(handlebars::no_escape);
+    handlebars
+        .render_template(template, &context)
+        .expect("generated inner template must render")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

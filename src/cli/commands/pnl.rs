@@ -10,6 +10,8 @@ use crate::manifest::{PnlLock, PnlManifest, PnlxPathmap, Repository, RepositoryT
 use crate::validate::{ensure_platform_matches, validate_pnl_workspace};
 
 mod bridge;
+mod find;
+mod index;
 mod install;
 mod native;
 mod package;
@@ -71,6 +73,11 @@ enum Command {
         #[command(subcommand)]
         subject: Option<ListSubject>,
     },
+    /// List packages available from the configured repositories (plus the
+    /// built-in default), optionally filtered by a glob pattern (e.g. `lib*`).
+    Find {
+        pattern: Option<String>,
+    },
     Repo {
         #[command(subcommand)]
         command: RepoCommand,
@@ -91,14 +98,41 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum ListSubject {
     Repos,
-    Extensions,
+    Extensions {
+        /// Optional glob pattern (e.g. `lib*`) filtering installed extensions.
+        pattern: Option<String>,
+    },
     Native,
+    /// `pnl list lib*` — a bare glob pattern is treated as an extensions filter.
+    #[command(external_subcommand)]
+    Pattern(Vec<String>),
 }
 
 #[derive(Debug, Subcommand)]
 enum RepoCommand {
     Add(RepoAdd),
-    Remove { url: String },
+    Remove {
+        url: String,
+    },
+    /// Generate a repository-index.json for a directory of packages so the
+    /// repository can be browsed with `pnl find` without cloning.
+    Index(RepoIndex),
+}
+
+#[derive(Debug, Args)]
+struct RepoIndex {
+    /// Directory holding the packages to index.
+    dir: PathBuf,
+    /// Installable base URL each package directory is appended to (e.g.
+    /// `https://github.com/m3m0r7/pnl-packages/tree/main/packages`).
+    #[arg(long)]
+    base_url: String,
+    /// Output path [default: <dir>/repository-index.json].
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Git reference recorded for every version [default: the package version].
+    #[arg(long)]
+    reference: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -153,6 +187,7 @@ pub fn run() -> Result<()> {
         Command::Update { package } => update(Path::new("."), package.as_deref()),
         Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),
+        Command::Find { pattern } => find::find(Path::new("."), pattern.as_deref()),
         Command::Repo { command } => repo(Path::new("."), command),
         Command::Validate => validate_pnl_workspace(Path::new(".")),
         Command::Version => {
@@ -233,10 +268,13 @@ fn uninstall(root: &Path, package: &str, interaction: Interaction) -> Result<()>
 }
 
 fn list(root: &Path, subject: Option<ListSubject>) -> Result<()> {
-    match subject.unwrap_or(ListSubject::Extensions) {
-        ListSubject::Repos => list_repositories(root),
-        ListSubject::Extensions => list_extensions(root),
-        ListSubject::Native => list_native_libraries(root),
+    match subject {
+        None | Some(ListSubject::Extensions { pattern: None }) => list_extensions(root, None),
+        Some(ListSubject::Extensions { pattern }) => list_extensions(root, pattern.as_deref()),
+        Some(ListSubject::Repos) => list_repositories(root),
+        Some(ListSubject::Native) => list_native_libraries(root),
+        // A bare `pnl list <glob>` arrives here; the first token is the pattern.
+        Some(ListSubject::Pattern(args)) => list_extensions(root, args.first().map(String::as_str)),
     }
 }
 
@@ -248,7 +286,7 @@ fn list_repositories(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn list_extensions(root: &Path) -> Result<()> {
+fn list_extensions(root: &Path, pattern: Option<&str>) -> Result<()> {
     let lock_path = pnl_lock_path(root);
     if !lock_path.exists() {
         return Ok(());
@@ -256,6 +294,13 @@ fn list_extensions(root: &Path) -> Result<()> {
     let lock = read_json::<PnlLock>(&lock_path)?;
     ensure_platform_matches(&lock.platform)?;
     for (name, ext) in lock.extensions {
+        // Match against both the full `vendor/extension` name and its leaf, so
+        // `pnl list lib*` finds `acme/libusb` as well as `libusb`.
+        if let Some(pattern) = pattern
+            && !crate::glob::package_name_matches(pattern, &name)
+        {
+            continue;
+        }
         println!("{} {} {}", name, ext.version, ext.source.reference);
     }
     Ok(())
@@ -298,6 +343,14 @@ fn repo(root: &Path, command: RepoCommand) -> Result<()> {
         }
         RepoCommand::Remove { url } => {
             manifest.repositories.retain(|repo| repo.url != url);
+        }
+        RepoCommand::Index(args) => {
+            return index::generate_index(
+                &args.dir,
+                &args.base_url,
+                args.output.as_deref(),
+                args.reference.as_deref(),
+            );
         }
     }
     write_json(&root.join("pnl.json"), &manifest)?;

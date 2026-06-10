@@ -4,6 +4,7 @@ pub mod commands;
 pub mod fetch;
 pub mod generate;
 pub mod git_source;
+pub mod glob;
 pub mod header_adapter;
 pub mod interaction;
 pub mod io;

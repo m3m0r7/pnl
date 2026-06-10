@@ -10,23 +10,20 @@ The SDK and the CLI come from a single composer package:
 composer require m3m0r7/pnl
 ```
 
-The package is a composer plugin — allow it when composer asks (or add it up front):
+pnl is an ordinary composer library — no plugin, so composer never asks you to
+add it to `allow-plugins`, and your `composer.json` stays untouched. It installs
+`vendor/bin/pnl` and `vendor/bin/pnlx` like any other tool (the way phpunit
+ships `vendor/bin/phpunit`).
 
-```json
-"config": {
-  "allow-plugins": {
-    "m3m0r7/pnl": true
-  }
-}
-```
+The native binary is produced lazily the **first time you run the CLI**:
 
-After the package is installed, the plugin builds the bundled Rust CLI sources and links the binaries into your project:
+1. If a Rust toolchain (https://rustup.rs) is available, the bundled sources are
+   built from source — a guaranteed match for your platform.
+2. Otherwise pnl downloads the prebuilt binary for the release that matches the
+   installed version from `https://github.com/m3m0r7/pnl/releases`.
 
-1. `make validate` — pre-install gate: verifies the environment can build (Rust toolchain, C compiler).
-2. `make build` — compiles the release `pnl` / `pnlx` binaries.
-3. `make install BIN_DIR=vendor/bin` — installs them under `$PNL_HOME` (default `~/.local/share/pnl`) and links `vendor/bin/pnl` / `vendor/bin/pnlx`.
-
-A Rust toolchain (https://rustup.rs) is required; if the toolchain is missing, the validate step fails with instructions before anything is compiled. When the linked binaries already match the bundled version, the whole step is skipped, so subsequent `composer install` runs are fast.
+The result is cached under `vendor/m3m0r7/pnl/bin/.native/<version>/`, so later
+runs exec it directly with no build or download.
 
 ```sh
 vendor/bin/pnl version

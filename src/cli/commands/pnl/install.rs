@@ -164,7 +164,7 @@ fn restore_from_lock(
 /// The repositories consulted for bare-name resolution, highest priority first.
 /// The built-in default repository is appended as the lowest-priority fallback
 /// unless the manifest already lists it.
-fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
+pub(super) fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
     fn same_url(a: &str, b: &str) -> bool {
         a.trim_end_matches('/') == b.trim_end_matches('/')
     }

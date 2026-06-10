@@ -38,7 +38,7 @@ analyse:
 	$(COMPOSER) analyse
 
 # Verify this environment can build pnl: the required toolchain is present.
-# Used as the pre-install gate by the composer plugin before `make build`.
+# Handy as a pre-build gate when building the binaries from source.
 validate:
 	@command -v "$(CARGO)" >/dev/null 2>&1 || { echo "pnl: cargo not found; install a Rust toolchain (https://rustup.rs) to build pnl" >&2; exit 1; }
 	@command -v rustc >/dev/null 2>&1 || { echo "pnl: rustc not found; install a Rust toolchain (https://rustup.rs) to build pnl" >&2; exit 1; }

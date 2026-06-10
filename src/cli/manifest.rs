@@ -98,6 +98,38 @@ pub struct Dist {
     pub sha256: String,
 }
 
+/// A repository index (`repository-index.json`) — the catalogue a repository
+/// publishes so `pnl find` can list its packages without cloning. Matches the
+/// `repository-index` schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepositoryIndex {
+    pub schema_version: String,
+    pub packages: BTreeMap<String, IndexPackage>,
+}
+
+impl RepositoryIndex {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            packages: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexPackage {
+    pub versions: BTreeMap<String, IndexPackageVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexPackageVersion {
+    /// Path to the package's pnlx.json within the repository (e.g.
+    /// `packages/libusb/pnlx.json`).
+    pub manifest: String,
+    pub dist: Dist,
+    pub source: Source,
+}
+
 /// A native library as recorded in the lockfile: identity, version, and content
 /// hash only. Install-time file paths live in the pathmap, not the lock, so the
 /// lock stays portable and path-independent.

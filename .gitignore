@@ -1,6 +1,7 @@
 /@pnlx/
 /target/
 /vendor/
+/bin/.native/
 /.phpunit.result.cache
 /.php-cs-fixer.cache
 /.phpstan-cache/

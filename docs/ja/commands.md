@@ -181,13 +181,14 @@ pnl uninstall libusb/libusb
 uninstalled libusb/libusb
 ```
 
-### `pnl list`
+### `pnl list [glob]`
 
-インストール済みの拡張を一覧表示します。`pnl list` は `pnl list extensions` と同じです。
+インストール済みの拡張を一覧表示します。`pnl list` は `pnl list extensions` と同じです。glob パターン（`*` と `?`）を渡すと絞り込めます。`vendor/extension` のフル名と末尾（leaf）の両方にマッチするため、`pnl list 'lib*'` は `acme/libusb` も見つけます。
 
 ```sh
 pnl list
 pnl list extensions
+pnl list 'lib*'
 ```
 
 出力例です。
@@ -196,6 +197,27 @@ pnl list extensions
 libnfc/libnfc 1.8.0 1.8.0
 libsdl/libsdl 2.32.10 2.32.10
 libusb/libusb 1.0.29 1.0.29
+```
+
+### `pnl find [glob]`
+
+設定済みの `repositories` と組み込みの既定リポジトリから、**インストール可能な**パッケージを一覧表示します（任意で glob 絞り込み）。`pnl list` と同様、パターンはフル名または leaf にマッチします。
+
+各リポジトリが `repository-index.json` を公開していれば、それを取得して軽量に列挙します（GitHub / `https` リポジトリは HTTP 取得、`file` リポジトリはディスクから直読み）。無ければ shallow clone してディレクトリを走査します。同じパッケージを複数のリポジトリが提供する場合は、[`priority`](configuration.md#pnljson-の書き方) が高い方が優先されます（既定リポジトリは最後に参照）。
+
+```sh
+# 既定リポジトリの全パッケージを一覧。
+pnl find
+
+# 名前が "lib" で始まるものだけ。
+pnl find 'lib*'
+```
+
+出力例（名前・利用可能バージョン・取得元リポジトリ）です。
+
+```text
+libusb/libusb 1.0.29 https://github.com/m3m0r7/pnl-packages/tree/main/packages
+libuv/libuv 1.48.0 https://github.com/m3m0r7/pnl-packages/tree/main/packages
 ```
 
 ### `pnl list native`
@@ -259,7 +281,28 @@ pnl repo add https https://example.com/pnl/index.json --key ed25519:<public-key>
 }
 ```
 
-なお、リポジトリインデックスの解決はまだ未完成です。このコマンドは、今後の解決処理と、ローカルファイルリポジトリのフォールバック探索のために設定を記録しておくものです。
+設定したリポジトリは `pnl find` と、名前指定の `pnl install`（bare name 解決）から参照されます。
+
+### `pnl repo index <dir> --base-url <url>`
+
+パッケージのディレクトリから `repository-index.json` を生成します。これにより、`pnl find` がクローンせずにそのリポジトリを一覧できます。`pnlx.json` を含む各パッケージディレクトリを、バージョン・マニフェストパス・コンテンツの `dist.sha256`・`<base-url>/<package-dir>` というインストール可能な `source` URL とともに記録します。
+
+```sh
+# リポジトリチェックアウトの packages/ ツリーをインデックス化。
+pnl repo index packages \
+  --base-url https://github.com/m3m0r7/pnl-packages/tree/main/packages
+```
+
+オプション:
+
+- `--output <file>` … インデックスの出力先（既定: `<dir>/repository-index.json`）。
+- `--reference <ref>` … 各バージョンに記録する git リファレンス（既定: パッケージのバージョン）。
+
+出力例です。
+
+```text
+indexed 106 package(s) into packages/repository-index.json
+```
 
 ### `pnl repo remove <url>`
 

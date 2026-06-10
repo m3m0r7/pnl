@@ -1,7 +1,17 @@
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+use serde_json::json;
+
 use super::FunctionSignature;
 use super::names::{alias_names, bridge_symbol_name};
+
+/// One `'<alias>' => '<bridge symbol>'` entry of the alias map.
+#[derive(Debug, Serialize)]
+struct AliasView {
+    alias: String,
+    bridge: String,
+}
 
 pub(super) fn render_aliases(signatures: &[FunctionSignature]) -> String {
     let mut aliases = BTreeMap::new();
@@ -13,13 +23,13 @@ pub(super) fn render_aliases(signatures: &[FunctionSignature]) -> String {
         }
     }
 
-    let mut lines = String::new();
-    for (alias, native) in aliases {
-        lines.push_str("    '");
-        lines.push_str(&alias);
-        lines.push_str("' => '");
-        lines.push_str(&native);
-        lines.push_str("',\n");
-    }
-    lines
+    // BTreeMap keeps the entries sorted by alias, as the map insertion order did.
+    let aliases = aliases
+        .into_iter()
+        .map(|(alias, bridge)| AliasView { alias, bridge })
+        .collect::<Vec<_>>();
+    super::render_inner_template(
+        super::ALIASES_ENTRIES_TEMPLATE,
+        json!({ "aliases": aliases }),
+    )
 }

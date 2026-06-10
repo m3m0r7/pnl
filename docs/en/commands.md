@@ -181,13 +181,14 @@ Example output:
 uninstalled libusb/libusb
 ```
 
-### `pnl list`
+### `pnl list [glob]`
 
-Lists installed extensions. `pnl list` is the same as `pnl list extensions`.
+Lists installed extensions. `pnl list` is the same as `pnl list extensions`. Pass a glob pattern (`*` and `?`) to filter; it matches both the full `vendor/extension` name and its leaf, so `pnl list 'lib*'` finds `acme/libusb`.
 
 ```sh
 pnl list
 pnl list extensions
+pnl list 'lib*'
 ```
 
 Example output:
@@ -196,6 +197,27 @@ Example output:
 libnfc/libnfc 1.8.0 1.8.0
 libsdl/libsdl 2.32.10 2.32.10
 libusb/libusb 1.0.29 1.0.29
+```
+
+### `pnl find [glob]`
+
+Lists the packages **available** from your configured `repositories` plus the built-in default repository, optionally filtered by a glob pattern. Like `pnl list`, the pattern matches the full `vendor/extension` name or its leaf.
+
+Each repository is enumerated cheaply when it publishes a `repository-index.json` (fetched over HTTP for GitHub/`https` repositories, or read from disk for `file` ones); otherwise pnl falls back to a shallow clone and a directory walk. When two repositories offer the same package, the higher-[`priority`](configuration.md#writing-pnljson) one wins (the default repository is consulted last).
+
+```sh
+# Browse everything the default repository offers.
+pnl find
+
+# Only packages whose name starts with "lib".
+pnl find 'lib*'
+```
+
+Example output (name, available versions, source repository):
+
+```text
+libusb/libusb 1.0.29 https://github.com/m3m0r7/pnl-packages/tree/main/packages
+libuv/libuv 1.48.0 https://github.com/m3m0r7/pnl-packages/tree/main/packages
 ```
 
 ### `pnl list native`
@@ -259,7 +281,28 @@ Result:
 }
 ```
 
-Note that repository-index resolution is not complete yet. This command records configuration for the planned resolver and for fallback discovery of local file repositories.
+Configured repositories are consulted by `pnl find` and by bare-name `pnl install`.
+
+### `pnl repo index <dir> --base-url <url>`
+
+Generates a `repository-index.json` for a directory of packages, so the repository can be browsed with `pnl find` without cloning. Each package directory containing a `pnlx.json` is recorded with its versions, the manifest path, a content `dist.sha256`, and an installable `source` URL of `<base-url>/<package-dir>`.
+
+```sh
+# Index the packages/ tree of a repository checkout.
+pnl repo index packages \
+  --base-url https://github.com/m3m0r7/pnl-packages/tree/main/packages
+```
+
+Options:
+
+- `--output <file>` — where to write the index (default: `<dir>/repository-index.json`).
+- `--reference <ref>` — the git reference recorded for every version (default: the package version).
+
+Example output:
+
+```text
+indexed 106 package(s) into packages/repository-index.json
+```
 
 ### `pnl repo remove <url>`
 

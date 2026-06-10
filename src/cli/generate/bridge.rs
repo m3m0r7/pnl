@@ -1,119 +1,102 @@
+use serde::Serialize;
+use serde_json::json;
+
 use super::FunctionSignature;
 use super::names::bridge_symbol_name;
 use super::types::{
     php_bridge_c_type, rust_ffi_return_type, rust_ffi_type, sanitize_php_param_name,
 };
 
+/// A C-declaration parameter (`<type> <name>`) for the FFI `cdef` block.
+#[derive(Debug, Serialize)]
+struct CdefParam {
+    c_type: String,
+    name: String,
+}
+
+/// One native-function prototype in the generated `cdef`.
+#[derive(Debug, Serialize)]
+struct CdefView {
+    return_type: String,
+    symbol: String,
+    params: Vec<CdefParam>,
+}
+
+/// A Rust FFI parameter (`<name>: <type>`).
+#[derive(Debug, Serialize)]
+struct RustParam {
+    name: String,
+    rust_type: String,
+}
+
+/// One native function for the Rust bridge: its extern declaration and the
+/// `#[no_mangle]` wrapper that forwards to it.
+#[derive(Debug, Serialize)]
+struct BridgeFnView {
+    /// The original native symbol called inside the wrapper.
+    name: String,
+    /// The exported `pnlx_bridge_*` wrapper symbol.
+    symbol: String,
+    params: Vec<RustParam>,
+    return_type: String,
+    has_return: bool,
+}
+
 pub(super) fn render_bridge_cdef(signatures: &[FunctionSignature]) -> String {
-    let mut out = "typedef unsigned long size_t;\ntypedef signed long ssize_t;\n\n".to_owned();
-    for signature in signatures {
-        out.push_str(&php_bridge_c_type(&signature.return_type));
-        out.push(' ');
-        out.push_str(&bridge_symbol_name(signature));
-        out.push('(');
-        if signature.params.is_empty() {
-            out.push_str("void");
-        } else {
-            out.push_str(
-                &signature
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, param)| {
-                        format!(
-                            "{} {}",
-                            php_bridge_c_type(&param.type_name),
-                            sanitize_php_param_name(&param.name, index)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-        }
-        out.push_str(");\n");
-    }
-    out
+    let functions = signatures
+        .iter()
+        .map(|signature| CdefView {
+            return_type: php_bridge_c_type(&signature.return_type),
+            symbol: bridge_symbol_name(signature),
+            params: signature
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| CdefParam {
+                    c_type: php_bridge_c_type(&param.type_name),
+                    name: sanitize_php_param_name(&param.name, index),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    super::render_inner_template(
+        super::BRIDGE_CDEF_TEMPLATE,
+        json!({ "functions": functions }),
+    )
 }
 
 pub(super) fn render_bridge_functions(signatures: &[FunctionSignature]) -> String {
-    if signatures.is_empty() {
-        return "// No native functions were discovered for this bridge.\n".to_owned();
-    }
-
-    let mut out = String::new();
-    out.push_str("mod native {\n");
-    out.push_str("    use super::*;\n");
-    out.push_str("    unsafe extern \"C\" {\n");
-    for signature in signatures {
-        render_native_declaration(&mut out, signature);
-    }
-    out.push_str("    }\n");
-    out.push_str("}\n\n");
-    for signature in signatures {
-        render_bridge_wrapper(&mut out, signature);
-    }
-    out
-}
-
-fn render_native_declaration(out: &mut String, signature: &FunctionSignature) {
-    out.push_str("        pub fn ");
-    out.push_str(&signature.name);
-    out.push('(');
-    out.push_str(&rust_params(signature));
-    out.push(')');
-    let return_type = rust_ffi_return_type(&signature.return_type);
-    if return_type != "()" {
-        out.push_str(" -> ");
-        out.push_str(&return_type);
-    }
-    out.push_str(";\n");
-}
-
-fn render_bridge_wrapper(out: &mut String, signature: &FunctionSignature) {
-    out.push_str("#[unsafe(no_mangle)]\n");
-    out.push_str("pub unsafe extern \"C\" fn ");
-    out.push_str(&bridge_symbol_name(signature));
-    out.push('(');
-    out.push_str(&rust_params(signature));
-    out.push(')');
-    let return_type = rust_ffi_return_type(&signature.return_type);
-    if return_type != "()" {
-        out.push_str(" -> ");
-        out.push_str(&return_type);
-    }
-    out.push_str(" {\n");
-    out.push_str("    unsafe { native::");
-    out.push_str(&signature.name);
-    out.push('(');
-    out.push_str(&rust_arg_names(signature));
-    out.push_str(") }\n");
-    out.push_str("}\n\n");
-}
-
-fn rust_params(signature: &FunctionSignature) -> String {
-    signature
-        .params
+    let functions = signatures
         .iter()
-        .enumerate()
-        .map(|(index, param)| {
-            format!(
-                "{}: {}",
-                rust_param_name(&param.name, index),
-                rust_ffi_type(&param.type_name)
-            )
+        .map(|signature| {
+            let return_type = rust_ffi_return_type(&signature.return_type);
+            BridgeFnView {
+                name: signature.name.clone(),
+                symbol: bridge_symbol_name(signature),
+                params: rust_params(signature),
+                has_return: return_type != "()",
+                return_type,
+            }
         })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+
+    super::render_inner_template(
+        super::BRIDGE_FUNCTIONS_TEMPLATE,
+        json!({ "functions": functions }),
+    )
 }
 
-fn rust_arg_names(signature: &FunctionSignature) -> String {
+fn rust_params(signature: &FunctionSignature) -> Vec<RustParam> {
     signature
         .params
         .iter()
         .enumerate()
-        .map(|(index, param)| rust_param_name(&param.name, index))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(|(index, param)| RustParam {
+            name: rust_param_name(&param.name, index),
+            rust_type: rust_ffi_type(&param.type_name),
+        })
+        .collect()
 }
 
 fn rust_param_name(name: &str, index: usize) -> String {
