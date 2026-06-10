@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -23,6 +23,7 @@ use package::{installed_package_dir, pnl_lock_path, pnlx_pathmap_path, write_pnl
 #[command(name = "pnl")]
 #[command(about = "Manage PHP native-library extensions")]
 #[command(version)]
+#[command(arg_required_else_help = true)]
 struct Cli {
     /// Do not ask interactive questions; accept the default answer for each prompt.
     #[arg(short = 'n', long, global = true)]
@@ -32,8 +33,16 @@ struct Cli {
     #[arg(short = 'y', long, global = true)]
     yes: bool,
 
+    /// Show environment, version, and installed-extension information.
+    #[arg(short = 'i', long)]
+    information: bool,
+
+    /// Show the pnl license and third-party component licenses.
+    #[arg(short = 'l', long)]
+    license: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,7 +77,15 @@ enum Command {
     },
     Validate,
     Version,
-    SelfUpgrade,
+    SelfUpgrade {
+        /// Directory where the pnl/pnlx symlinks are placed.
+        #[arg(long, default_value = "/usr/local/bin")]
+        bin_dir: PathBuf,
+        /// Install root holding versions/<version> and the `current` link
+        /// [default: $PNL_HOME, then $XDG_DATA_HOME/pnl, then ~/.local/share/pnl].
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -105,8 +122,20 @@ enum RepoKind {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.information {
+        return crate::about::print_information(crate::about::Tool::Pnl);
+    }
+    if cli.license {
+        return crate::about::print_license();
+    }
+    let Some(command) = cli.command else {
+        use clap::CommandFactory;
+        Cli::command().print_help()?;
+        return Ok(());
+    };
+
     let interaction = Interaction::new(cli.no_interaction, cli.yes);
-    match cli.command {
+    match command {
         Command::Init => init_pnl(Path::new(".")),
         Command::Install {
             targets,
@@ -130,7 +159,9 @@ pub fn run() -> Result<()> {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::SelfUpgrade => bail!("self-upgrade is not implemented yet"),
+        Command::SelfUpgrade { bin_dir, home } => {
+            crate::self_upgrade::self_upgrade(&bin_dir, home.as_deref())
+        }
     }
 }
 

@@ -48,20 +48,24 @@ target/release/pnl
 target/release/pnlx
 ```
 
-ビルドしたバイナリを任意の場所にインストールします。
+ビルドしたバイナリをインストールします。
 
 ```sh
-# リリースバイナリを /usr/local/bin にコピーします。
+# $XDG_DATA_HOME/pnl 配下にインストールし、/usr/local/bin から pnl/pnlx へのシンボリックリンクを張ります。
 make install PREFIX=/usr/local
 ```
 
-成功するとこうなります。
+バイナリはバージョン別のレイアウトにインストールされ、`PREFIX` の bin ディレクトリにはシンボリックリンクだけが置かれます。
 
 ```text
-install -d "/usr/local/bin"
-install -m 0755 target/release/pnl "/usr/local/bin/pnl"
-install -m 0755 target/release/pnlx "/usr/local/bin/pnlx"
+~/.local/share/pnl/versions/<version>/bin/pnl
+~/.local/share/pnl/versions/<version>/bin/pnlx
+~/.local/share/pnl/current -> versions/<version>
+/usr/local/bin/pnl  -> ~/.local/share/pnl/current/bin/pnl
+/usr/local/bin/pnlx -> ~/.local/share/pnl/current/bin/pnlx
 ```
+
+インストール先のルートは XDG Base Directory 仕様に従い `$XDG_DATA_HOME/pnl`（デフォルト `~/.local/share/pnl`）です。`make install PNL_HOME=/path/to/pnl-home` で変更できます。`pnl self-upgrade` も同じレイアウトを使い、新しいバージョンをビルドして `current` リンクを差し替えます（[コマンド](commands.md) を参照）。
 
 開発中は `cargo build` のあと `target/debug/pnl` と `target/debug/pnlx` を直接呼び出すこともできます。ただしこの README の例は、基本的にインストール済みの `pnl` / `pnlx` を前提に書いています。
 

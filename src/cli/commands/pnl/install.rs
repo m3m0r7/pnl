@@ -238,13 +238,44 @@ fn install_bare_name(
     );
 }
 
-/// The `installation` key for the current platform (matches the pnl OS names).
-fn current_os_key() -> &'static str {
+/// The `installation` keys tried for the current platform, most specific
+/// first. On Linux the distro ID from /etc/os-release (e.g. `alpine`,
+/// `ubuntu`, `fedora`) is tried before each `ID_LIKE` ancestor (e.g. `debian`,
+/// `rhel`) and the generic `linux` fallback.
+fn installation_key_candidates() -> Vec<String> {
     match std::env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "windows",
-        other => other,
+        "macos" => vec!["darwin".to_owned()],
+        "linux" => {
+            let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+            linux_installation_keys(&os_release)
+        }
+        other => vec![other.to_owned()],
     }
+}
+
+/// Candidate keys from /etc/os-release content: `ID`, then the `ID_LIKE`
+/// tokens, then `linux`.
+fn linux_installation_keys(os_release: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut id_like = Vec::new();
+    for line in os_release.lines() {
+        if let Some(value) = line.strip_prefix("ID=") {
+            keys.push(unquote_os_release(value).to_owned());
+        } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
+            id_like = unquote_os_release(value)
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect();
+        }
+    }
+    keys.extend(id_like);
+    keys.push("linux".to_owned());
+    keys.dedup();
+    keys
+}
+
+fn unquote_os_release(value: &str) -> &str {
+    value.trim().trim_matches(|ch| ch == '"' || ch == '\'')
 }
 
 /// Run a shell command line, inheriting stdio so the user sees its output.
@@ -268,7 +299,11 @@ fn maybe_install_native_dependencies(
     extension: &PnlxManifest,
     interaction: &crate::interaction::Interaction,
 ) -> Result<()> {
-    let Some(entry) = extension.installation.get(current_os_key()) else {
+    let candidates = installation_key_candidates();
+    let Some(entry) = candidates
+        .iter()
+        .find_map(|key| extension.installation.get(key))
+    else {
         return Ok(());
     };
 
@@ -309,7 +344,10 @@ fn maybe_install_native_dependencies(
         let status =
             run_shell(cmd).with_context(|| format!("failed to run install command: {cmd}"))?;
         if !status.success() {
-            bail!("install command failed ({status}): {cmd}");
+            bail!(
+                "tried to install the native dependencies of {name} with the following command, but it failed ({status}):\n    {cmd}\n  install the required libraries and headers manually, then run `pnl install {name}` again",
+                name = extension.name,
+            );
         }
     }
 
@@ -552,14 +590,22 @@ fn install_local_extension(
     write_pnlx_autoload(root)?;
     crate::ui::success(&format!("installed extension {}", extension.name));
 
-    // Show the package's optional PHP usage examples so users see how to call it.
+    // Show the package's optional usage examples — package-relative files
+    // (e.g. EXAMPLES.md) — so users see how to call it.
     for (index, example) in extension.examples.iter().enumerate() {
         let label = if extension.examples.len() > 1 {
-            format!("example {} — {}", index + 1, extension.name)
+            format!("example {} — {} ({example})", index + 1, extension.name)
         } else {
-            format!("usage — {}", extension.name)
+            format!("usage — {} ({example})", extension.name)
         };
-        crate::ui::example_block(&label, example);
+        let path = installed_extension_root.join(example);
+        match std::fs::read_to_string(&path) {
+            Ok(body) => crate::ui::example_block(&label, body.trim_end()),
+            Err(_) => crate::ui::warn(&format!(
+                "example file {example} is missing from the {} package",
+                extension.name
+            )),
+        }
     }
 
     Ok(())
@@ -633,6 +679,25 @@ fn verify_locked_integrity(
 mod tests {
     use super::super::package::tree_sha256;
     use super::{InstallSource, path_from_file_url, resolve_install_source, split_version_pin};
+
+    #[test]
+    fn resolves_linux_installation_keys_from_os_release() {
+        use super::linux_installation_keys;
+        assert_eq!(
+            linux_installation_keys("ID=ubuntu\nID_LIKE=debian\n"),
+            vec!["ubuntu", "debian", "linux"]
+        );
+        assert_eq!(
+            linux_installation_keys("ID=alpine\n"),
+            vec!["alpine", "linux"]
+        );
+        assert_eq!(
+            linux_installation_keys("ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n"),
+            vec!["rocky", "rhel", "centos", "fedora", "linux"]
+        );
+        // No /etc/os-release (or an unreadable one) still falls back to linux.
+        assert_eq!(linux_installation_keys(""), vec!["linux"]);
+    }
 
     #[test]
     fn recognizes_bare_package_names() {

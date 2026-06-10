@@ -1,3 +1,4 @@
+pub mod about;
 pub mod archive;
 pub mod commands;
 pub mod fetch;
@@ -9,6 +10,7 @@ pub mod io;
 pub mod manifest;
 pub mod platform;
 pub mod schema;
+pub mod self_upgrade;
 pub mod ui;
 pub mod validate;
 pub mod version;
@@ -237,6 +239,15 @@ mod tests {
         assert!(validate_version_constraint("").is_err());
         assert!(validate_version_constraint(">=1.2.0 <2.0.0").is_err());
         assert!(validate_version_constraint(">=1.2").is_err());
+    }
+
+    #[test]
+    fn validates_example_paths_are_package_relative() {
+        use crate::validate::validate_relative_package_path;
+        validate_relative_package_path("examples", "EXAMPLES.md").unwrap();
+        validate_relative_package_path("examples", "docs/EXAMPLES.md").unwrap();
+        assert!(validate_relative_package_path("examples", "/etc/passwd").is_err());
+        assert!(validate_relative_package_path("examples", "../outside.md").is_err());
     }
 
     #[test]

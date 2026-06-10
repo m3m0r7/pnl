@@ -38,6 +38,11 @@ pub fn validate_pnlx_workspace(root: &Path) -> Result<()> {
     let manifest = read_json::<PnlxManifest>(&root.join("pnlx.json"))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnlx_manifest_values(&manifest)?;
+    for example in &manifest.examples {
+        if !root.join(example).is_file() {
+            bail!("examples entry {example} does not exist in the package");
+        }
+    }
 
     crate::ui::success("pnlx workspace is valid");
     Ok(())
@@ -83,7 +88,26 @@ pub fn validate_pnlx_manifest_values(manifest: &PnlxManifest) -> Result<()> {
         validate_package_name(name)?;
         validate_version_constraint(&requirement.version)?;
     }
+    for example in &manifest.examples {
+        validate_relative_package_path("examples", example)?;
+    }
 
+    Ok(())
+}
+
+/// Package-relative file references (e.g. `examples` entries) must stay inside
+/// the package directory.
+pub fn validate_relative_package_path(field: &str, value: &str) -> Result<()> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute() {
+        bail!("{field} entries must be paths relative to the package root: {value}");
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("{field} entries must not contain ..: {value}");
+    }
     Ok(())
 }
 

@@ -48,20 +48,24 @@ target/release/pnl
 target/release/pnlx
 ```
 
-Install the binaries to a prefix of your choice:
+Install the binaries:
 
 ```sh
-# Copy the release binaries into /usr/local/bin.
+# Install under $XDG_DATA_HOME/pnl and link pnl/pnlx from /usr/local/bin.
 make install PREFIX=/usr/local
 ```
 
-On success:
+The binaries are installed into a versioned layout, and the `PREFIX` bin directory receives symlinks only:
 
 ```text
-install -d "/usr/local/bin"
-install -m 0755 target/release/pnl "/usr/local/bin/pnl"
-install -m 0755 target/release/pnlx "/usr/local/bin/pnlx"
+~/.local/share/pnl/versions/<version>/bin/pnl
+~/.local/share/pnl/versions/<version>/bin/pnlx
+~/.local/share/pnl/current -> versions/<version>
+/usr/local/bin/pnl  -> ~/.local/share/pnl/current/bin/pnl
+/usr/local/bin/pnlx -> ~/.local/share/pnl/current/bin/pnlx
 ```
+
+The install root follows the XDG Base Directory spec: `$XDG_DATA_HOME/pnl`, defaulting to `~/.local/share/pnl`. It can be changed with `make install PNL_HOME=/path/to/pnl-home`. `pnl self-upgrade` later updates the same layout by switching the `current` link to a newly built version (see [Commands](commands.md)).
 
 During development you can also call `target/debug/pnl` and `target/debug/pnlx` directly after `cargo build`. That said, the examples in this README assume the installed `pnl` / `pnlx` binaries.
 

@@ -26,6 +26,37 @@ Example output:
 0.1.0
 ```
 
+### `pnl -i` / `pnl --information`
+
+Prints a neofetch-style banner: the pnl ASCII-art logo next to the version, OS and architecture, host, binary location, repository URLs, license, copyright, and the extensions installed in the current workspace with their install locations. `pnlx -i` / `pnlx --information` prints the same with the pnlx logo.
+
+```sh
+pnl -i
+```
+
+Example output:
+
+```text
+  ██████╗ ███╗   ██╗██╗        pnl 0.1.5
+  ██╔══██╗████╗  ██║██║        ─────────
+  ██████╔╝██╔██╗ ██║██║        OS:         macos (aarch64)
+  ██╔═══╝ ██║╚██╗██║██║        Host:       mymachine.local
+  ██║     ██║ ╚████║███████╗   Binary:     /usr/local/bin/pnl
+  ╚═╝     ╚═╝  ╚═══╝╚══════╝   Repository: https://github.com/m3m0r7/pnl
+                               Packages:   https://github.com/m3m0r7/pnl-packages
+                               License:    MIT (run `pnl --license` for details)
+                               Copyright:  Copyright (c) 2026 memory
+                               Extensions: libsdl/libsdl 2.32.10 (./@pnlx/packages/libsdl/libsdl/2.32.10)
+```
+
+### `pnl -l` / `pnl --license`
+
+Prints the LICENSE file verbatim (it is embedded into the binary at build time), followed by the third-party components that require attribution: the runtime Rust crates, the bundled/dynamically loaded native libraries (vendored libgit2 and OpenSSL, runtime-loaded libclang), and the PHP SDK's runtime composer packages. `pnlx -l` / `pnlx --license` prints the same.
+
+```sh
+pnl --license
+```
+
 ### `pnl init`
 
 Creates a default `pnl.json` if one doesn't already exist.
@@ -67,7 +98,7 @@ The source can be a URL, a local path, a **bare package name**, or a **distribut
 
 A bare name is resolved against your configured `repositories`, highest [`priority`](configuration.md#writing-pnljson) first, falling back to the built-in default repository `https://github.com/m3m0r7/pnl-packages` (kept internally at priority 0 — it is *not* written into `pnl.json`). Append `@<version>` to pin a version — for git sources that checks out the matching tag/branch, and the resolved package version must match. Running `pnl install` with **no source** restores every extension from the lockfile at its locked version, re-verifying each package's content against the recorded sha256.
 
-If the package declares an `installation` recipe for your OS, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `checkIfExists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default).
+If the package declares an `installation` recipe for your OS or Linux distro, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `checkIfExists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default). On Linux the recipe is selected from `/etc/os-release`: the distro `ID` (e.g. `alpine`, `ubuntu`, `fedora`) is tried first, then each `ID_LIKE` ancestor (e.g. `debian`, `rhel`), then a generic `linux` key. If the install commands fail, pnl reports which command failed and asks you to install the libraries and headers manually before running `pnl install` again.
 
 Two flags adjust the generated PHP:
 
@@ -263,7 +294,38 @@ It checks:
 
 ### `pnl self-upgrade`
 
-A reserved command. It currently returns a "not implemented" error.
+Upgrades `pnl` / `pnlx` themselves. It fetches the release tags from https://github.com/m3m0r7/pnl.git, and when a tag newer than the running version exists, it downloads that tag's source archive, builds it with `cargo build --release`, and installs it into a versioned layout:
+
+```text
+~/.local/share/pnl/versions/<version>/bin/pnl
+~/.local/share/pnl/versions/<version>/bin/pnlx
+~/.local/share/pnl/current -> versions/<version>
+/usr/local/bin/pnl  -> ~/.local/share/pnl/current/bin/pnl
+/usr/local/bin/pnlx -> ~/.local/share/pnl/current/bin/pnlx
+```
+
+Because `/usr/local/bin` holds only symlinks, an upgrade just swaps the `current` link — the binaries themselves are never overwritten in place.
+
+```sh
+pnl self-upgrade
+# Place the symlinks somewhere other than /usr/local/bin.
+pnl self-upgrade --bin-dir ~/bin
+# Use a different install root.
+pnl self-upgrade --home /opt/pnl
+```
+
+Example output when already up to date:
+
+```text
+pnl 0.1.5 is already the latest release in 0.25s
+```
+
+Notes:
+
+- The install root follows the XDG Base Directory spec: `$XDG_DATA_HOME/pnl`, which defaults to `~/.local/share/pnl`. It can be changed with `--home` or the `PNL_HOME` environment variable (`--home` wins).
+- Building requires a Rust toolchain (`cargo`).
+- If `/usr/local/bin` is not writable, re-run with `sudo` or pass `--bin-dir`.
+- Pre-release tags (e.g. `v1.0.0-rc.1`) are ignored.
 
 
 ## pnlx Commands

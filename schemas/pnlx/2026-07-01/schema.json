@@ -64,13 +64,15 @@
             "items": {
               "type": "string",
               "minLength": 1
-            }
+            },
+            "description": "Paths to usage example files (e.g. EXAMPLES.md), relative to the package root. Their content is printed when pnl install finishes."
           },
           "installation": {
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/installationEntry"
-            }
+            },
+            "description": "Native-dependency install recipes keyed by OS or Linux distro name: darwin, windows, alpine, ubuntu, debian, fedora, rhel, ..., or the generic linux fallback. On Linux the distro ID and ID_LIKE values from /etc/os-release are matched first."
           },
           "headers": {
             "type": "array",

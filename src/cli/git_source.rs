@@ -279,7 +279,7 @@ fn fetch_options<'cb>() -> FetchOptions<'cb> {
     options
 }
 
-fn authenticate(
+pub(crate) fn authenticate(
     url: &str,
     username: Option<&str>,
     allowed: CredentialType,

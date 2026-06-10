@@ -26,13 +26,22 @@ use resolution::{
 #[command(name = "pnlx")]
 #[command(about = "Develop PHP native-library extensions")]
 #[command(version)]
+#[command(arg_required_else_help = true)]
 struct Cli {
     /// Do not ask interactive questions; accept the default answer for each prompt.
     #[arg(short = 'n', long, global = true)]
     no_interaction: bool,
 
+    /// Show environment, version, and installed-extension information.
+    #[arg(short = 'i', long)]
+    information: bool,
+
+    /// Show the pnlx license and third-party component licenses.
+    #[arg(short = 'l', long)]
+    license: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -53,10 +62,22 @@ enum Command {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.information {
+        return crate::about::print_information(crate::about::Tool::Pnlx);
+    }
+    if cli.license {
+        return crate::about::print_license();
+    }
+    let Some(command) = cli.command else {
+        use clap::CommandFactory;
+        Cli::command().print_help()?;
+        return Ok(());
+    };
+
     // pnlx has no interactive prompts yet, but it accepts --no-interaction so
     // scripts can pass the same flags to both binaries.
     let _interaction = Interaction::new(cli.no_interaction, false);
-    match cli.command {
+    match command {
         Command::Init => init_pnlx(Path::new(".")),
         Command::Validate => validate_pnlx_workspace(Path::new(".")),
         Command::Gen {

@@ -26,6 +26,37 @@ pnl version
 0.1.0
 ```
 
+### `pnl -i` / `pnl --information`
+
+neofetch 風のバナーを表示します。pnl の AA ロゴの横に、バージョン、OS とアーキテクチャ、ホスト名、バイナリの場所、リポジトリ URL、ライセンス、コピーライト、そして現在のワークスペースにインストール済みの拡張とそのインストール先を表示します。`pnlx -i` / `pnlx --information` は pnlx のロゴで同じ内容を表示します。
+
+```sh
+pnl -i
+```
+
+出力例です。
+
+```text
+  ██████╗ ███╗   ██╗██╗        pnl 0.1.5
+  ██╔══██╗████╗  ██║██║        ─────────
+  ██████╔╝██╔██╗ ██║██║        OS:         macos (aarch64)
+  ██╔═══╝ ██║╚██╗██║██║        Host:       mymachine.local
+  ██║     ██║ ╚████║███████╗   Binary:     /usr/local/bin/pnl
+  ╚═╝     ╚═╝  ╚═══╝╚══════╝   Repository: https://github.com/m3m0r7/pnl
+                               Packages:   https://github.com/m3m0r7/pnl-packages
+                               License:    MIT (run `pnl --license` for details)
+                               Copyright:  Copyright (c) 2026 memory
+                               Extensions: libsdl/libsdl 2.32.10 (./@pnlx/packages/libsdl/libsdl/2.32.10)
+```
+
+### `pnl -l` / `pnl --license`
+
+LICENSE ファイルの中身をそのまま表示します（ビルド時にバイナリへ埋め込まれます）。続けて、帰属表示が必要なサードパーティコンポーネントも出力します: ランタイムの Rust クレート、同梱／動的読み込みのネイティブライブラリ（vendored libgit2・OpenSSL、実行時読み込みの libclang）、PHP SDK のランタイム composer パッケージです。`pnlx -l` / `pnlx --license` も同じ内容を表示します。
+
+```sh
+pnl --license
+```
+
 ### `pnl init`
 
 `pnl.json` が無ければ、初期設定ファイルを作ります。
@@ -67,7 +98,7 @@ initialized ./pnl.json
 
 パッケージ名だけの場合、設定済みの `repositories` を [`priority`](configuration.md#pnljson-の書き方) の高い順に参照し、最後に組み込みの既定リポジトリ `https://github.com/m3m0r7/pnl-packages`（内部的に priority 0 として保持。`pnl.json` には書き込まれません）へフォールバックします。`@<version>` でバージョンを固定できます（git は対応するタグ/ブランチを checkout し、解決したバージョンと一致検証）。**ソースを省略**すると、ロックファイルに記録された各拡張をその固定バージョンで復元し、内容を記録済みの sha256 で再検証します。
 
-パッケージが対象 OS の `installation` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `checkIfExists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。
+パッケージが対象 OS / Linux ディストリビューションの `installation` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `checkIfExists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。Linux ではレシピは `/etc/os-release` から選択されます。ディストリビューションの `ID`（例: `alpine`・`ubuntu`・`fedora`）→ `ID_LIKE` の各祖先（例: `debian`・`rhel`）→ 汎用の `linux` キーの順で照合します。インストールコマンドが失敗した場合は、どのコマンドが失敗したかを表示し、手動でライブラリとヘッダーをインストールしてから改めて `pnl install` を実行するよう案内します。
 
 生成される PHP を調整するフラグ:
 
@@ -263,7 +294,38 @@ pnl workspace is valid
 
 ### `pnl self-upgrade`
 
-予約済みのコマンドです。現時点では「未実装」のエラーを返します。
+`pnl` / `pnlx` 自身をアップグレードします。https://github.com/m3m0r7/pnl.git からリリースタグを取得し、実行中のバージョンより新しいタグがあれば、そのタグのソースアーカイブをダウンロードして `cargo build --release` でビルドし、バージョン別のレイアウトにインストールします。
+
+```text
+~/.local/share/pnl/versions/<version>/bin/pnl
+~/.local/share/pnl/versions/<version>/bin/pnlx
+~/.local/share/pnl/current -> versions/<version>
+/usr/local/bin/pnl  -> ~/.local/share/pnl/current/bin/pnl
+/usr/local/bin/pnlx -> ~/.local/share/pnl/current/bin/pnlx
+```
+
+`/usr/local/bin` に置かれるのはシンボリックリンクだけなので、アップグレードは `current` リンクの差し替えだけで完了します。バイナリ本体をその場で上書きすることはありません。
+
+```sh
+pnl self-upgrade
+# /usr/local/bin 以外にシンボリックリンクを置く場合。
+pnl self-upgrade --bin-dir ~/bin
+# インストール先のルートを変える場合。
+pnl self-upgrade --home /opt/pnl
+```
+
+すでに最新の場合の出力例です。
+
+```text
+pnl 0.1.5 is already the latest release in 0.25s
+```
+
+補足:
+
+- インストール先のルートは XDG Base Directory 仕様に従い `$XDG_DATA_HOME/pnl`（デフォルト `~/.local/share/pnl`）です。`--home` または環境変数 `PNL_HOME` で変更できます（`--home` が優先）。
+- ビルドには Rust ツールチェイン（`cargo`）が必要です。
+- `/usr/local/bin` に書き込めない場合は `sudo` で再実行するか、`--bin-dir` を指定してください。
+- プレリリースタグ（例: `v1.0.0-rc.1`）は対象外です。
 
 
 ## `pnlx` コマンド

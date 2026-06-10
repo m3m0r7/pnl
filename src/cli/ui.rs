@@ -32,7 +32,7 @@ fn green(text: &str) -> String {
     sgr("32", text)
 }
 
-fn cyan(text: &str) -> String {
+pub fn cyan(text: &str) -> String {
     sgr("36", text)
 }
 
@@ -40,7 +40,7 @@ fn yellow(text: &str) -> String {
     sgr("33", text)
 }
 
-fn magenta(text: &str) -> String {
+pub fn magenta(text: &str) -> String {
     sgr("35", text)
 }
 
