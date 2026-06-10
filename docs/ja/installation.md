@@ -31,6 +31,14 @@ macOS/aarch64（Homebrew で libusb, libnfc, SDL2 を導入）
 PHP の FFI が使えるかどうかは実行時にチェックされます。もし PHP が FFI を使えない設定だと、bridge を読み込む前に SDK が FFI 関連の例外を投げます。
 
 
+## Composer でのインストール
+
+PHP プロジェクトでは composer パッケージが最も簡単です。SDK が入り、インストール時に CLI バイナリが `vendor/bin` にビルドされます（[PHP からの使い方](php-usage.md#composer-でのインストール) を参照）。
+
+```sh
+composer require m3m0r7/pnl
+```
+
 ## ビルドとインストール
 
 リリース用のバイナリをビルドします。

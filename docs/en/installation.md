@@ -31,6 +31,14 @@ macOS/aarch64 with Homebrew libusb, libnfc, SDL2
 Whether PHP can use FFI is checked at runtime. If PHP cannot use FFI, the SDK raises an FFI-related exception before loading any bridge.
 
 
+## Install Via Composer
+
+In a PHP project, the simplest path is the composer package, which ships the SDK and builds the CLI binaries into `vendor/bin` on install (see [PHP Usage](php-usage.md#install-via-composer)):
+
+```sh
+composer require m3m0r7/pnl
+```
+
 ## Build And Install
 
 Build the release binaries:

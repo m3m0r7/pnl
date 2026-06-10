@@ -2,6 +2,37 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/php-usage.md)
 
+## Install Via Composer
+
+The SDK and the CLI come from a single composer package:
+
+```sh
+composer require m3m0r7/pnl
+```
+
+The package is a composer plugin — allow it when composer asks (or add it up front):
+
+```json
+"config": {
+  "allow-plugins": {
+    "m3m0r7/pnl": true
+  }
+}
+```
+
+After the package is installed, the plugin builds the bundled Rust CLI sources and links the binaries into your project:
+
+1. `make validate` — pre-install gate: verifies the environment can build (Rust toolchain, C compiler).
+2. `make build` — compiles the release `pnl` / `pnlx` binaries.
+3. `make install BIN_DIR=vendor/bin` — installs them under `$PNL_HOME` (default `~/.local/share/pnl`) and links `vendor/bin/pnl` / `vendor/bin/pnlx`.
+
+A Rust toolchain (https://rustup.rs) is required; if the toolchain is missing, the validate step fails with instructions before anything is compiled. When the linked binaries already match the bundled version, the whole step is skipped, so subsequent `composer install` runs are fast.
+
+```sh
+vendor/bin/pnl version
+vendor/bin/pnl install libusb
+```
+
 ## PHP Usage
 
 First, install the sample packages:

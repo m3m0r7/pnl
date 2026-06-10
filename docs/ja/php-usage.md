@@ -2,6 +2,37 @@
 
 [← ドキュメント目次](../../README.ja.md) · [English](../en/php-usage.md)
 
+## Composer でのインストール
+
+SDK と CLI は 1 つの composer パッケージとして導入できます。
+
+```sh
+composer require m3m0r7/pnl
+```
+
+このパッケージは composer プラグインです。composer に確認されたら許可してください（事前に設定しておくこともできます）。
+
+```json
+"config": {
+  "allow-plugins": {
+    "m3m0r7/pnl": true
+  }
+}
+```
+
+パッケージのインストール後、プラグインが同梱の Rust ソースから CLI をビルドし、プロジェクトにリンクします。
+
+1. `make validate` … インストール前のゲート。ビルドできる環境か（Rust ツールチェイン・C コンパイラの有無）を検証します。
+2. `make build` … リリース版の `pnl` / `pnlx` をビルドします。
+3. `make install BIN_DIR=vendor/bin` … `$PNL_HOME`（デフォルト `~/.local/share/pnl`）にインストールし、`vendor/bin/pnl` / `vendor/bin/pnlx` をリンクします。
+
+Rust ツールチェイン（https://rustup.rs）が必要です。無い場合は何もコンパイルされる前に validate が案内付きで失敗します。リンク済みバイナリが同梱バージョンと一致している場合は全体がスキップされるため、2 回目以降の `composer install` は高速です。
+
+```sh
+vendor/bin/pnl version
+vendor/bin/pnl install libusb
+```
+
 ## PHP からの使い方
 
 まず、サンプル用のパッケージをインストールします。
