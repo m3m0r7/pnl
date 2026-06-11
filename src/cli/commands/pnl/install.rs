@@ -103,6 +103,7 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
 /// (when set) asserts the resolved package version — these differ for a lockfile
 /// restore, where the git ref stays on the source's branch but the version must
 /// still match what was locked.
+#[allow(clippy::too_many_arguments)]
 fn install_one(
     root: &Path,
     manifest: &mut PnlManifest,
@@ -251,6 +252,7 @@ pub(super) fn is_bare_package_name(target: &str) -> bool {
 
 /// Resolve a bare package name by appending it to each configured repository URL
 /// and installing the first one that exists.
+#[allow(clippy::too_many_arguments)]
 fn install_bare_name(
     root: &Path,
     manifest: &mut PnlManifest,
@@ -511,6 +513,7 @@ enum ExtensionSource {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_git_extension(
     root: &Path,
     manifest: &mut PnlManifest,
@@ -608,6 +611,7 @@ fn ensure_extension_source_path(path: &Path, original: &str) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_local_extension(
     root: &Path,
     manifest: &mut PnlManifest,
