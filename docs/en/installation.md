@@ -2,6 +2,13 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/installation.md)
 
+## Table of Contents
+
+- [Requirements](#requirements)
+- [Install Via Composer](#install-via-composer)
+- [Download A Prebuilt Binary](#download-a-prebuilt-binary)
+- [Manual Install](#manual-install)
+
 ## Requirements
 
 At a minimum, you need the following:

@@ -2,6 +2,15 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/php-usage.md)
 
+## Table of Contents
+
+- [Install Via Composer](#install-via-composer)
+- [PHP Usage](#php-usage-1)
+  - [libusb: version, error name, and device count](#libusb-version-error-name-and-device-count)
+  - [SDL: open a window (object methods)](#sdl-open-a-window-object-methods)
+  - [SDL: open a window (global functions)](#sdl-open-a-window-global-functions)
+- [Generated Files](#generated-files)
+
 ## Install Via Composer
 
 The SDK and the CLI come from a single composer package:

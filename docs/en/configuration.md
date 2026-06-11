@@ -2,6 +2,12 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/configuration.md)
 
+## Table of Contents
+
+- [Project Layout](#project-layout)
+- [Writing `pnl.json`](#writing-pnljson)
+  - [Native library discovery](#native-library-discovery)
+
 ## Project Layout
 
 After you install extensions, a PHP project looks like this. Everything under `@pnlx/` is generated, so you normally don't edit it by hand:
@@ -111,8 +117,11 @@ What each field means:
 Examples of `repositories` entries:
 
 ```jsonc
-// A local package index.
+// A local package index, as a file:// URL.
 { "type": "file", "url": "file://packages" }
+
+// A local package index, as a plain directory path (absolute or relative).
+{ "type": "file", "url": "/Users/me/work/pnl-packages" }
 
 // A Git-backed package index.
 { "type": "git", "url": "git@github.com:vendor/pnl-index.git" }
@@ -121,7 +130,7 @@ Examples of `repositories` entries:
 { "type": "https", "url": "https://example.com/pnl/index.json", "key": "ed25519:<public-key>" }
 ```
 
-`type` can be `file`, `git`, or `https`. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
+`type` can be `file`, `git`, or `https`. A `file` repository points at a **local directory** that holds your packages — give it either a `file://` URL or a plain filesystem path (absolute or relative to the project root). `pnl find` and bare-name `pnl install` enumerate it from disk, preferring a committed `repository-index.json` (see [`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url)) and falling back to a directory walk. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
 
 `load_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses `pkg-config`, C include environment variables, package-local includes, and common system include directories.
 

@@ -2,6 +2,37 @@
 
 [← ドキュメント目次](../../README.ja.md) · [English](../en/commands.md)
 
+## 目次
+
+- [`pnl` コマンド](#pnl-コマンド)
+  - [`pnl help`](#pnl-help)
+  - [`pnl version`](#pnl-version)
+  - [`pnl -i` / `pnl --information`](#pnl--i--pnl---information)
+  - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
+  - [`pnl init`](#pnl-init)
+  - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
+  - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
+  - [`pnl list [glob]`](#pnl-list-glob)
+  - [`pnl find [glob]`](#pnl-find-glob)
+  - [`pnl list native`](#pnl-list-native)
+  - [`pnl list repos`](#pnl-list-repos)
+  - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
+  - [`pnl repo index <dir> --base-url <url>`](#pnl-repo-index-dir---base-url-url)
+  - [`pnl repo remove <url>`](#pnl-repo-remove-url)
+  - [`pnl validate`](#pnl-validate)
+  - [`pnl self-upgrade`](#pnl-self-upgrade)
+  - [起動時のアップデート確認](#起動時のアップデート確認)
+  - [`pnl purge cache`](#pnl-purge-cache)
+- [`pnlx` コマンド](#pnlx-コマンド)
+  - [`pnlx help`](#pnlx-help)
+  - [`pnlx version`](#pnlx-version)
+  - [`pnlx init`](#pnlx-init)
+  - [`pnlx validate`](#pnlx-validate)
+  - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
+  - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
+  - [`pnlx package`](#pnlx-package)
+
 ## `pnl` コマンド
 
 ### `pnl help`
@@ -260,8 +291,12 @@ File file:///tmp/pnl-packages-demo
 `pnl.json` に拡張インデックスのリポジトリを追加します。同じ URL は重複して追加されません。
 
 ```sh
-# ローカルのインデックスフォルダを追加。
+# ローカルのインデックスフォルダを追加（file:// URL）。
 pnl repo add file file:///absolute/path/to/index
+
+# ローカルのインデックスフォルダを追加（プレーンなパス。絶対・プロジェクトからの相対どちらも可）。
+pnl repo add file /Users/me/work/pnl-packages
+pnl repo add file ./vendor-packages
 
 # Git のインデックスリポジトリを追加。
 pnl repo add git git@github.com:vendor/pnl-index.git
@@ -281,7 +316,7 @@ pnl repo add https https://example.com/pnl/index.json --key ed25519:<public-key>
 }
 ```
 
-設定したリポジトリは `pnl find` と、名前指定の `pnl install`（bare name 解決）から参照されます。
+設定したリポジトリは `pnl find` と、名前指定の `pnl install`（bare name 解決）から参照されます。`file` リポジトリは任意の**ローカルディレクトリ**を指せます。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。この種のリポジトリは pnl がディスクから直接読み取り、コミット済みの `repository-index.json` があれば優先し、なければツリーを走査してパッケージフォルダを探します。
 
 ### `pnl repo index <dir> --base-url <url>`
 

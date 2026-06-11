@@ -2,6 +2,11 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/development.md)
 
+## Table of Contents
+
+- [Validation And Development](#validation-and-development)
+- [Schemas](#schemas)
+
 ## Validation And Development
 
 Quick checks:

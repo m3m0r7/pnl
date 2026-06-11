@@ -13,6 +13,11 @@ pnl list 'lib*'      # show what you have installed
 
 See the [Quick Start](docs/en/quick-start.md) to call C `printf` from PHP in a minute.
 
+## Table of Contents
+
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Documentation
 
 - [Overview](docs/en/overview.md) — What pnl is, how it works, and project status.

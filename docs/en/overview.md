@@ -2,6 +2,13 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/overview.md)
 
+## Table of Contents
+
+- [What Is pnl?](#what-is-pnl)
+- [The Big Picture](#the-big-picture)
+  - [How It Works](#how-it-works)
+- [Status](#status)
+
 ## What Is pnl?
 
 In one sentence: **pnl makes it easy to use C libraries from PHP.**

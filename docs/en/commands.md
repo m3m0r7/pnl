@@ -2,6 +2,37 @@
 
 [← Documentation index](../../README.md) · [日本語](../ja/commands.md)
 
+## Table of Contents
+
+- [pnl Commands](#pnl-commands)
+  - [`pnl help`](#pnl-help)
+  - [`pnl version`](#pnl-version)
+  - [`pnl -i` / `pnl --information`](#pnl--i--pnl---information)
+  - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
+  - [`pnl init`](#pnl-init)
+  - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
+  - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
+  - [`pnl list [glob]`](#pnl-list-glob)
+  - [`pnl find [glob]`](#pnl-find-glob)
+  - [`pnl list native`](#pnl-list-native)
+  - [`pnl list repos`](#pnl-list-repos)
+  - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
+  - [`pnl repo index <dir> --base-url <url>`](#pnl-repo-index-dir---base-url-url)
+  - [`pnl repo remove <url>`](#pnl-repo-remove-url)
+  - [`pnl validate`](#pnl-validate)
+  - [`pnl self-upgrade`](#pnl-self-upgrade)
+  - [Update check on startup](#update-check-on-startup)
+  - [`pnl purge cache`](#pnl-purge-cache)
+- [pnlx Commands](#pnlx-commands)
+  - [`pnlx help`](#pnlx-help)
+  - [`pnlx version`](#pnlx-version)
+  - [`pnlx init`](#pnlx-init)
+  - [`pnlx validate`](#pnlx-validate)
+  - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
+  - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
+  - [`pnlx package`](#pnlx-package)
+
 ## pnl Commands
 
 ### `pnl help`
@@ -260,8 +291,12 @@ File file:///tmp/pnl-packages-demo
 Adds an extension-index repository to `pnl.json`. Duplicate URLs are ignored.
 
 ```sh
-# Add a local index folder.
+# Add a local index folder by file:// URL.
 pnl repo add file file:///absolute/path/to/index
+
+# Add a local index folder by plain path (absolute or relative to the project).
+pnl repo add file /Users/me/work/pnl-packages
+pnl repo add file ./vendor-packages
 
 # Add a Git index repository.
 pnl repo add git git@github.com:vendor/pnl-index.git
@@ -281,7 +316,7 @@ Result:
 }
 ```
 
-Configured repositories are consulted by `pnl find` and by bare-name `pnl install`.
+Configured repositories are consulted by `pnl find` and by bare-name `pnl install`. A `file` repository may point at any **local directory** — pass it as a `file://` URL or as a plain filesystem path (absolute, or relative to the project root). pnl reads such a repository straight from disk, preferring a committed `repository-index.json` and otherwise walking the tree for package folders.
 
 ### `pnl repo index <dir> --base-url <url>`
 
