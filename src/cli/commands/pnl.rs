@@ -93,6 +93,18 @@ enum Command {
         #[arg(long)]
         home: Option<PathBuf>,
     },
+    /// Remove data pnl caches between runs.
+    Purge {
+        #[command(subcommand)]
+        target: PurgeTarget,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PurgeTarget {
+    /// Remove pnl's on-disk caches (downloads and lookups) under
+    /// `$XDG_CACHE_HOME/pnl`.
+    Cache,
 }
 
 #[derive(Debug, Subcommand)]
@@ -168,6 +180,12 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
 
+    // Surface a newer release at startup, except for the commands that already
+    // talk about versions (self-upgrade) or caching (purge) themselves.
+    if !matches!(command, Command::SelfUpgrade { .. } | Command::Purge { .. }) {
+        crate::release::notify_if_update_available();
+    }
+
     let interaction = Interaction::new(cli.no_interaction, cli.yes);
     match command {
         Command::Init => init_pnl(Path::new(".")),
@@ -197,7 +215,21 @@ pub fn run() -> Result<()> {
         Command::SelfUpgrade { bin_dir, home } => {
             crate::self_upgrade::self_upgrade(&bin_dir, home.as_deref())
         }
+        Command::Purge { target } => match target {
+            PurgeTarget::Cache => purge_cache(),
+        },
     }
+}
+
+fn purge_cache() -> Result<()> {
+    crate::ui::heading("pnl", "purge cache");
+    let root = crate::cache::root();
+    if crate::cache::purge()? {
+        crate::ui::success(&format!("removed {}", root.display()));
+    } else {
+        crate::ui::info(&format!("no cache to remove at {}", root.display()));
+    }
+    Ok(())
 }
 
 fn init_pnl(root: &Path) -> Result<()> {

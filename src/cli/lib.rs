@@ -1,5 +1,6 @@
 pub mod about;
 pub mod archive;
+pub mod cache;
 pub mod commands;
 pub mod fetch;
 pub mod generate;
@@ -10,6 +11,7 @@ pub mod interaction;
 pub mod io;
 pub mod manifest;
 pub mod platform;
+pub mod release;
 pub mod schema;
 pub mod self_upgrade;
 pub mod ui;

@@ -369,6 +369,19 @@ Notes:
 - Building requires a Rust toolchain (`cargo`).
 - If `/usr/local/bin` is not writable, re-run with `sudo` or pass `--bin-dir`.
 - Pre-release tags (e.g. `v1.0.0-rc.1`) are ignored.
+- `self-upgrade` only manages the versioned symlink layout. If `pnl` was installed as a standalone binary (downloaded from the [releases page](https://github.com/m3m0r7/pnl/releases) and placed on `$PATH`), it cannot be swapped in place; `self-upgrade` will report the newer version and ask you to download it and reinstall.
+
+### Update check on startup
+
+`pnl` and `pnlx` check for a newer release when they start and print a one-line notice when one is available — `pnl self-upgrade` for a managed install, or "download and reinstall" for a standalone binary. The lookup is cached for one hour under `$XDG_CACHE_HOME/pnl`, so only the first run each hour goes over the network. The notice is shown only on an interactive terminal and can be turned off entirely by setting `PNL_NO_UPDATE_CHECK`.
+
+### `pnl purge cache`
+
+Removes the data `pnl` caches between runs — downloaded headers/libraries and the latest-release lookup — which all live under `$XDG_CACHE_HOME/pnl` (default `~/.cache/pnl`).
+
+```sh
+pnl purge cache
+```
 
 
 ## pnlx Commands

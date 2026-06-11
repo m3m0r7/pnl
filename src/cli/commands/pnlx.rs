@@ -74,6 +74,8 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
 
+    crate::release::notify_if_update_available();
+
     // pnlx has no interactive prompts yet, but it accepts --no-interaction so
     // scripts can pass the same flags to both binaries.
     let _interaction = Interaction::new(cli.no_interaction, false);

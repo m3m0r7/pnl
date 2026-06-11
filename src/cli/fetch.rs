@@ -152,13 +152,8 @@ fn cache_path(url: &str) -> PathBuf {
 }
 
 fn cache_root() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        PathBuf::from(dir).join("pnl").join("fetch")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".cache").join("pnl").join("fetch")
-    } else {
-        std::env::temp_dir().join("pnl").join("fetch")
-    }
+    // A subdirectory of the shared cache root so `pnl purge cache` clears it.
+    crate::cache::root().join("fetch")
 }
 
 fn file_name_from_url(url: &str) -> String {

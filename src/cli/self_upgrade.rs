@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use semver::Version;
 
-/// The repository this binary upgrades itself from.
-const SELF_REPOSITORY: &str = "https://github.com/m3m0r7/pnl";
+use crate::release::SELF_REPOSITORY;
 
 /// Binaries shipped by this package.
 const BINARIES: [&str; 2] = ["pnl", "pnlx"];
@@ -43,15 +42,28 @@ pub fn self_upgrade(bin_dir: &Path, home: Option<&Path>) -> Result<()> {
         .context("failed to parse the running pnl version")?;
 
     crate::ui::step(&format!("fetching release tags from {SELF_REPOSITORY}.git"));
-    let tags = list_remote_tags(&format!("{SELF_REPOSITORY}.git"))?;
-    let Some((tag, latest)) = latest_release(&tags) else {
+    let Some(release) = crate::release::latest_live()? else {
         bail!("no release tags found at {SELF_REPOSITORY}");
     };
+    let (tag, latest) = (release.tag, release.version);
 
     if latest <= current {
         crate::ui::summary(&format!(
             "pnl {current} is already the latest release in {}",
             crate::ui::elapsed(started.elapsed())
+        ));
+        return Ok(());
+    }
+
+    // self-upgrade only manages the versioned symlink layout. A standalone
+    // binary (downloaded and dropped on $PATH) cannot be swapped in place, so
+    // point the user at the releases page instead of building a parallel layout.
+    if crate::release::detect_install_kind() == crate::release::InstallKind::Standalone {
+        crate::ui::warn(&format!(
+            "pnl {latest} is available, but this binary was installed standalone; self-upgrade only updates the versioned symlink layout"
+        ));
+        crate::ui::info(&format!(
+            "download pnl {latest} from {SELF_REPOSITORY}/releases and reinstall it"
         ));
         return Ok(());
     }
@@ -145,41 +157,6 @@ fn default_home(
             "none of PNL_HOME, XDG_DATA_HOME, or HOME is set; pass --home to choose the install location"
         );
     }
-}
-
-/// List tag names (e.g. `v0.1.6`) advertised by a remote repository, without
-/// cloning it.
-#[cfg_attr(not(unix), allow(dead_code))]
-fn list_remote_tags(url: &str) -> Result<Vec<String>> {
-    let mut remote = git2::Remote::create_detached(url)
-        .with_context(|| format!("failed to create a remote for {url}"))?;
-    let mut callbacks = git2::RemoteCallbacks::new();
-    callbacks.credentials(crate::git_source::authenticate);
-    let connection = remote
-        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
-        .with_context(|| format!("failed to connect to {url}"))?;
-    let tags = connection
-        .list()
-        .with_context(|| format!("failed to list references of {url}"))?
-        .iter()
-        .filter_map(|head| head.name().strip_prefix("refs/tags/"))
-        .filter(|name| !name.ends_with("^{}"))
-        .map(ToOwned::to_owned)
-        .collect();
-    Ok(tags)
-}
-
-/// The highest release version among the tags, with its original tag name.
-fn latest_release(tags: &[String]) -> Option<(String, Version)> {
-    tags.iter()
-        .filter_map(|tag| Some((tag.clone(), release_version_from_tag(tag)?)))
-        .max_by(|left, right| left.1.cmp(&right.1))
-}
-
-/// Parse `v1.2.3` / `1.2.3` tags; pre-releases are not auto-upgrade targets.
-fn release_version_from_tag(tag: &str) -> Option<Version> {
-    let version = Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()?;
-    version.pre.is_empty().then_some(version)
 }
 
 /// A source tree extracted into a temporary directory, removed on drop.
@@ -322,39 +299,6 @@ fn link_binaries(bin_dir: &Path, layout: &Layout) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn picks_the_highest_release_tag() {
-        let tags = vec![
-            "v0.1.2".to_owned(),
-            "v0.10.0".to_owned(),
-            "v0.2.0".to_owned(),
-            "v1.0.0-alpha.1".to_owned(),
-            "not-a-version".to_owned(),
-        ];
-        let (tag, version) = latest_release(&tags).unwrap();
-        assert_eq!(tag, "v0.10.0");
-        assert_eq!(version, Version::new(0, 10, 0));
-    }
-
-    #[test]
-    fn ignores_repositories_without_release_tags() {
-        assert!(latest_release(&["main".to_owned(), "v1.0.0-rc.1".to_owned()]).is_none());
-    }
-
-    #[test]
-    fn parses_release_tags_only() {
-        assert_eq!(
-            release_version_from_tag("v1.2.3"),
-            Some(Version::new(1, 2, 3))
-        );
-        assert_eq!(
-            release_version_from_tag("1.2.3"),
-            Some(Version::new(1, 2, 3))
-        );
-        assert_eq!(release_version_from_tag("v1.2.3-rc.1"), None);
-        assert_eq!(release_version_from_tag("release-1"), None);
-    }
 
     #[test]
     fn resolves_the_install_root_in_xdg_order() {
