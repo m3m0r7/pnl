@@ -129,6 +129,10 @@
           },
           "sha256": {
             "$ref": "#/components/schemas/sha256"
+          },
+          "installed_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

@@ -36,14 +36,21 @@ pub fn fetch_asset(url: &str) -> Result<PathBuf> {
             .with_context(|| format!("failed to create cache directory {}", parent.display()))?;
     }
 
+    let temp = destination.with_extension(format!("{}.tmp", std::process::id()));
+    if temp.exists() {
+        let _ = fs::remove_file(&temp);
+    }
+
     match kind {
-        SourceKind::Http => fetch_http(url, &destination)?,
-        SourceKind::Ftp => fetch_ftp(url, &destination)?,
+        SourceKind::Http => fetch_http(url, &temp)?,
+        SourceKind::Ftp => fetch_ftp(url, &temp)?,
         SourceKind::Ftps => {
             bail!("ftps sources are not supported yet; use an https or ftp URL instead: {url}")
         }
-        SourceKind::Git => fetch_git(url, &destination)?,
+        SourceKind::Git => fetch_git(url, &temp)?,
     }
+    fs::rename(&temp, &destination)
+        .with_context(|| format!("failed to move fetched asset to {}", destination.display()))?;
 
     Ok(destination)
 }

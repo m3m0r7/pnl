@@ -74,6 +74,7 @@ class RuntimeConfig implements RuntimeConfigInterface
                     && isset($data['output_dir'])
                     && is_string($data['output_dir'])
                     && $data['output_dir'] !== ''
+                    && $this->isSafeRelativePath($data['output_dir'])
                 ) {
                     $outputDir = $data['output_dir'];
                 }
@@ -81,6 +82,21 @@ class RuntimeConfig implements RuntimeConfigInterface
         }
 
         return $this->outputDir = $outputDir;
+    }
+
+    private function isSafeRelativePath(string $path): bool
+    {
+        if ($path === '' || str_starts_with($path, '/') || str_contains($path, '\\')) {
+            return false;
+        }
+
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '..') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function pathmapFile(): string

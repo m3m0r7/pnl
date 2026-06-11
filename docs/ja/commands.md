@@ -19,6 +19,7 @@
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
   - [`pnl repo index <dir> --base-url <url>`](#pnl-repo-index-dir---base-url-url)
+  - [`pnl repo sign <repository-index.json> --key <key>`](#pnl-repo-sign-repository-indexjson---key-key)
   - [`pnl repo remove <url>`](#pnl-repo-remove-url)
   - [`pnl validate`](#pnl-validate)
   - [`pnl self-upgrade`](#pnl-self-upgrade)
@@ -31,6 +32,7 @@
   - [`pnlx validate`](#pnlx-validate)
   - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
   - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
+  - [`pnlx publish`](#pnlx-publish)
   - [`pnlx package`](#pnlx-package)
 
 ## `pnl` コマンド
@@ -127,14 +129,20 @@ initialized ./pnl.json
 
 ソースには URL・ローカルパス・**パッケージ名だけ**・**配布アーカイブ**（`.tar.gz`/`.tgz`/`.zip`。ローカルでもリモートでも可。必要ならダウンロードして展開し、中に `pnlx.json` が無ければエラー）を指定できます。**複数ソースを一度に**渡すこともできます（`pnl install libusb libnfc`）。
 
-パッケージ名だけの場合、設定済みの `repositories` を [`priority`](configuration.md#pnljson-の書き方) の高い順に参照し、最後に組み込みの既定リポジトリ `https://github.com/m3m0r7/pnl-packages`（内部的に priority 0 として保持。`pnl.json` には書き込まれません）へフォールバックします。`@<version>` でバージョンを固定できます（git は対応するタグ/ブランチを checkout し、解決したバージョンと一致検証）。**ソースを省略**すると、ロックファイルに記録された各拡張をその固定バージョンで復元し、内容を記録済みの sha256 で再検証します。
+パッケージ名だけの場合、設定済みの `repositories` を [`priority`](configuration.md#pnljson-の書き方) の高い順に参照し、最後に組み込みの既定リポジトリ `https://github.com/m3m0r7/pnl-packages`（内部的に priority 0 として保持。`pnl.json` には書き込まれません）へフォールバックします。まず `repository-index.json` を参照し、`key` 付きリポジトリでは隣接する `repository-index.json.sig` を Ed25519 で検証します。index から選んだパッケージは `dist.sha256` と実際のパッケージ内容を照合します。`@<version>` でバージョンを固定できます（git は対応するタグ/ブランチを checkout し、解決したバージョンと一致検証）。**ソースを省略**すると、ロックファイルに記録された各拡張をその固定バージョンで復元し、内容を記録済みの sha256 で再検証します。
+
+インストール対象の `pnlx.json` に `dependencies` がある場合は、各依存パッケージを version constraint に合う最新バージョンで先に解決します。既に lock 済みで constraint を満たす依存は再インストールしません。解決結果は lockfile の `dependencies` に記録されます。
 
 パッケージが対象 OS / Linux ディストリビューションの `installation` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `checkIfExists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。Linux ではレシピは `/etc/os-release` から選択されます。ディストリビューションの `ID`（例: `alpine`・`ubuntu`・`fedora`）→ `ID_LIKE` の各祖先（例: `debian`・`rhel`）→ 汎用の `linux` キーの順で照合します。インストールコマンドが失敗した場合は、どのコマンドが失敗したかを表示し、手動でライブラリとヘッダーをインストールしてから改めて `pnl install` を実行するよう案内します。
+
+`installation` または `self_build` を持つパッケージは、`pnlx publish` が `pnlx.json` に記録した `install_script_hash` と現在のコマンド／スクリプト内容を照合します。不一致または未記録の場合、対話時は既定 No で確認します。`-y` 指定時は安全のため停止します。確認を明示的に上書きする場合は `--allow-install-script-hash <sha256>`（複数指定可）を使います。検証なしで通す最後の手段として `--allow-unverified-install-scripts` もあります。
 
 生成される PHP を調整するフラグ:
 
 - `--alias-class <Class>` … 元のクラスを残したまま、`class_alias` で `<Class>` としても参照できるようにします。
 - `--function-prefix <prefix>` … 生成されるすべての関数名・メソッド名に `<prefix>` を付けます（接頭辞なしの名前は残しません）。
+- `--allow-install-script-hash <sha256>` … 指定した install script hash をこの実行だけ信頼します。複数回指定できます。
+- `--allow-unverified-install-scripts` … install script hash の不一致／未記録を許可します。
 
 ```sh
 # パッケージ名だけで libusb を入れます（既定リポジトリから解決）。
@@ -337,6 +345,15 @@ pnl repo index packages \
 
 ```text
 indexed 106 package(s) into packages/repository-index.json
+```
+
+### `pnl repo sign <repository-index.json> --key <key>`
+
+`repository-index.json` に対する detached signature を生成します。署名は `<index>.sig`（既定では `repository-index.json.sig`）に `ed25519:<base64>` 形式で書き込まれます。秘密鍵は 32 bytes の Ed25519 seed を `ed25519:<base64>` または 64 桁 hex で渡します。出力される `repository key` を `pnl repo add ... --key <key>` に設定すると、install/search 時に index 署名が検証されます。
+
+```sh
+pnl repo sign packages/repository-index.json --key ed25519:<base64-secret>
+pnl repo add https https://example.com/pnl/packages --key ed25519:<base64-public>
 ```
 
 ### `pnl repo remove <url>`
@@ -558,6 +575,16 @@ built 3 bridge(s)
 - インストール済みの `src/generated/*.bridge.rs` を `rustc --crate-type cdylib` でコンパイルし、
 - 出来上がったライブラリを `@pnlx/packages/<vendor>/<package>/<version>/bridge/` に書き、
 - `@pnlx/pnlx-pathmap.json` の `bridges` を更新します。
+
+### `pnlx publish`
+
+`pnlx.json` の publish 前メタデータを更新します。現在は `installation` の全コマンド、または `self_build` で指定されたパッケージ相対スクリプトの内容を正規化して sha256 を計算し、`install_script_hash` として `pnlx.json` に書き込みます。
+
+```sh
+pnlx publish
+```
+
+`self_build` は `installation` と同時には使えません。指定したスクリプトパスはパッケージ相対で、絶対パスや `..` によるトラバーサルは拒否されます。
 
 ### `pnlx package`
 

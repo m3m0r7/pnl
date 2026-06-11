@@ -10,11 +10,12 @@ use crate::manifest::{PnlLock, PnlManifest, PnlxPathmap, Repository, RepositoryT
 use crate::validate::{ensure_platform_matches, validate_pnl_workspace};
 
 mod bridge;
-mod find;
 mod index;
+mod info;
 mod install;
 mod native;
 mod package;
+mod search;
 
 pub(crate) use bridge::build_installed_bridges;
 
@@ -43,13 +44,19 @@ struct Cli {
     #[arg(short = 'l', long)]
     license: bool,
 
+    /// Print verbose `debug:` diagnostics (resolution, paths, network) to stderr.
+    #[arg(long, global = true)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a pnl.json manifest in the current directory.
     Init,
+    /// Install one or more extensions and their native dependencies.
     Install {
         /// One or more sources (URL, path, or bare package name). With none,
         /// every extension is restored from the lockfile.
@@ -62,28 +69,54 @@ enum Command {
         /// unprefixed names).
         #[arg(long)]
         function_prefix: Option<String>,
+        /// Continue even when install scripts are missing or fail their
+        /// publish-time hash check.
+        #[arg(long)]
+        allow_unverified_install_scripts: bool,
+        /// Explicit install-script hash to trust for this run. Can be repeated.
+        #[arg(long)]
+        allow_install_script_hash: Vec<String>,
     },
+    /// Reinstall an extension (or all of them) from its recorded source.
     Update {
+        /// Extension to update; omit to update every installed extension.
         package: Option<String>,
     },
+    /// Remove an installed extension from the workspace.
     Uninstall {
+        /// Extension name (e.g. `vendor/libusb`) to remove.
         package: String,
     },
+    /// List installed extensions, repositories, or resolved native libraries.
     List {
         #[command(subcommand)]
         subject: Option<ListSubject>,
     },
-    /// List packages available from the configured repositories (plus the
-    /// built-in default), optionally filtered by a glob pattern (e.g. `lib*`).
-    Find {
+    /// Search packages in the configured repositories (plus the built-in
+    /// default), optionally filtered by a glob pattern (e.g. `lib*`).
+    #[command(visible_alias = "find")]
+    Search {
+        /// Optional glob pattern (e.g. `lib*`) filtering package names.
         pattern: Option<String>,
     },
+    /// Show a package's remote details: install commands, headers, and the
+    /// native libraries it links — fetched from the repository even if it is
+    /// already installed locally.
+    Info {
+        /// Package to describe (bare name like `libsdl`, `vendor/package`, URL,
+        /// or path).
+        target: String,
+    },
+    /// Manage package repositories recorded in pnl.json.
     Repo {
         #[command(subcommand)]
         command: RepoCommand,
     },
+    /// Validate pnl.json, the lockfile, and the pathmap against their schemas.
     Validate,
+    /// Print the pnl version.
     Version,
+    /// Download and install a newer pnl release (managed installs only).
     SelfUpgrade {
         /// Directory where the pnl/pnlx symlinks are placed.
         #[arg(long, default_value = "/usr/local/bin")]
@@ -93,7 +126,7 @@ enum Command {
         #[arg(long)]
         home: Option<PathBuf>,
     },
-    /// Remove data pnl caches between runs.
+    /// Remove pnl's on-disk caches between runs.
     Purge {
         #[command(subcommand)]
         target: PurgeTarget,
@@ -109,11 +142,15 @@ enum PurgeTarget {
 
 #[derive(Debug, Subcommand)]
 enum ListSubject {
+    /// List configured repositories plus the built-in default.
+    #[command(visible_alias = "repo")]
     Repos,
+    /// List installed extensions (the default), optionally glob-filtered.
     Extensions {
         /// Optional glob pattern (e.g. `lib*`) filtering installed extensions.
         pattern: Option<String>,
     },
+    /// List the native libraries resolved into the pathmap.
     Native,
     /// `pnl list lib*` — a bare glob pattern is treated as an extensions filter.
     #[command(external_subcommand)]
@@ -122,13 +159,18 @@ enum ListSubject {
 
 #[derive(Debug, Subcommand)]
 enum RepoCommand {
+    /// Add a repository to pnl.json.
     Add(RepoAdd),
+    /// Remove a repository from pnl.json by URL.
     Remove {
+        /// Repository URL to remove.
         url: String,
     },
     /// Generate a repository-index.json for a directory of packages so the
-    /// repository can be browsed with `pnl find` without cloning.
+    /// repository can be browsed with `pnl search` without cloning.
     Index(RepoIndex),
+    /// Sign a repository-index.json with an Ed25519 secret key.
+    Sign(RepoSign),
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +187,18 @@ struct RepoIndex {
     /// Git reference recorded for every version [default: the package version].
     #[arg(long)]
     reference: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct RepoSign {
+    /// repository-index.json to sign.
+    index: PathBuf,
+    /// Ed25519 secret key as `ed25519:<base64>` or 64 hex chars.
+    #[arg(long)]
+    key: String,
+    /// Signature output [default: <index>.sig].
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -168,6 +222,7 @@ enum RepoKind {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    crate::ui::set_debug(cli.debug);
     if cli.information {
         return crate::about::print_information(crate::about::Tool::Pnl);
     }
@@ -193,6 +248,8 @@ pub fn run() -> Result<()> {
             targets,
             alias_class,
             function_prefix,
+            allow_unverified_install_scripts,
+            allow_install_script_hash,
         } => install(
             Path::new("."),
             &targets,
@@ -200,12 +257,15 @@ pub fn run() -> Result<()> {
                 alias_class,
                 function_prefix,
                 interaction,
+                allow_unverified_install_scripts,
+                allowed_install_script_hashes: allow_install_script_hash,
             },
         ),
         Command::Update { package } => update(Path::new("."), package.as_deref()),
         Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),
-        Command::Find { pattern } => find::find(Path::new("."), pattern.as_deref()),
+        Command::Search { pattern } => search::search(Path::new("."), pattern.as_deref()),
+        Command::Info { target } => info::info(Path::new("."), &target),
         Command::Repo { command } => repo(Path::new("."), command),
         Command::Validate => validate_pnl_workspace(Path::new(".")),
         Command::Version => {
@@ -311,9 +371,18 @@ fn list(root: &Path, subject: Option<ListSubject>) -> Result<()> {
 }
 
 fn list_repositories(root: &Path) -> Result<()> {
-    let manifest = read_json::<PnlManifest>(&root.join("pnl.json"))?;
-    for repo in manifest.repositories {
-        println!("{:?} {}", repo.kind, repo.url);
+    // Show the same set bare-name resolution consults: the configured
+    // repositories (highest priority first) plus the built-in default
+    // (`pnl-packages`) appended as the lowest-priority fallback.
+    let manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+    for repo in install::resolved_repositories(&manifest) {
+        let priority = repo.priority.unwrap_or(0);
+        println!(
+            "{:?} {} {}",
+            repo.kind,
+            repo.url,
+            crate::ui::dim(&format!("(priority {priority})")),
+        );
     }
     Ok(())
 }
@@ -383,6 +452,17 @@ fn repo(root: &Path, command: RepoCommand) -> Result<()> {
                 args.output.as_deref(),
                 args.reference.as_deref(),
             );
+        }
+        RepoCommand::Sign(args) => {
+            let signature = crate::repository_index::sign_index_file(
+                &args.index,
+                &args.key,
+                args.output.as_deref(),
+            )?;
+            let public_key = crate::repository_index::public_key_from_secret(&args.key)?;
+            crate::ui::success(&format!("signed {}", signature.display()));
+            crate::ui::info(&format!("repository key: {public_key}"));
+            return Ok(());
         }
     }
     write_json(&root.join("pnl.json"), &manifest)?;

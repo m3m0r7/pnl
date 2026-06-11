@@ -11,7 +11,7 @@ use crate::generate::{
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
-use crate::io::{read_json, write_json_if_missing};
+use crate::io::{read_json, write_json, write_json_if_missing};
 use crate::manifest::PnlxManifest;
 use crate::validate::{validate_pnlx_manifest_values, validate_pnlx_workspace};
 
@@ -56,6 +56,8 @@ enum Command {
     Build {
         packages: Vec<String>,
     },
+    /// Stamp publish-time metadata into pnlx.json.
+    Publish,
     Version,
     Package,
 }
@@ -93,6 +95,7 @@ pub fn run() -> Result<()> {
             },
         ),
         Command::Build { packages } => build_installed_bridges(Path::new("."), &packages),
+        Command::Publish => publish_pnlx(Path::new(".")),
         Command::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -282,5 +285,26 @@ fn init_pnlx(root: &Path) -> Result<()> {
     let manifest_path = root.join("pnlx.json");
     write_json_if_missing(&manifest_path, &PnlxManifest::default())?;
     crate::ui::success(&format!("initialized {}", manifest_path.display()));
+    Ok(())
+}
+
+fn publish_pnlx(root: &Path) -> Result<()> {
+    let manifest_path = root.join("pnlx.json");
+    let mut manifest: PnlxManifest = read_json(&manifest_path)?;
+    validate_pnlx_manifest_values(&manifest)?;
+
+    match crate::install_script::install_script_hash(root, &manifest)? {
+        Some(hash) => {
+            manifest.install_script_hash = Some(hash.clone());
+            write_json(&manifest_path, &manifest)?;
+            crate::ui::success(&format!("stamped install_script_hash {hash}"));
+        }
+        None => {
+            manifest.install_script_hash = None;
+            write_json(&manifest_path, &manifest)?;
+            crate::ui::info("no install scripts declared; cleared install_script_hash");
+        }
+    }
+
     Ok(())
 }

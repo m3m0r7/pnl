@@ -1,5 +1,5 @@
-//! `pnl find <glob>` — list packages available from the configured repositories
-//! (plus the built-in default) that match an optional glob pattern.
+//! `pnl search <glob>` — list packages available from the configured
+//! repositories (plus the built-in default) that match an optional glob pattern.
 //!
 //! Each repository is enumerated cheaply when it publishes a
 //! `repository-index.json` (fetched over HTTP for GitHub/https repositories, or
@@ -7,16 +7,16 @@
 //! and a bounded directory walk for `pnlx.json` files.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::fetch::fetch_asset;
 use crate::git_source::{GitSource, install_git_source};
 use crate::glob::package_name_matches;
 use crate::io::read_or_default;
-use crate::manifest::{PnlManifest, Repository, RepositoryIndex, RepositoryType};
+use crate::manifest::{PnlManifest, Repository, RepositoryIndex};
+use crate::repository_index::{load_repository_index, local_repository_dir};
 
 use super::install::resolved_repositories;
 
@@ -33,7 +33,7 @@ struct FoundPackage {
     repository: String,
 }
 
-pub(super) fn find(root: &Path, pattern: Option<&str>) -> Result<()> {
+pub(super) fn search(root: &Path, pattern: Option<&str>) -> Result<()> {
     let manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
     let repositories = resolved_repositories(&manifest);
 
@@ -82,7 +82,8 @@ pub(super) fn find(root: &Path, pattern: Option<&str>) -> Result<()> {
 fn enumerate_repository(repository: &Repository) -> Result<Vec<(String, Vec<String>)>> {
     // Local repositories are read straight from disk.
     if let Some(dir) = local_repository_dir(repository) {
-        if let Some(entries) = index_entries_at(&dir.join("repository-index.json")) {
+        if let Some(index) = load_repository_index(repository)? {
+            let entries = index_entries(index);
             return Ok(entries);
         }
         return Ok(walk_packages(&dir));
@@ -90,51 +91,11 @@ fn enumerate_repository(repository: &Repository) -> Result<Vec<(String, Vec<Stri
 
     // Remote repositories: try a published index first (one HTTP request), then
     // fall back to cloning and walking the tree.
-    if let Some(url) = http_index_url(repository)
-        && let Ok(path) = fetch_asset(&url)
-        && let Some(entries) = index_entries_at(&path)
-    {
-        return Ok(entries);
+    if let Some(index) = load_repository_index(repository)? {
+        return Ok(index_entries(index));
     }
 
     enumerate_by_clone(repository)
-}
-
-/// A local on-disk directory for a `file` repository, if this is one.
-fn local_repository_dir(repository: &Repository) -> Option<PathBuf> {
-    if repository.kind != RepositoryType::File {
-        return None;
-    }
-    match repository.url.strip_prefix("file://") {
-        Some(path) => Some(PathBuf::from(path)),
-        None => Some(PathBuf::from(&repository.url)),
-    }
-}
-
-/// The raw HTTP URL of a repository's `repository-index.json`, when one can be
-/// derived (GitHub tree/web URLs, or an explicit `https` repository base).
-fn http_index_url(repository: &Repository) -> Option<String> {
-    if repository.url.contains("github.com") {
-        let source = GitSource::parse(&repository.url).ok()?;
-        let branch = source.branch.clone().unwrap_or_else(|| "HEAD".to_owned());
-        let package_path = source.package_path.to_string_lossy().replace('\\', "/");
-        let prefix = if package_path.is_empty() {
-            String::new()
-        } else {
-            format!("{package_path}/")
-        };
-        return Some(format!(
-            "https://raw.githubusercontent.com/{}/{}/{}/{}repository-index.json",
-            source.vendor, source.name, branch, prefix,
-        ));
-    }
-    if repository.kind == RepositoryType::Https {
-        return Some(format!(
-            "{}/repository-index.json",
-            repository.url.trim_end_matches('/'),
-        ));
-    }
-    None
 }
 
 /// Clone a repository shallowly and enumerate its packages from disk, preferring
@@ -148,26 +109,22 @@ fn enumerate_by_clone(repository: &Repository) -> Result<Vec<(String, Vec<String
         installed.destination.join(&source.package_path)
     };
 
-    if let Some(entries) = index_entries_at(&base.join("repository-index.json")) {
-        return Ok(entries);
+    let index_path = base.join("repository-index.json");
+    if index_path.is_file() {
+        let contents = std::fs::read_to_string(&index_path)?;
+        let index: RepositoryIndex = serde_json::from_str(&contents)?;
+        return Ok(index_entries(index));
     }
     Ok(walk_packages(&base))
     // `installed` drops here, removing the temporary clone.
 }
 
-/// Parse a `repository-index.json` at `path` into `(name, versions)` pairs.
-/// Returns `None` when the file is absent or unparseable, so the caller can fall
-/// back to a directory walk.
-fn index_entries_at(path: &Path) -> Option<Vec<(String, Vec<String>)>> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let index: RepositoryIndex = serde_json::from_str(&contents).ok()?;
-    Some(
-        index
-            .packages
-            .into_iter()
-            .map(|(name, package)| (name, package.versions.into_keys().collect()))
-            .collect(),
-    )
+fn index_entries(index: RepositoryIndex) -> Vec<(String, Vec<String>)> {
+    index
+        .packages
+        .into_iter()
+        .map(|(name, package)| (name, package.versions.into_keys().collect()))
+        .collect()
 }
 
 /// Walk a repository directory (bounded depth) collecting every package that has
@@ -199,8 +156,9 @@ fn collect_packages(dir: &Path, depth: usize, out: &mut Vec<(String, Vec<String>
     }
 }
 
-/// Read just the name and version from a `pnlx.json`, leniently — `find` should
-/// list a package even if its manifest carries fields pnl does not recognise.
+/// Read just the name and version from a `pnlx.json`, leniently — `search`
+/// should list a package even if its manifest carries fields pnl does not
+/// recognise.
 fn read_package_head(path: &Path) -> Option<PackageHead> {
     let contents = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&contents).ok()

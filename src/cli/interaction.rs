@@ -20,6 +20,10 @@ impl Interaction {
         }
     }
 
+    pub fn assume_yes(&self) -> bool {
+        self.assume_yes
+    }
+
     /// Ask a yes/no question. Returns `true` without prompting when `--yes` was
     /// given; returns `default` without prompting when `--no-interaction` was
     /// given or stdin is not interactive; an empty answer also selects the default.

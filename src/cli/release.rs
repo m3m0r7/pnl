@@ -68,27 +68,19 @@ pub fn notify_if_update_available() {
     if latest.version <= current {
         return;
     }
-    match detect_install_kind() {
-        InstallKind::Managed => {
-            crate::ui::warn(&format!(
-                "pnl {} is available (you have {current})",
-                latest.version
-            ));
-            eprintln!("    {}", crate::ui::dim("run `pnl self-upgrade` to update"));
-        }
+    let upgrade_hint = match detect_install_kind() {
+        InstallKind::Managed => "→ run `pnl self-upgrade` to update".to_owned(),
         InstallKind::Standalone => {
-            crate::ui::warn(&format!(
-                "pnl {} is available (you have {current})",
-                latest.version
-            ));
-            eprintln!(
-                "    {}",
-                crate::ui::dim(&format!(
-                    "download it from {SELF_REPOSITORY}/releases and reinstall"
-                ))
-            );
+            format!("→ download it from {SELF_REPOSITORY}/releases and reinstall")
         }
-    }
+    };
+    crate::ui::notice_box(
+        "✨ A new pnl release is available!",
+        &[
+            format!("📦 pnl {}  (you have {current})", latest.version),
+            crate::ui::dim(&upgrade_hint),
+        ],
+    );
 }
 
 /// The latest release, served from the cache when it is still fresh and fetched

@@ -48,8 +48,7 @@
             "minLength": 1
           },
           "entrypoint": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/components/schemas/packageRelativePath"
           },
           "class": {
             "type": "string",
@@ -62,10 +61,15 @@
           "examples": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "$ref": "#/components/schemas/packageRelativePath"
             },
             "description": "Paths to usage example files (e.g. EXAMPLES.md), relative to the package root. Their content is printed when pnl install finishes."
+          },
+          "install_script_hash": {
+            "$ref": "#/components/schemas/sha256"
+          },
+          "self_build": {
+            "$ref": "#/components/schemas/packageRelativePath"
           },
           "installation": {
             "type": "object",
@@ -122,6 +126,11 @@
       "sha256": {
         "type": "string",
         "pattern": "^[A-Fa-f0-9]{64}$"
+      },
+      "packageRelativePath": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
       },
       "versionConstraint": {
         "type": "string",
@@ -234,7 +243,8 @@
               "oneOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "pattern": "^(?!.*[\\\\/])(?!.*\\.\\.).+$"
                 },
                 {
                   "type": "object",
@@ -245,7 +255,8 @@
                   "properties": {
                     "name": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "pattern": "^(?!.*[\\\\/])(?!.*\\.\\.).+$"
                     },
                     "virtual": {
                       "type": "boolean"
@@ -260,8 +271,7 @@
           "header_names": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "$ref": "#/components/schemas/packageRelativePath"
             },
             "uniqueItems": true
           },

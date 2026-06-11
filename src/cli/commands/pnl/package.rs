@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::io::{read_json, write_json};
@@ -30,11 +31,48 @@ pub(super) fn install_extension_files(
     version: &str,
 ) -> Result<PathBuf> {
     let destination = installed_extension_dir(root, package, version);
-    if destination.exists() {
-        fs::remove_dir_all(&destination)
-            .with_context(|| format!("failed to remove {}", destination.display()))?;
+    let parent = destination
+        .parent()
+        .with_context(|| format!("{} has no parent directory", destination.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+
+    let temp = parent.join(format!(".{version}.{}.tmp", std::process::id()));
+    let backup = parent.join(format!(".{version}.{}.bak", std::process::id()));
+    if temp.exists() {
+        fs::remove_dir_all(&temp)
+            .with_context(|| format!("failed to remove {}", temp.display()))?;
     }
-    copy_package_directory(source, source, &destination)?;
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("failed to remove {}", backup.display()))?;
+    }
+
+    copy_package_directory(source, source, &temp)?;
+
+    let had_previous = destination.exists();
+    if had_previous {
+        fs::rename(&destination, &backup).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                destination.display(),
+                backup.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(&temp, &destination) {
+        if had_previous {
+            let _ = fs::rename(&backup, &destination);
+        }
+        bail!(
+            "failed to install {} to {}: {error}",
+            source.display(),
+            destination.display()
+        );
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("failed to remove {}", backup.display()))?;
+    }
     Ok(destination)
 }
 
@@ -56,8 +94,9 @@ pub(super) fn installed_extension_dir(root: &Path, package: &str, version: &str)
 
 pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
     let autoload_path = pnlx_workspace_dir(root).join("autoload.php");
-    let packages = installed_package_entrypoints(root)?;
+    let packages = collect_installed_packages(root)?;
     let metadata = GeneratedMetadata::current();
+    let version = env!("CARGO_PKG_VERSION");
     let mut content = format!(
         r#"<?php
 
@@ -74,21 +113,31 @@ declare(strict_types=1);
  * generated file, and managing it in a version control system such as git or svn
  * is not recommended.
  *
- * Generated at: {}
- * Generated on: {}
- * Generator OS: {}
- * PHP version: {}
+ * Generated at: {generated_at}
+ * Generated on: {host}
+ * Generator OS: {os}
+ * PHP version: {php_version}
  */
 
+/** The version of the pnl/pnlx toolchain that generated this file. */
+const PNL_VERSION = '{version}';
+const PNLX_VERSION = '{version}';
+
 "#,
-        metadata.generated_at, metadata.host, metadata.os, metadata.php_version
+        generated_at = metadata.generated_at,
+        host = metadata.host,
+        os = metadata.os,
+        php_version = metadata.php_version,
     );
 
-    for entrypoint in packages {
+    for package in &packages {
         content.push_str("require_once __DIR__ . '/");
-        content.push_str(&php_single_quoted_path(&entrypoint));
+        content.push_str(&php_single_quoted_path(&package.entrypoint));
         content.push_str("';\n");
     }
+
+    content.push('\n');
+    content.push_str(&installed_helpers_php(&packages));
 
     if let Some(parent) = autoload_path.parent() {
         fs::create_dir_all(parent)
@@ -97,6 +146,55 @@ declare(strict_types=1);
     fs::write(&autoload_path, content)
         .with_context(|| format!("failed to write {}", autoload_path.display()))?;
     Ok(())
+}
+
+/// Render the global `pnl_installed_native_libraries()` / `pnl_is_installed()`
+/// helpers, with the installed-package map baked in for the install check.
+fn installed_helpers_php(packages: &[InstalledPackage]) -> String {
+    let mut map = String::new();
+    for package in packages {
+        let classes = package
+            .classes
+            .iter()
+            .map(|class| format!("'{}'", php_single_quoted_path(class)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        map.push_str(&format!(
+            "        '{name}' => ['version' => '{version}', 'classes' => [{classes}]],\n",
+            name = php_single_quoted_path(&package.name),
+            version = php_single_quoted_path(&package.version),
+        ));
+    }
+
+    format!(
+        r#"if (!function_exists('pnl_installed_native_libraries')) {{
+    /**
+     * List every native library resolved into this workspace's pathmap.
+     *
+     * @return list<array{{version: string, name: string, hash: string, paths: array{{header: ?string, library: string}}, installed_at: ?string}}>
+     */
+    function pnl_installed_native_libraries(): array
+    {{
+        return \Pnlx\Installed\InstalledLibraries::nativeLibraries(__DIR__ . '/pnlx-pathmap.json');
+    }}
+}}
+
+if (!function_exists('pnl_is_installed')) {{
+    /**
+     * Whether an extension is installed, optionally constrained to a version.
+     *
+     * `$extension` accepts a generated class name (e.g. `Libsdl::class`) or a
+     * `vendor/package` name (e.g. `libsdl/libsdl`). `$version`, when given, is a
+     * constraint such as `>3.0.0 & <4.0.0`.
+     */
+    function pnl_is_installed(string $extension, ?string $version = null): bool
+    {{
+        return \Pnlx\Installed\InstalledLibraries::isInstalled([
+{map}        ], $extension, $version);
+    }}
+}}
+"#,
+    )
 }
 
 pub(super) fn read_lock_for_current_platform(root: &Path) -> Result<PnlLock> {
@@ -131,8 +229,20 @@ pub(super) fn write_pathmap(root: &Path, pathmap: &PnlxPathmap) -> Result<()> {
 }
 
 pub(super) fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(sha256_hex(&bytes))
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
@@ -255,13 +365,25 @@ fn should_skip_package_copy(source_root: &Path, source_path: &Path) -> bool {
         || relative.starts_with(crate::workspace::output_dir_name(source_root).as_str())
 }
 
-fn installed_package_entrypoints(root: &Path) -> Result<Vec<String>> {
+/// One installed package version, as needed to build `@pnlx/autoload.php`.
+struct InstalledPackage {
+    /// Generated entrypoint, relative to the `@pnlx` workspace directory.
+    entrypoint: String,
+    /// Extension name (`vendor/package`).
+    name: String,
+    /// Installed version.
+    version: String,
+    /// Fully qualified generated class names this package exposes.
+    classes: Vec<String>,
+}
+
+fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
     let packages_root = pnlx_workspace_dir(root).join("packages");
     if !packages_root.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut entrypoints = Vec::new();
+    let mut packages = Vec::new();
     for vendor in fs::read_dir(&packages_root)
         .with_context(|| format!("failed to read {}", packages_root.display()))?
     {
@@ -294,14 +416,30 @@ fn installed_package_entrypoints(root: &Path) -> Result<Vec<String>> {
                 let manifest = read_json::<PnlxManifest>(&manifest_path)?;
                 let entrypoint = version.path().join(&manifest.entrypoint);
                 if entrypoint.is_file() {
-                    entrypoints.push(relative_to_pnlx(root, &entrypoint));
+                    packages.push(InstalledPackage {
+                        entrypoint: relative_to_pnlx(root, &entrypoint),
+                        name: manifest.name.clone(),
+                        version: manifest.version.clone(),
+                        classes: entity_class_fqn(&manifest).into_iter().collect(),
+                    });
                 }
             }
         }
     }
 
-    entrypoints.sort();
-    Ok(entrypoints)
+    packages.sort_by(|a, b| a.entrypoint.cmp(&b.entrypoint));
+    Ok(packages)
+}
+
+/// The fully qualified generated entity class name (namespace + `class_prefix` +
+/// base class), or `None` when the manifest class carries no namespace.
+fn entity_class_fqn(manifest: &PnlxManifest) -> Option<String> {
+    let normalized = manifest.class.replace("\\\\", "\\");
+    let (namespace, class_name) = normalized.rsplit_once('\\')?;
+    Some(format!(
+        "{namespace}\\{}{class_name}",
+        manifest.class_prefix
+    ))
 }
 
 fn relative_to_pnlx(root: &Path, path: &Path) -> String {

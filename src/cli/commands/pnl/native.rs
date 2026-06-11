@@ -33,6 +33,7 @@ pub(super) fn resolve_native_library(
             path: path.display().to_string(),
             version,
             sha256: sha256_file(&path)?,
+            installed_at: None,
         });
     }
 
@@ -67,6 +68,7 @@ pub(super) fn resolve_native_library(
                     path: path.display().to_string(),
                     version,
                     sha256: sha256_file(&path)?,
+                    installed_at: None,
                 });
             }
         }
@@ -84,6 +86,7 @@ pub(super) fn resolve_native_library(
             path: name.name().to_owned(),
             version,
             sha256: sha256_hex(name.name().as_bytes()),
+            installed_at: None,
         });
     }
 

@@ -37,8 +37,7 @@
             "uniqueItems": true
           },
           "output_dir": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/components/schemas/packageRelativePath"
           },
           "features": {
             "$ref": "#/components/schemas/features"
@@ -77,6 +76,11 @@
       "versionConstraint": {
         "type": "string",
         "pattern": "^\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*(?:\\s*[&|]\\s*\\(*\\s*(?:[=<>]=?|[~^])?[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\\s*\\)*)*\\s*$"
+      },
+      "packageRelativePath": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
       },
       "repository": {
         "type": "object",

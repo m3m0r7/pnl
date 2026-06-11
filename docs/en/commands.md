@@ -19,6 +19,7 @@
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
   - [`pnl repo index <dir> --base-url <url>`](#pnl-repo-index-dir---base-url-url)
+  - [`pnl repo sign <repository-index.json> --key <key>`](#pnl-repo-sign-repository-indexjson---key-key)
   - [`pnl repo remove <url>`](#pnl-repo-remove-url)
   - [`pnl validate`](#pnl-validate)
   - [`pnl self-upgrade`](#pnl-self-upgrade)
@@ -31,6 +32,7 @@
   - [`pnlx validate`](#pnlx-validate)
   - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
   - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
+  - [`pnlx publish`](#pnlx-publish)
   - [`pnlx package`](#pnlx-package)
 
 ## pnl Commands
@@ -127,14 +129,20 @@ Installs the given extension. Specifically, it finds the C library and headers, 
 
 The source can be a URL, a local path, a **bare package name**, or a **distribution archive** (`.tar.gz`/`.tgz`/`.zip`, local or remote — it is downloaded if needed, extracted, and must contain a `pnlx.json`). You can pass **several sources at once** (`pnl install libusb libnfc`).
 
-A bare name is resolved against your configured `repositories`, highest [`priority`](configuration.md#writing-pnljson) first, falling back to the built-in default repository `https://github.com/m3m0r7/pnl-packages` (kept internally at priority 0 — it is *not* written into `pnl.json`). Append `@<version>` to pin a version — for git sources that checks out the matching tag/branch, and the resolved package version must match. Running `pnl install` with **no source** restores every extension from the lockfile at its locked version, re-verifying each package's content against the recorded sha256.
+A bare name is resolved against your configured `repositories`, highest [`priority`](configuration.md#writing-pnljson) first, falling back to the built-in default repository `https://github.com/m3m0r7/pnl-packages` (kept internally at priority 0 — it is *not* written into `pnl.json`). pnl tries `repository-index.json` first; repositories with `key` require a sibling `repository-index.json.sig` Ed25519 signature, and index-selected packages are verified against `dist.sha256`. Append `@<version>` to pin a version — for git sources that checks out the matching tag/branch, and the resolved package version must match. Running `pnl install` with **no source** restores every extension from the lockfile at its locked version, re-verifying each package's content against the recorded sha256.
+
+When the target package's `pnlx.json` declares `dependencies`, pnl resolves each dependency first at the newest version satisfying its version constraint. Already locked dependencies that satisfy the constraint are reused. The resolved dependency constraints are written into the lockfile.
 
 If the package declares an `installation` recipe for your OS or Linux distro, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `checkIfExists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default). On Linux the recipe is selected from `/etc/os-release`: the distro `ID` (e.g. `alpine`, `ubuntu`, `fedora`) is tried first, then each `ID_LIKE` ancestor (e.g. `debian`, `rhel`), then a generic `linux` key. If the install commands fail, pnl reports which command failed and asks you to install the libraries and headers manually before running `pnl install` again.
+
+Packages that declare `installation` or `self_build` are checked against the `install_script_hash` stamped into `pnlx.json` by `pnlx publish`. When the hash is missing or differs, interactive installs ask with a default of No. Under `-y`, pnl stops instead of trusting changed scripts. To override deliberately, pass `--allow-install-script-hash <sha256>` (repeatable). `--allow-unverified-install-scripts` is available as an explicit last resort.
 
 Two flags adjust the generated PHP:
 
 - `--alias-class <Class>` additionally exposes the extension under `<Class>` via `class_alias`, keeping the original class.
 - `--function-prefix <prefix>` prepends `<prefix>` to every generated function and method name (the unprefixed names are not kept).
+- `--allow-install-script-hash <sha256>` trusts the given install-script hash for this run. It can be repeated.
+- `--allow-unverified-install-scripts` allows missing or changed install-script hashes.
 
 ```sh
 # Install libusb by bare name (resolved against the default repository).
@@ -337,6 +345,15 @@ Example output:
 
 ```text
 indexed 106 package(s) into packages/repository-index.json
+```
+
+### `pnl repo sign <repository-index.json> --key <key>`
+
+Writes a detached signature for `repository-index.json`. By default the signature is written beside the index as `repository-index.json.sig` in `ed25519:<base64>` form. The secret key is a 32-byte Ed25519 seed as `ed25519:<base64>` or 64 hex characters. The command prints the matching public `repository key`; pass that to `pnl repo add ... --key <key>` to make install/search verify the index signature.
+
+```sh
+pnl repo sign packages/repository-index.json --key ed25519:<base64-secret>
+pnl repo add https https://example.com/pnl/packages --key ed25519:<base64-public>
 ```
 
 ### `pnl repo remove <url>`
@@ -558,6 +575,16 @@ This command:
 - compiles the installed `src/generated/*.bridge.rs` with `rustc --crate-type cdylib`,
 - writes the resulting libraries under `@pnlx/packages/<vendor>/<package>/<version>/bridge/`,
 - and updates the `bridges` entries in `@pnlx/pnlx-pathmap.json`.
+
+### `pnlx publish`
+
+Updates publish-time metadata in `pnlx.json`. Currently it hashes every `installation` command, or the package-relative script contents referenced by `self_build`, and writes the resulting sha256 into `install_script_hash`.
+
+```sh
+pnlx publish
+```
+
+`self_build` is mutually exclusive with `installation`. The script path must stay inside the package: absolute paths and `..` traversal are rejected.
 
 ### `pnlx package`
 

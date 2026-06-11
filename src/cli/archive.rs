@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -34,14 +35,12 @@ pub fn extract_extension_archive(archive: &Path) -> Result<PathBuf> {
     } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         let file =
             File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-        tar::Archive::new(GzDecoder::new(file))
-            .unpack(&destination)
+        extract_tar(tar::Archive::new(GzDecoder::new(file)), &destination)
             .with_context(|| format!("failed to extract {}", archive.display()))?;
     } else {
         let file =
             File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
-        tar::Archive::new(file)
-            .unpack(&destination)
+        extract_tar(tar::Archive::new(file), &destination)
             .with_context(|| format!("failed to extract {}", archive.display()))?;
     }
 
@@ -54,8 +53,42 @@ fn extract_zip(archive: &Path, destination: &Path) -> Result<()> {
         File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(file)
         .with_context(|| format!("failed to read zip {}", archive.display()))?;
-    zip.extract(destination)
-        .with_context(|| format!("failed to extract {}", archive.display()))?;
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index)?;
+        let Some(enclosed) = entry.enclosed_name().map(|path| path.to_owned()) else {
+            bail!(
+                "zip entry {} would extract outside the destination",
+                entry.name()
+            );
+        };
+        let out = destination.join(enclosed);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)
+                .with_context(|| format!("failed to create {}", out.display()))?;
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let mut file = File::create(&out)
+                .with_context(|| format!("failed to create {}", out.display()))?;
+            io::copy(&mut entry, &mut file)
+                .with_context(|| format!("failed to extract {}", out.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_tar<R: io::Read>(mut archive: tar::Archive<R>, destination: &Path) -> Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.unpack_in(destination)? {
+            bail!(
+                "tar entry {} would extract outside the destination",
+                entry.path()?.display()
+            );
+        }
+    }
     Ok(())
 }
 

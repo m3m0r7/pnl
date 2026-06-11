@@ -186,9 +186,22 @@ fn extract_source_tarball(tarball: &Path) -> Result<ExtractedSource> {
 
     let file =
         fs::File::open(tarball).with_context(|| format!("failed to open {}", tarball.display()))?;
-    tar::Archive::new(flate2::read::GzDecoder::new(file))
-        .unpack(&root)
-        .with_context(|| format!("failed to extract {}", tarball.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    for entry in archive
+        .entries()
+        .with_context(|| format!("failed to read {}", tarball.display()))?
+    {
+        let mut entry = entry.with_context(|| format!("failed to read {}", tarball.display()))?;
+        if !entry
+            .unpack_in(&root)
+            .with_context(|| format!("failed to extract {}", tarball.display()))?
+        {
+            bail!(
+                "tar entry {} would extract outside the destination",
+                entry.path()?.display()
+            );
+        }
+    }
 
     let source_root = locate_cargo_root(&root)?;
     Ok(ExtractedSource { root, source_root })

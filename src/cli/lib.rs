@@ -7,11 +7,14 @@ pub mod generate;
 pub mod git_source;
 pub mod glob;
 pub mod header_adapter;
+pub mod highlight;
+pub mod install_script;
 pub mod interaction;
 pub mod io;
 pub mod manifest;
 pub mod platform;
 pub mod release;
+pub mod repository_index;
 pub mod schema;
 pub mod self_upgrade;
 pub mod ui;
@@ -29,7 +32,7 @@ mod tests {
     use crate::manifest::PnlxManifest;
     use crate::validate::{
         validate_package_name, validate_pnlx_manifest_values, validate_rfc3339_datetime,
-        validate_schema_version, validate_semver, validate_version_constraint,
+        validate_schema_version, validate_semver, validate_sha256, validate_version_constraint,
     };
 
     #[test]
@@ -251,12 +254,37 @@ mod tests {
         validate_relative_package_path("examples", "docs/EXAMPLES.md").unwrap();
         assert!(validate_relative_package_path("examples", "/etc/passwd").is_err());
         assert!(validate_relative_package_path("examples", "../outside.md").is_err());
+        assert!(validate_relative_package_path("examples", "docs\\EXAMPLES.md").is_err());
+    }
+
+    #[test]
+    fn validates_install_script_hashes() {
+        validate_sha256(&"a".repeat(64)).unwrap();
+        assert!(validate_sha256("not-a-sha").is_err());
     }
 
     #[test]
     fn rejects_pnlx_manifest_without_native_requirements() {
         let mut manifest = PnlxManifest::default();
         manifest.requires.clear();
+
+        assert!(validate_pnlx_manifest_values(&manifest).is_err());
+    }
+
+    #[test]
+    fn rejects_self_build_together_with_installation() {
+        use crate::manifest::InstallationEntry;
+        let mut manifest = PnlxManifest {
+            self_build: Some("build.sh".to_owned()),
+            ..PnlxManifest::default()
+        };
+        manifest.installation.insert(
+            "linux".to_owned(),
+            InstallationEntry {
+                install: vec!["apt-get install libexample-dev".to_owned()],
+                check_if_exists: Vec::new(),
+            },
+        );
 
         assert!(validate_pnlx_manifest_values(&manifest).is_err());
     }

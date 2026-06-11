@@ -277,6 +277,14 @@ pub struct PnlxManifest {
     /// Optional PHP usage snippets shown when the package finishes installing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<String>,
+    /// SHA-256 of the install-script material (`installation` commands or the
+    /// `self_build` script) stamped by `pnlx publish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_script_hash: Option<String>,
+    /// Package-relative script to build/install native dependencies. Mutually
+    /// exclusive with `installation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_build: Option<String>,
     /// Optional per-OS commands that install the native dependencies, keyed by
     /// the platform OS name (`darwin`, `linux`, `windows`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -319,6 +327,8 @@ impl Default for PnlxManifest {
             class: "Example\\Extension\\Extension".to_owned(),
             class_prefix: String::new(),
             examples: Vec::new(),
+            install_script_hash: None,
+            self_build: None,
             installation: BTreeMap::new(),
             headers: Vec::new(),
             platforms: vec![current_platform_requirement()],
@@ -359,6 +369,11 @@ pub struct ResolvedNativeLibrary {
     pub path: String,
     pub version: String,
     pub sha256: String,
+    /// RFC3339 timestamp of when this native library was first resolved into the
+    /// pathmap. Preserved across reinstalls; absent on pathmaps written before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

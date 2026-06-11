@@ -13,6 +13,9 @@ use crate::manifest::{
     PnlManifest, PnlxManifest, Repository, RepositoryType, Source,
 };
 use crate::platform::now;
+use crate::repository_index::{
+    installed_version_satisfies, load_repository_index, select_package_version,
+};
 use crate::validate::{
     validate_pnl_manifest_values, validate_pnlx_manifest_values, validate_schema_version,
 };
@@ -36,6 +39,16 @@ pub(crate) struct InstallOptions {
     pub function_prefix: Option<String>,
     /// Drives confirmation prompts (e.g. native-dependency installation).
     pub interaction: crate::interaction::Interaction,
+    /// Continue when install scripts are missing or fail their publish-time hash
+    /// check.
+    pub allow_unverified_install_scripts: bool,
+    /// Hashes explicitly trusted for this install run.
+    pub allowed_install_script_hashes: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct InstallState {
+    stack: Vec<String>,
 }
 
 pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
@@ -55,6 +68,7 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
     };
     crate::ui::heading("pnl", &label);
     let started = std::time::Instant::now();
+    let mut state = InstallState::default();
 
     for target in targets {
         // An optional `@<version>` suffix pins the version (e.g. `…/libsdl@2.32.10`).
@@ -70,6 +84,8 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
             pinned_version,
             pinned_version,
             options,
+            &mut state,
+            None,
         )?;
     }
 
@@ -94,6 +110,8 @@ fn install_one(
     git_ref: Option<&str>,
     expected_version: Option<&str>,
     options: &InstallOptions,
+    state: &mut InstallState,
+    expected_content_hash: Option<&str>,
 ) -> Result<()> {
     // A bare package name (no scheme/slash, not a local package dir) is resolved
     // against the configured repositories, e.g. `pnl install libusb`.
@@ -102,7 +120,16 @@ fn install_one(
             .join("pnlx.json")
             .is_file()
     {
-        return install_bare_name(root, manifest, target, git_ref, expected_version, options);
+        return install_bare_name(
+            root,
+            manifest,
+            target,
+            version_constraint_for_expected(expected_version).as_deref(),
+            git_ref,
+            expected_version,
+            options,
+            state,
+        );
     }
 
     match resolve_install_source(root, target)? {
@@ -113,13 +140,24 @@ fn install_one(
             ExtensionSource::File { source_url },
             expected_version,
             options,
+            state,
+            expected_content_hash,
         ),
         InstallSource::Git(mut source) => {
             // Pin the clone to the requested tag/branch.
             if let Some(reference) = git_ref {
                 source.branch = Some(reference.to_owned());
             }
-            install_git_extension(root, manifest, target, source, expected_version, options)
+            install_git_extension(
+                root,
+                manifest,
+                target,
+                source,
+                expected_version,
+                options,
+                state,
+                expected_content_hash,
+            )
         }
     }
 }
@@ -147,10 +185,20 @@ fn restore_from_lock(
 
     crate::ui::heading("pnl", "install (restore from lockfile)");
     let started = std::time::Instant::now();
+    let mut state = InstallState::default();
     for (url, version) in &entries {
         crate::ui::step(&format!("{url} ({version})"));
         // Keep the source's branch; only assert the resolved version matches the lock.
-        install_one(root, manifest, url, None, Some(version), options)?;
+        install_one(
+            root,
+            manifest,
+            url,
+            None,
+            Some(version),
+            options,
+            &mut state,
+            None,
+        )?;
     }
 
     crate::ui::summary(&format!(
@@ -190,7 +238,7 @@ pub(super) fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
 
 /// A bare package leaf name (e.g. `libusb`, `libusb-1.0`) — no URL scheme,
 /// path separator, or `git@` host — to be resolved against the repositories.
-fn is_bare_package_name(target: &str) -> bool {
+pub(super) fn is_bare_package_name(target: &str) -> bool {
     !target.is_empty()
         && !target.contains("://")
         && !target.contains('/')
@@ -207,9 +255,11 @@ fn install_bare_name(
     root: &Path,
     manifest: &mut PnlManifest,
     name: &str,
+    version_constraint: Option<&str>,
     git_ref: Option<&str>,
     expected_version: Option<&str>,
     options: &InstallOptions,
+    state: &mut InstallState,
 ) -> Result<()> {
     // Configured repositories first (highest priority first), then the built-in
     // default repository as the lowest-priority fallback.
@@ -217,8 +267,25 @@ fn install_bare_name(
 
     let mut failures = Vec::new();
     for repository in &repositories {
-        let candidate = format!("{}/{name}", repository.url.trim_end_matches('/'));
         crate::ui::step(&format!("resolving {name} from {}", repository.url));
+        match install_from_repository_index(
+            root,
+            manifest,
+            repository,
+            name,
+            version_constraint,
+            options,
+            state,
+        ) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => {
+                failures.push(format!("  - {}: {error}", repository.url));
+                continue;
+            }
+        }
+
+        let candidate = format!("{}/{name}", repository.url.trim_end_matches('/'));
         match install_one(
             root,
             manifest,
@@ -226,6 +293,8 @@ fn install_bare_name(
             git_ref,
             expected_version,
             options,
+            state,
+            None,
         ) {
             Ok(()) => return Ok(()),
             Err(error) => failures.push(format!("  - {}: {error}", repository.url)),
@@ -236,6 +305,41 @@ fn install_bare_name(
         "could not find package \"{name}\" in any configured repository:\n{}",
         failures.join("\n")
     );
+}
+
+fn install_from_repository_index(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    repository: &Repository,
+    name: &str,
+    version_constraint: Option<&str>,
+    options: &InstallOptions,
+    state: &mut InstallState,
+) -> Result<bool> {
+    let Some(index) = load_repository_index(repository)? else {
+        return Ok(false);
+    };
+    let Some((version, entry)) = select_package_version(&index, name, version_constraint)? else {
+        return Ok(false);
+    };
+    crate::ui::success(&format!(
+        "selected {name} {version} from repository metadata"
+    ));
+    install_one(
+        root,
+        manifest,
+        &entry.source.url,
+        None,
+        Some(&version),
+        options,
+        state,
+        Some(&entry.dist.sha256),
+    )?;
+    Ok(true)
+}
+
+fn version_constraint_for_expected(expected_version: Option<&str>) -> Option<String> {
+    expected_version.map(|version| format!("={version}"))
 }
 
 /// The `installation` keys tried for the current platform, most specific
@@ -290,6 +394,29 @@ fn run_shell(command_line: &str) -> std::io::Result<std::process::ExitStatus> {
         c
     };
     command.arg(command_line).status()
+}
+
+fn run_self_build(extension_root: &Path, script: &str) -> Result<()> {
+    let script = crate::install_script::resolve_package_relative_path(extension_root, script)?;
+    crate::ui::step(&format!("running self_build: {}", script.display()));
+    let status = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(&script)
+            .current_dir(extension_root)
+            .status()
+    } else {
+        std::process::Command::new("sh")
+            .arg(&script)
+            .current_dir(extension_root)
+            .status()
+    }
+    .with_context(|| format!("failed to run self_build script {}", script.display()))?;
+
+    if !status.success() {
+        bail!("self_build script {} failed ({status})", script.display());
+    }
+    Ok(())
 }
 
 /// If the package declares `installation` for this platform, optionally run its
@@ -391,6 +518,8 @@ fn install_git_extension(
     source: GitSource,
     expected_version: Option<&str>,
     options: &InstallOptions,
+    state: &mut InstallState,
+    expected_content_hash: Option<&str>,
 ) -> Result<()> {
     let installed = install_git_source(&source)?;
     let extension_root = installed.destination.join(&source.package_path);
@@ -412,6 +541,8 @@ fn install_git_extension(
         },
         expected_version,
         options,
+        state,
+        expected_content_hash,
     )
 }
 
@@ -484,6 +615,8 @@ fn install_local_extension(
     source: ExtensionSource,
     expected_version: Option<&str>,
     options: &InstallOptions,
+    state: &mut InstallState,
+    expected_content_hash: Option<&str>,
 ) -> Result<()> {
     let extension = read_json::<PnlxManifest>(&extension_root.join("pnlx.json"))?;
     validate_schema_version(&extension.schema_version)?;
@@ -503,7 +636,26 @@ fn install_local_extension(
     // Integrity signature: hash the package content and reject it if a prior
     // lock pinned the same version to a different digest (tampered download).
     let content_hash = tree_sha256(extension_root)?;
+    if let Some(expected) = expected_content_hash
+        && expected != content_hash
+    {
+        bail!(
+            "dist integrity check failed for {name}: repository index expected sha256 {expected}, but resolved content is {content_hash}",
+            name = extension.name
+        );
+    }
     verify_locked_integrity(root, &extension, &content_hash)?;
+    crate::install_script::verify_install_scripts(
+        extension_root,
+        &extension,
+        &options.interaction,
+        options.allow_unverified_install_scripts,
+        &options.allowed_install_script_hashes,
+    )?;
+
+    ensure_not_cyclic(state, &extension.name)?;
+    state.stack.push(extension.name.clone());
+    install_extension_dependencies(root, manifest, &extension, options, state)?;
 
     let installed_extension_root =
         install_extension_files(root, extension_root, &extension.name, &extension.version)?;
@@ -519,7 +671,11 @@ fn install_local_extension(
 
     // Offer to install the package's native dependencies (e.g. `brew install …`)
     // before we try to resolve them from disk.
-    maybe_install_native_dependencies(&extension, &options.interaction)?;
+    if let Some(script) = &extension.self_build {
+        run_self_build(&installed_extension_root, script)?;
+    } else {
+        maybe_install_native_dependencies(&extension, &options.interaction)?;
+    }
 
     let mut lock = read_lock_for_current_platform(root)?;
     lock.generated_at = now();
@@ -528,7 +684,14 @@ fn install_local_extension(
     pathmap.generated_at = now();
 
     for (key, requirement) in &extension.requires {
-        let native = resolve_native_library(root, manifest, key, requirement)?;
+        let mut native = resolve_native_library(root, manifest, key, requirement)?;
+        // Stamp the first-install time, preserving it across reinstalls so the
+        // timestamp reflects when the library first entered the workspace.
+        native.installed_at = pathmap
+            .requires
+            .get(key)
+            .and_then(|previous| previous.installed_at.clone())
+            .or_else(|| Some(now()));
         crate::ui::success(&format!(
             "resolved {key} {} {}",
             native.version,
@@ -580,7 +743,11 @@ fn install_local_extension(
             constraint: format!("={}", extension.version),
             source,
             dist,
-            dependencies: BTreeMap::new(),
+            dependencies: extension
+                .dependencies
+                .iter()
+                .map(|(name, requirement)| (name.clone(), requirement.version.clone()))
+                .collect(),
             requires: locked_requires,
         },
     );
@@ -609,6 +776,63 @@ fn install_local_extension(
     }
 
     Ok(())
+}
+
+fn ensure_not_cyclic(state: &InstallState, package: &str) -> Result<()> {
+    if state.stack.iter().any(|item| item == package) {
+        let mut cycle = state.stack.clone();
+        cycle.push(package.to_owned());
+        bail!("cyclic dependency detected: {}", cycle.join(" -> "));
+    }
+    Ok(())
+}
+
+fn install_extension_dependencies(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    extension: &PnlxManifest,
+    options: &InstallOptions,
+    state: &mut InstallState,
+) -> Result<()> {
+    for (dependency, requirement) in &extension.dependencies {
+        if installed_dependency_satisfies(root, dependency, &requirement.version)? {
+            crate::ui::info(&format!(
+                "dependency {dependency} already satisfies {}",
+                requirement.version
+            ));
+            continue;
+        }
+        crate::ui::step(&format!(
+            "installing dependency {dependency} {}",
+            requirement.version
+        ));
+        install_bare_name(
+            root,
+            manifest,
+            dependency,
+            Some(&requirement.version),
+            None,
+            None,
+            options,
+            state,
+        )?;
+        if !installed_dependency_satisfies(root, dependency, &requirement.version)? {
+            bail!(
+                "installed dependency {dependency} does not satisfy {}",
+                requirement.version
+            );
+        }
+    }
+    let _ = state.stack.pop();
+    Ok(())
+}
+
+fn installed_dependency_satisfies(root: &Path, package: &str, constraint: &str) -> Result<bool> {
+    let lock = read_lock_for_current_platform(root)?;
+    let Some(installed) = lock.extensions.get(package) else {
+        return Ok(false);
+    };
+    installed_version_satisfies(&installed.version, constraint)
 }
 
 impl ExtensionSource {

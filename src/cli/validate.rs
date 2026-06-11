@@ -14,23 +14,82 @@ pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
     validate_pnl_manifest_values(&manifest)?;
 
     let workspace = crate::workspace::workspace_dir(root);
-    let lock_path = workspace.join("pnlx-lock.json");
-    if lock_path.exists() {
+    let lock_path = root.join("pnlx-lock.json");
+    let lock = if lock_path.exists() {
         let lock = read_json::<PnlLock>(&lock_path)?;
         validate_schema_version(&lock.schema_version)?;
         ensure_platform_matches(&lock.platform)?;
         validate_pnl_lock_values(&lock)?;
-    }
+        Some(lock)
+    } else {
+        None
+    };
 
     let pathmap_path = workspace.join("pnlx-pathmap.json");
-    if pathmap_path.exists() {
+    let pathmap = if pathmap_path.exists() {
         let pathmap = read_json::<PnlxPathmap>(&pathmap_path)?;
         validate_schema_version(&pathmap.schema_version)?;
         ensure_platform_matches(&pathmap.platform)?;
         validate_pnlx_pathmap_values(&pathmap)?;
-    }
+        Some(pathmap)
+    } else {
+        None
+    };
+
+    validate_workspace_consistency(&manifest, lock.as_ref(), pathmap.as_ref())?;
 
     crate::ui::success("pnl workspace is valid");
+    Ok(())
+}
+
+fn validate_workspace_consistency(
+    manifest: &PnlManifest,
+    lock: Option<&PnlLock>,
+    pathmap: Option<&PnlxPathmap>,
+) -> Result<()> {
+    let Some(lock) = lock else {
+        if manifest
+            .extensions
+            .values()
+            .any(|requirement| requirement.required)
+        {
+            bail!("pnl.json declares required extensions but pnlx-lock.json is missing");
+        }
+        return Ok(());
+    };
+
+    for (name, requirement) in &manifest.extensions {
+        if requirement.required && !lock.extensions.contains_key(name) {
+            bail!("pnl.json requires {name}, but it is missing from pnlx-lock.json");
+        }
+    }
+
+    let Some(pathmap) = pathmap else {
+        if lock
+            .extensions
+            .values()
+            .any(|extension| !extension.requires.is_empty())
+        {
+            bail!("pnlx-lock.json records native requirements but pnlx-pathmap.json is missing");
+        }
+        return Ok(());
+    };
+
+    for (extension_name, extension) in &lock.extensions {
+        for native in extension.requires.keys() {
+            if !pathmap.requires.contains_key(native) {
+                bail!(
+                    "{extension_name} requires {native}, but it is missing from pnlx-pathmap.json requires"
+                );
+            }
+            if !pathmap.headers.contains_key(native) {
+                bail!(
+                    "{extension_name} requires {native}, but it is missing from pnlx-pathmap.json headers"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -49,6 +108,12 @@ pub fn validate_pnlx_workspace(root: &Path) -> Result<()> {
 }
 
 pub fn validate_pnl_manifest_values(manifest: &PnlManifest) -> Result<()> {
+    validate_relative_package_path("output_dir", &manifest.output_dir)?;
+    for repository in &manifest.repositories {
+        if let Some(key) = &repository.key {
+            crate::repository_index::validate_public_key(key)?;
+        }
+    }
     for (name, requirement) in &manifest.extensions {
         validate_package_name(name)?;
         validate_version_constraint(&requirement.version)?;
@@ -78,8 +143,26 @@ pub fn validate_pnl_lock_values(lock: &PnlLock) -> Result<()> {
 pub fn validate_pnlx_manifest_values(manifest: &PnlxManifest) -> Result<()> {
     validate_package_name(&manifest.name)?;
     validate_semver(&manifest.version)?;
+    validate_relative_package_path("entrypoint", &manifest.entrypoint)?;
+    if let Some(hash) = &manifest.install_script_hash {
+        validate_sha256(hash)?;
+    }
+    if let Some(self_build) = &manifest.self_build {
+        validate_relative_package_path("self_build", self_build)?;
+        if !manifest.installation.is_empty() {
+            bail!("pnlx.json self_build cannot be used together with installation commands");
+        }
+    }
     if manifest.requires.is_empty() {
         bail!("pnlx.json requires must contain at least one native library requirement");
+    }
+    for requirement in manifest.requires.values() {
+        for header in &requirement.header_names {
+            validate_relative_package_path("header_names", header)?;
+        }
+        for library in &requirement.library_names {
+            validate_library_name(library.name())?;
+        }
     }
     for requirement in manifest.requires.values() {
         validate_version_constraint(&requirement.version)?;
@@ -98,6 +181,12 @@ pub fn validate_pnlx_manifest_values(manifest: &PnlxManifest) -> Result<()> {
 /// Package-relative file references (e.g. `examples` entries) must stay inside
 /// the package directory.
 pub fn validate_relative_package_path(field: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{field} entries must not be empty");
+    }
+    if value.contains('\\') {
+        bail!("{field} entries must use / as the path separator: {value}");
+    }
     let path = std::path::Path::new(value);
     if path.is_absolute() {
         bail!("{field} entries must be paths relative to the package root: {value}");
@@ -107,6 +196,29 @@ pub fn validate_relative_package_path(field: &str, value: &str) -> Result<()> {
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         bail!("{field} entries must not contain ..: {value}");
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        bail!("{field} entries must be package-relative paths: {value}");
+    }
+    Ok(())
+}
+
+pub fn validate_sha256(value: &str) -> Result<()> {
+    if value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        bail!("sha256 values must be 64 hexadecimal characters: {value}")
+    }
+}
+
+fn validate_library_name(value: &str) -> Result<()> {
+    if value.contains('/') || value.contains('\\') || value.contains("..") {
+        bail!("library_names entries must be plain file names: {value}");
     }
     Ok(())
 }

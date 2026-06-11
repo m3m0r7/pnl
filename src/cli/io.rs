@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -43,8 +44,38 @@ where
     }
     let content = serde_json::to_string_pretty(value)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
-    fs::write(path, format!("{content}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    atomic_write(path, format!("{content}\n").as_bytes())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    let temp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+
+    {
+        let mut file = fs::File::create(&temp)
+            .with_context(|| format!("failed to create {}", temp.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temp.display()))?;
+    }
+
+    match fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(_error) if cfg!(windows) && path.exists() => {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+            fs::rename(&temp, path).with_context(|| format!("failed to write {}", path.display()))
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            Err(error).with_context(|| format!("failed to write {}", path.display()))
+        }
+    }
 }
 
 pub fn write_json_if_missing<T>(path: &Path, value: &T) -> Result<()>

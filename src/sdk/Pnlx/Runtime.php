@@ -164,6 +164,10 @@ class Runtime implements RuntimeInterface
         if (!is_file($context->path())) {
             throw new ExtensionLoadException('an extension cannot be loaded');
         }
+        $actualHash = hash_file('sha256', $context->path());
+        if ($actualHash === false || !hash_equals($context->hash(), $actualHash)) {
+            throw new ExtensionLoadException('Native bridge hash does not match the pathmap.');
+        }
 
         return NativeLibrary::load(
             $this->generatedPath($class, $ffiFile),

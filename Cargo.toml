@@ -16,9 +16,11 @@ path = "src/cli/bin/pnlx.rs"
 
 [dependencies]
 anyhow = "1.0.100"
+base64 = "0.22.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 clang = { version = "2.0.0", features = ["clang_10_0", "runtime"] }
 clap = { version = "4.5.53", features = ["derive"] }
+ed25519-dalek = "2.2.0"
 flate2 = "1.1.9"
 gethostname = "1.1.0"
 git-url-parse = "0.6.0"
