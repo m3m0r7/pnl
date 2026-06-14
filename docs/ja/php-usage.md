@@ -59,25 +59,18 @@ declare(strict_types=1);
 // 呼び出し元のカレントディレクトリに関係なく、プロジェクト直下で動かします。
 chdir(__DIR__);
 
-// Composer が SDK を、@pnlx が生成済みパッケージの入口を読み込みます。
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx が生成済みパッケージの入口（と一緒に SDK）を読み込みます。
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
-use Pnlx\Runtime;
 
-// Runtime が設定・パスマップ・生成済み入口・bridge をまとめて解決します。
-$runtime = new Runtime(__DIR__);
+// 拡張は自前の runtime を構築します。メタ情報はそのまま参照できます。
+$libusb = new Libusb();
 
-/** @var Libusb $libusb */
-// 生成済みの libusb オブジェクトを Runtime 経由で取得します。
-$libusb = $runtime->load(Libusb::class);
-
-// パッケージのメタ情報と、コンパイル済み bridge のパスを取得します。
-$context = $runtime->context(Libusb::class);
-
-printf("extension: %s %s\n", $context->name(), $context->version());
-printf("bridge: %s\n", $context->path());
+// パッケージのメタ情報と、コンパイル済み bridge のパスを取得します。同じ値は
+// メソッド呼び出しでも取れます: $libusb->manifest->name(), ->version(), ->path()。
+printf("extension: %s %s\n", $libusb->name, $libusb->version);
+printf("bridge: %s\n", $libusb->path);
 printf("error name for 0: %s\n", $libusb->libusb_error_name(0));
 printf("strerror for 0: %s\n", $libusb->libusbStrerror(0));
 
@@ -87,7 +80,7 @@ printf("libusb_init: %d (%s)\n", $result, $libusb->libusbErrorName($result));
 
 if ($result === 0) {
     // 生の FFI::new() を使わずに void *[1] を確保します。
-    $deviceList = $runtime->allocator()->voidPointerArray(1);
+    $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
 
     // libusb がデバイス一覧のポインタを $deviceList[0] に書き込みます。
     $deviceCount = $libusb->libusbGetDeviceList(null, $deviceList);
@@ -132,12 +125,10 @@ declare(strict_types=1);
 // 呼び出し元のカレントディレクトリに関係なく、プロジェクト直下で動かします。
 chdir(__DIR__);
 
-// Composer が SDK を、@pnlx が生成済みパッケージの入口を読み込みます。
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx が生成済みパッケージの入口（と一緒に SDK）を読み込みます。
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libsdl\Libsdl;
-use Pnlx\Runtime;
 use function Pnlx\Util\is_null;
 
 // SDL のビデオサブシステムを表すフラグ。
@@ -149,12 +140,9 @@ const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
 // 表示状態のウィンドウを作るためのフラグ。
 const SDL_WINDOW_SHOWN = 0x00000004;
 
-// Runtime が生成済みの SDL オブジェクトと bridge を読み込みます。
-$runtime = new Runtime(__DIR__);
-
-/** @var Libsdl $sdl */
+// 生成済みの SDL オブジェクトを `new` するだけ。自前で bridge を読み込みます。
 // SDL_Init() や SDL_CreateWindow() などのメソッドを使います。
-$sdl = $runtime->load(Libsdl::class);
+$sdl = new Libsdl();
 
 // "Hello World!" に使う文字用の小さな 5x7 ビットマップフォント。
 // '1' が点灯ピクセル、行は上から下です。
@@ -264,8 +252,7 @@ declare(strict_types=1);
 // 呼び出し元のカレントディレクトリに関係なく、プロジェクト直下で動かします。
 chdir(__DIR__);
 
-// Composer が SDK を、@pnlx が生成済みパッケージの入口を読み込みます。
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx が生成済みパッケージの入口（と一緒に SDK）を読み込みます。
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use function Pnlx\Util\is_null;

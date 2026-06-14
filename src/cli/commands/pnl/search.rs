@@ -123,7 +123,10 @@ fn index_entries(index: RepositoryIndex) -> Vec<(String, Vec<String>)> {
     index
         .packages
         .into_iter()
-        .map(|(name, package)| (name, package.versions.into_keys().collect()))
+        .map(|(name, package)| match package.alias {
+            Some(target) => (name, vec![format!("ref: {target}")]),
+            None => (name, package.versions.into_keys().collect()),
+        })
         .collect()
 }
 

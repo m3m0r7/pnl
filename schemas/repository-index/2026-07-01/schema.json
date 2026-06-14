@@ -22,7 +22,7 @@
           "packages": {
             "type": "object",
             "x-propertyNames": {
-              "$ref": "#/components/schemas/packageName"
+              "$ref": "#/components/schemas/indexPackageName"
             },
             "additionalProperties": {
               "$ref": "#/components/schemas/package"
@@ -38,6 +38,11 @@
         "type": "string",
         "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
       },
+      "indexPackageName": {
+        "type": "string",
+        "description": "A repository-index key: either a full `vendor/name` or a bare leaf name (e.g. `sdl`), the form `pnl install <name>` resolves and the form aliases use.",
+        "pattern": "^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)?$"
+      },
       "semver": {
         "type": "string",
         "pattern": "^[0-9]+(?:\\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.-]+)?$"
@@ -49,10 +54,10 @@
       "package": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "versions"
-        ],
         "properties": {
+          "ref": {
+            "type": "string"
+          },
           "versions": {
             "type": "object",
             "x-propertyNames": {

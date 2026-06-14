@@ -61,8 +61,8 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
 ///
 /// Candidates are found two ways: tokens that look like ABI macros (all-caps
 /// call-convention / attribute names), and any remaining `unknown type name`
-/// libclang reports. Enum constants are never neutralised, and a macro the
-/// header defines itself wins over our empty definition (later `#define` wins),
+/// libclang reports. Enum constants, reserved/compiler macros, and any macro the
+/// header `#define`s itself (include guards, value macros) are never neutralised,
 /// so only genuinely-external macros are stubbed out.
 fn parse_with_neutralized_macros(
     index: &Index<'_>,
@@ -122,16 +122,53 @@ fn parse_with_neutralized_macros(
 /// Identifier tokens that look like call-convention or attribute macros:
 /// all-caps names containing an underscore or `CALL`, plus bare `DECLSPEC`.
 fn abi_macro_candidates(header: &str) -> BTreeSet<String> {
+    // Macros the header `#define`s itself must NOT be stubbed: include guards
+    // (`#ifndef LIBUSB_H`/`#define LIBUSB_H`) would otherwise mark the whole header
+    // as already-included and skip every declaration, and value macros
+    // (`#define LIBUSB_API_VERSION 0x…`) feed `#if` expressions. The header's own
+    // (possibly platform-conditional) definition is the right one.
+    let defined = header_defined_macros(header);
     let mut candidates = BTreeSet::new();
     for token in identifier_tokens(header) {
-        if is_abi_macro_token(token) {
+        if is_abi_macro_token(token) && !defined.contains(token) {
             candidates.insert(token.to_owned());
         }
     }
     candidates
 }
 
+/// Names introduced by `#define NAME …` anywhere in the header.
+fn header_defined_macros(header: &str) -> BTreeSet<String> {
+    let mut defined = BTreeSet::new();
+    for line in header.lines() {
+        let rest = line.trim_start();
+        let Some(rest) = rest.strip_prefix('#') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix("define") else {
+            continue;
+        };
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        if !name.is_empty() {
+            defined.insert(name);
+        }
+    }
+    defined
+}
+
 fn is_abi_macro_token(token: &str) -> bool {
+    // Reserved identifiers (`__GNUC__`, `_WIN32`, `_MSC_VER`, …) are compiler and
+    // feature-test macros, not ABI annotations. Stubbing them to empty breaks the
+    // header's own preprocessor logic — and *defining* a platform macro like
+    // `_WIN32` would switch on the Windows-only branches (e.g. `#include
+    // <basetsd.h>`), so a header's functions silently vanish.
+    if token.starts_with('_') {
+        return false;
+    }
     if token == "DECLSPEC" {
         return true;
     }
@@ -543,6 +580,24 @@ mod tests {
         let cdef = cdef(HEADER);
         assert!(!cdef.contains("DECLSPEC"), "{cdef}");
         assert!(!cdef.contains("EXCALL"), "{cdef}");
+    }
+
+    #[test]
+    fn does_not_neutralize_header_defined_guard_or_value_macros() {
+        // The all-caps include guard `EX_H` and the value macro `EX_API_VERSION`
+        // look like ABI macros, but stubbing the guard would mark the header as
+        // already-included and drop every declaration (the libusb failure mode).
+        const GUARDED: &str = r#"
+            #ifndef EX_H
+            #define EX_H
+            #define EX_API_VERSION 0x010203
+            #if EX_API_VERSION >= 0x010000
+            int EXCALL ex_supported(void);
+            #endif
+            #endif
+        "#;
+        let cdef = cdef(GUARDED);
+        assert!(cdef.contains("int ex_supported(void);"), "{cdef}");
     }
 
     #[test]

@@ -1,10 +1,13 @@
 [package]
 name = "pnl"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2024"
 
 [lib]
 path = "src/cli/lib.rs"
+# `cdylib` exposes the C ABI in `ffi.rs` (schema validation) to the PHP runtime;
+# `rlib` keeps the library usable by the pnl/pnlx binaries and tests.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "pnl"
@@ -20,6 +23,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 clang = { version = "2.0.0", features = ["clang_10_0", "runtime"] }
 clap = { version = "4.5.53", features = ["derive"] }
+console = "0.16.3"
 ed25519-dalek = "2.2.0"
 flate2 = "1.1.9"
 gethostname = "1.1.0"
@@ -50,6 +54,13 @@ version = "0.21.0"
 default-features = false
 # `cred` (no OpenSSL) keeps Cred::credential_helper available for HTTPS auth.
 features = ["vendored-libgit2", "cred"]
+
+[build-dependencies]
+# Used by build.rs to turn config.toml into compile-time constants, rendered
+# through a Handlebars template (no Rust code is assembled with string concat).
+handlebars = "6.3.2"
+serde_json = "1.0.145"
+toml = "0.8.19"
 
 [dev-dependencies]
 insta = "1.47.2"

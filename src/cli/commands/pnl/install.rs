@@ -9,8 +9,8 @@ use crate::fetch::{fetch_asset, is_remote_source};
 use crate::git_source::{GitSource, install_git_source};
 use crate::io::{read_json, read_or_default, write_json};
 use crate::manifest::{
-    DEFAULT_PACKAGES_REPOSITORY, Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary,
-    PnlManifest, PnlxManifest, Repository, RepositoryType, Source,
+    Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary, PnlManifest, PnlxManifest,
+    Repository, RepositoryType, Source,
 };
 use crate::platform::now;
 use crate::repository_index::{
@@ -25,7 +25,7 @@ use super::native::{
     generation_headers_from_resolved_header, resolve_header_for_native, resolve_native_library,
 };
 use super::package::{
-    absolutize, file_url_for_path, install_extension_files, pnl_lock_path,
+    absolutize, entity_class_fqn, file_url_for_path, install_extension_files, pnl_lock_path,
     read_lock_for_current_platform, read_pathmap_for_current_platform, tree_sha256, write_pathmap,
     write_pnlx_autoload,
 };
@@ -44,6 +44,14 @@ pub(crate) struct InstallOptions {
     pub allow_unverified_install_scripts: bool,
     /// Hashes explicitly trusted for this install run.
     pub allowed_install_script_hashes: Vec<String>,
+    /// Persist `features.use_functions = true` into pnl.json.
+    pub enable_use_functions: bool,
+    /// Persist `features.allow_cdata = true` into pnl.json.
+    pub enable_allow_cdata: bool,
+    /// Persist `features.use_php_scalars_in_params = true` into pnl.json.
+    pub enable_use_php_scalars_in_params: bool,
+    /// Persist `features.use_php_scalars_in_return = true` into pnl.json.
+    pub enable_use_php_scalars_in_return: bool,
 }
 
 #[derive(Debug, Default)]
@@ -51,10 +59,39 @@ struct InstallState {
     stack: Vec<String>,
 }
 
+/// Apply `--enable-use-functions` / `--enable-allow-cdata` to the manifest,
+/// returning whether anything changed (so the caller persists pnl.json).
+fn apply_feature_flags(manifest: &mut PnlManifest, options: &InstallOptions) -> bool {
+    let mut changed = false;
+    if options.enable_use_functions && !manifest.features.use_functions {
+        manifest.features.use_functions = true;
+        changed = true;
+    }
+    if options.enable_allow_cdata && !manifest.features.allow_cdata {
+        manifest.features.allow_cdata = true;
+        changed = true;
+    }
+    if options.enable_use_php_scalars_in_params && !manifest.features.use_php_scalars_in_params {
+        manifest.features.use_php_scalars_in_params = true;
+        changed = true;
+    }
+    if options.enable_use_php_scalars_in_return && !manifest.features.use_php_scalars_in_return {
+        manifest.features.use_php_scalars_in_return = true;
+        changed = true;
+    }
+    changed
+}
+
 pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
     let mut manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
+
+    // Persist feature toggles up front so `pnl install --enable-…` works even with
+    // no target (the manifest is rewritten again when an extension is added).
+    if apply_feature_flags(&mut manifest, options) {
+        write_json(&root.join("pnl.json"), &manifest)?;
+    }
 
     if targets.is_empty() {
         // `pnl install` with no target restores every extension from the lockfile.
@@ -71,7 +108,7 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
     let mut state = InstallState::default();
 
     for target in targets {
-        // An optional `@<version>` suffix pins the version (e.g. `…/libsdl@2.32.10`).
+        // An optional `@<version>` suffix pins the version (e.g. `…/widget@1.2.3`).
         let (target, pinned_version) = split_version_pin(target);
         if targets.len() > 1 {
             crate::ui::step(target);
@@ -89,11 +126,47 @@ pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions)
         )?;
     }
 
+    offer_gitignore(root, &options.interaction)?;
+
     crate::ui::summary(&format!(
         "added {} extension(s) in {}",
         targets.len(),
         crate::ui::elapsed(started.elapsed())
     ));
+    Ok(())
+}
+
+/// Offer to add the generated workspace directory (`@pnlx`) to `.gitignore` — it
+/// is regenerable and should not be committed. No-op when it is already ignored,
+/// the user declines, or the prompt is non-interactive.
+pub(super) fn offer_gitignore(
+    root: &Path,
+    interaction: &crate::interaction::Interaction,
+) -> Result<()> {
+    let output_dir = crate::workspace::output_dir_name(root);
+    let gitignore = root.join(".gitignore");
+    let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
+
+    let already_ignored = existing.lines().map(str::trim).any(|line| {
+        let line = line.trim_start_matches('/').trim_end_matches('/');
+        line == output_dir
+    });
+    if already_ignored {
+        return Ok(());
+    }
+
+    if !interaction.confirm(&format!("Add {output_dir}/ to .gitignore?"), true)? {
+        return Ok(());
+    }
+
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(&format!("/{output_dir}/\n"));
+    std::fs::write(&gitignore, content)
+        .with_context(|| format!("failed to write {}", gitignore.display()))?;
+    crate::ui::created("updated", &gitignore);
     Ok(())
 }
 
@@ -115,7 +188,7 @@ fn install_one(
     expected_content_hash: Option<&str>,
 ) -> Result<()> {
     // A bare package name (no scheme/slash, not a local package dir) is resolved
-    // against the configured repositories, e.g. `pnl install libusb`.
+    // against the configured repositories, e.g. `pnl install widget`.
     if is_bare_package_name(target)
         && !absolutize(root, Path::new(target))
             .join("pnlx.json")
@@ -218,14 +291,15 @@ pub(super) fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
         a.trim_end_matches('/') == b.trim_end_matches('/')
     }
 
+    let default_packages = manifest.config.packages_repository();
     let mut repositories = manifest.repositories.clone();
     if !repositories
         .iter()
-        .any(|repository| same_url(&repository.url, DEFAULT_PACKAGES_REPOSITORY))
+        .any(|repository| same_url(&repository.url, &default_packages))
     {
         repositories.push(Repository {
             kind: RepositoryType::Git,
-            url: DEFAULT_PACKAGES_REPOSITORY.to_owned(),
+            url: default_packages,
             key: None,
             priority: Some(0),
         });
@@ -237,7 +311,7 @@ pub(super) fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
     repositories
 }
 
-/// A bare package leaf name (e.g. `libusb`, `libusb-1.0`) — no URL scheme,
+/// A bare package leaf name (e.g. `widget`, `widget-1.0`) — no URL scheme,
 /// path separator, or `git@` host — to be resolved against the repositories.
 pub(super) fn is_bare_package_name(target: &str) -> bool {
     !target.is_empty()
@@ -747,6 +821,7 @@ fn install_local_extension(
             constraint: format!("={}", extension.version),
             source,
             dist,
+            classes: entity_class_fqn(&extension).into_iter().collect(),
             dependencies: extension
                 .dependencies
                 .iter()
@@ -930,8 +1005,8 @@ mod tests {
     #[test]
     fn recognizes_bare_package_names() {
         use super::is_bare_package_name;
-        assert!(is_bare_package_name("libusb"));
-        assert!(is_bare_package_name("libusb-1.0"));
+        assert!(is_bare_package_name("widget"));
+        assert!(is_bare_package_name("widget-1.0"));
         assert!(!is_bare_package_name("vendor/pkg"));
         assert!(!is_bare_package_name("./pkg"));
         assert!(!is_bare_package_name("https://example.com/pkg"));
@@ -942,8 +1017,8 @@ mod tests {
     #[test]
     fn splits_trailing_version_pin_but_not_host_at() {
         assert_eq!(
-            split_version_pin("https://github.com/o/libsdl@2.32.10"),
-            ("https://github.com/o/libsdl", Some("2.32.10"))
+            split_version_pin("https://github.com/o/widget@2.32.10"),
+            ("https://github.com/o/widget", Some("2.32.10"))
         );
         assert_eq!(
             split_version_pin("git@github.com:o/repo@1.2.3"),
@@ -996,6 +1071,7 @@ mod tests {
                     url: "file:///pkg".to_owned(),
                     sha256: locked_hash.clone(),
                 },
+                classes: Vec::new(),
                 dependencies: BTreeMap::new(),
                 requires: BTreeMap::new(),
             },

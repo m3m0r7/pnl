@@ -1,8 +1,16 @@
+/// The compiled support `cdylib` embedded at build time (see `build.rs`). Empty
+/// on a single-pass build; populated by the release two-pass build. `pnl install`
+/// writes it into `@pnlx/runtime`, falling back to the cdylib next to the
+/// executable when this is empty.
+pub const SUPPORT_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/support.lib"));
+
 pub mod about;
 pub mod archive;
 pub mod cache;
 pub mod commands;
+pub mod config;
 pub mod fetch;
+pub mod ffi;
 pub mod generate;
 pub mod git_source;
 pub mod glob;
@@ -16,13 +24,14 @@ pub mod platform;
 pub mod release;
 pub mod repository_index;
 pub mod schema;
+pub mod sdk_assets;
 pub mod self_upgrade;
 pub mod ui;
 pub mod validate;
 pub mod version;
 pub mod workspace;
 
-pub const SCHEMA_VERSION: &str = "2026-07-01";
+pub use crate::config::SCHEMA_VERSION;
 
 #[cfg(test)]
 mod tests {
@@ -47,27 +56,27 @@ mod tests {
     #[test]
     fn parses_github_source_with_package_subpath() {
         let source =
-            GitSource::parse("https://github.com/m3m0r7/pnl-packages/packages/libusb").unwrap();
+            GitSource::parse("https://github.com/m3m0r7/pnl-packages/packages/widget").unwrap();
         assert_eq!(source.url, "https://github.com/m3m0r7/pnl-packages.git");
         assert_eq!(source.package_name(), "m3m0r7/pnl-packages");
         assert_eq!(source.branch, None);
         assert_eq!(
             source.package_path,
-            std::path::PathBuf::from("packages/libusb")
+            std::path::PathBuf::from("packages/widget")
         );
     }
 
     #[test]
     fn parses_github_tree_source_with_package_subpath() {
         let source =
-            GitSource::parse("https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb")
+            GitSource::parse("https://github.com/m3m0r7/pnl-packages/tree/main/packages/widget")
                 .unwrap();
         assert_eq!(source.url, "https://github.com/m3m0r7/pnl-packages.git");
         assert_eq!(source.package_name(), "m3m0r7/pnl-packages");
         assert_eq!(source.branch.as_deref(), Some("main"));
         assert_eq!(
             source.package_path,
-            std::path::PathBuf::from("packages/libusb")
+            std::path::PathBuf::from("packages/widget")
         );
     }
 
@@ -131,14 +140,14 @@ mod tests {
     #[test]
     fn parses_gitlab_tree_source_with_package_subpath() {
         let source =
-            GitSource::parse("https://gitlab.com/group/project/-/tree/main/packages/libusb")
+            GitSource::parse("https://gitlab.com/group/project/-/tree/main/packages/widget")
                 .unwrap();
         assert_eq!(source.url, "https://gitlab.com/group/project.git");
         assert_eq!(source.package_name(), "group/project");
         assert_eq!(source.branch.as_deref(), Some("main"));
         assert_eq!(
             source.package_path,
-            std::path::PathBuf::from("packages/libusb")
+            std::path::PathBuf::from("packages/widget")
         );
     }
 
@@ -187,10 +196,10 @@ mod tests {
     fn parses_plain_and_virtual_library_names() {
         use crate::manifest::LibraryName;
         let names: Vec<LibraryName> = serde_json::from_str(
-            r#"["libusb-1.0.dylib", {"name": "libc.dylib", "virtual": true}, {"name": "x.so"}]"#,
+            r#"["widget-1.0.dylib", {"name": "libc.dylib", "virtual": true}, {"name": "x.so"}]"#,
         )
         .unwrap();
-        assert_eq!(names[0].name(), "libusb-1.0.dylib");
+        assert_eq!(names[0].name(), "widget-1.0.dylib");
         assert!(!names[0].is_virtual());
         assert_eq!(names[1].name(), "libc.dylib");
         assert!(names[1].is_virtual());
@@ -200,7 +209,7 @@ mod tests {
         // A plain string round-trips back to a JSON string, not an object.
         assert_eq!(
             serde_json::to_string(&names[0]).unwrap(),
-            "\"libusb-1.0.dylib\""
+            "\"widget-1.0.dylib\""
         );
     }
 

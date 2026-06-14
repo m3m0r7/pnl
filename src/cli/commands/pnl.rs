@@ -20,7 +20,9 @@ mod search;
 pub(crate) use bridge::build_installed_bridges;
 
 use install::{InstallOptions, install};
-use package::{installed_package_dir, pnl_lock_path, pnlx_pathmap_path, write_pnlx_autoload};
+use package::{
+    installed_package_dir, pnl_lock_path, pnlx_pathmap_path, write_pathmap, write_pnlx_autoload,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "pnl")]
@@ -76,6 +78,22 @@ enum Command {
         /// Explicit install-script hash to trust for this run. Can be repeated.
         #[arg(long)]
         allow_install_script_hash: Vec<String>,
+        /// Persist `features.use_functions = true` into pnl.json (exposes the
+        /// generated global functions API).
+        #[arg(long)]
+        enable_use_functions: bool,
+        /// Persist `features.allow_cdata = true` into pnl.json (also exposes raw
+        /// `\FFI\CData` in generated signatures).
+        #[arg(long)]
+        enable_allow_cdata: bool,
+        /// Persist `features.use_php_scalars_in_params = true` into pnl.json
+        /// (generated methods accept a raw PHP scalar argument, not only a wrapper).
+        #[arg(long)]
+        enable_use_php_scalars_in_params: bool,
+        /// Persist `features.use_php_scalars_in_return = true` into pnl.json
+        /// (generated methods return PHP native int/float/string for scalars that fit).
+        #[arg(long)]
+        enable_use_php_scalars_in_return: bool,
     },
     /// Reinstall an extension (or all of them) from its recorded source.
     Update {
@@ -84,7 +102,7 @@ enum Command {
     },
     /// Remove an installed extension from the workspace.
     Uninstall {
-        /// Extension name (e.g. `vendor/libusb`) to remove.
+        /// Extension name (e.g. `vendor/package`) to remove.
         package: String,
     },
     /// List installed extensions, repositories, or resolved native libraries.
@@ -103,7 +121,7 @@ enum Command {
     /// native libraries it links — fetched from the repository even if it is
     /// already installed locally.
     Info {
-        /// Package to describe (bare name like `libsdl`, `vendor/package`, URL,
+        /// Package to describe (a bare name, `vendor/package`, URL,
         /// or path).
         target: String,
     },
@@ -243,13 +261,17 @@ pub fn run() -> Result<()> {
 
     let interaction = Interaction::new(cli.no_interaction, cli.yes);
     match command {
-        Command::Init => init_pnl(Path::new(".")),
+        Command::Init => init_pnl(Path::new("."), interaction),
         Command::Install {
             targets,
             alias_class,
             function_prefix,
             allow_unverified_install_scripts,
             allow_install_script_hash,
+            enable_use_functions,
+            enable_allow_cdata,
+            enable_use_php_scalars_in_params,
+            enable_use_php_scalars_in_return,
         } => install(
             Path::new("."),
             &targets,
@@ -259,6 +281,10 @@ pub fn run() -> Result<()> {
                 interaction,
                 allow_unverified_install_scripts,
                 allowed_install_script_hashes: allow_install_script_hash,
+                enable_use_functions,
+                enable_allow_cdata,
+                enable_use_php_scalars_in_params,
+                enable_use_php_scalars_in_return,
             },
         ),
         Command::Update { package } => update(Path::new("."), package.as_deref()),
@@ -292,10 +318,18 @@ fn purge_cache() -> Result<()> {
     Ok(())
 }
 
-fn init_pnl(root: &Path) -> Result<()> {
+fn init_pnl(root: &Path, interaction: Interaction) -> Result<()> {
     let manifest_path = root.join("pnl.json");
     write_json_if_missing(&manifest_path, &PnlManifest::default())?;
+
+    // Scaffold the @pnlx workspace up front (autoload + SDK runtime + ide-helper),
+    // and record the project manifest in the pathmap, so PHP can load the SDK even
+    // before any extension is installed.
+    write_pnlx_autoload(root)?;
+    write_pathmap(root, &PnlxPathmap::empty_current())?;
     crate::ui::success(&format!("initialized {}", manifest_path.display()));
+
+    install::offer_gitignore(root, &interaction)?;
     Ok(())
 }
 
@@ -396,7 +430,7 @@ fn list_extensions(root: &Path, pattern: Option<&str>) -> Result<()> {
     ensure_platform_matches(&lock.platform)?;
     for (name, ext) in lock.extensions {
         // Match against both the full `vendor/extension` name and its leaf, so
-        // `pnl list lib*` finds `acme/libusb` as well as `libusb`.
+        // `pnl list gfx*` finds `acme/gfx` as well as `gfx`.
         if let Some(pattern) = pattern
             && !crate::glob::package_name_matches(pattern, &name)
         {

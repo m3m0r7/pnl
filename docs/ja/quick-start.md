@@ -24,16 +24,13 @@ PHP から呼びます（`quickstart.php`）:
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/vendor/autoload.php';   // Pnlx SDK（Composer 経由）
-require_once __DIR__ . '/@pnlx/autoload.php';    // インストール済み拡張
+// require は1つ。SDK は自分自身をロードします（実行時に Composer 不要）。
+require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libc\Libc;
-use Pnlx\Runtime;
 
-$runtime = new Runtime(__DIR__);
-
-/** @var Libc $libc */
-$libc = $runtime->load(Libc::class);
+// 拡張は自前の runtime を生成するので `new` するだけ。
+$libc = new Libc();
 
 $libc->printf("Hello, World from libc!\n");
 $libc->puts("And this line is printed by libc puts.");

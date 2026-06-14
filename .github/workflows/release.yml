@@ -57,7 +57,12 @@ jobs:
       # run in ci.yml. This workflow only builds and packages the binaries, so
       # the native dependencies are compiled just once per target.
       - name: Build release binaries
-        run: cargo build --locked --release --bins --target ${{ matrix.target }}
+        # Two passes: the first produces the support cdylib, the second embeds it
+        # into the binaries (see build.rs). Built without --bins so the cdylib is
+        # produced alongside the binaries.
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }}
+          cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package Unix archive
         if: matrix.archive == 'tar.gz'

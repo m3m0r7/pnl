@@ -1,7 +1,7 @@
 //! A tiny glob matcher for the `find`/`list` filter patterns. Supports the two
 //! wildcards users reach for on the command line — `*` (any run of characters,
 //! including none) and `?` (exactly one character) — and nothing else, so a
-//! bare name like `libusb` stays an exact match.
+//! a bare name stays an exact match.
 
 /// Whether `value` matches the glob `pattern`. Matching is case-sensitive;
 /// package names are already normalised to lowercase before they reach here.
@@ -41,7 +41,7 @@ pub fn glob_match(pattern: &str, value: &str) -> bool {
 }
 
 /// Whether a glob `pattern` matches a `vendor/extension` package name — either
-/// the full name or its leaf segment, so `lib*` finds `acme/libusb` and `libusb`.
+/// the full name or its leaf segment, so `gfx*` finds `acme/gfx` and `gfx`.
 pub fn package_name_matches(pattern: &str, name: &str) -> bool {
     let leaf = name.rsplit('/').next().unwrap_or(name);
     glob_match(pattern, name) || glob_match(pattern, leaf)

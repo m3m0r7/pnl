@@ -189,6 +189,9 @@ RS,
             ],
             'features' => [
                 'use_functions' => true,
+                // Accept raw PHP scalars as arguments (tests pass plain ints); the
+                // default wrapper-return entity variant is exercised.
+                'use_php_scalars_in_params' => true,
             ],
             'extensions' => [
                 'example/example' => ['version' => '=1.2.3', 'required' => true],

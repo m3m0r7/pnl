@@ -21,15 +21,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use semver::Version;
 
-use crate::release::SELF_REPOSITORY;
-
-/// Binaries shipped by this package.
-const BINARIES: [&str; 2] = ["pnl", "pnlx"];
+use crate::config::BINARIES;
 
 #[cfg(not(unix))]
 pub fn self_upgrade(_bin_dir: &Path, _home: Option<&Path>) -> Result<()> {
     bail!(
-        "pnl self-upgrade currently supports Unix only; download a release archive from {SELF_REPOSITORY}/releases instead"
+        "pnl self-upgrade currently supports Unix only; download a release archive from {}/releases instead",
+        crate::config::self_repository()
     )
 }
 
@@ -40,10 +38,11 @@ pub fn self_upgrade(bin_dir: &Path, home: Option<&Path>) -> Result<()> {
 
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
         .context("failed to parse the running pnl version")?;
+    let repository = crate::config::self_repository();
 
-    crate::ui::step(&format!("fetching release tags from {SELF_REPOSITORY}.git"));
+    crate::ui::step(&format!("fetching release tags from {repository}.git"));
     let Some(release) = crate::release::latest_live()? else {
-        bail!("no release tags found at {SELF_REPOSITORY}");
+        bail!("no release tags found at {repository}");
     };
     let (tag, latest) = (release.tag, release.version);
 
@@ -63,7 +62,7 @@ pub fn self_upgrade(bin_dir: &Path, home: Option<&Path>) -> Result<()> {
             "pnl {latest} is available, but this binary was installed standalone; self-upgrade only updates the versioned symlink layout"
         ));
         crate::ui::info(&format!(
-            "download pnl {latest} from {SELF_REPOSITORY}/releases and reinstall it"
+            "download pnl {latest} from {repository}/releases and reinstall it"
         ));
         return Ok(());
     }
@@ -74,7 +73,7 @@ pub fn self_upgrade(bin_dir: &Path, home: Option<&Path>) -> Result<()> {
         layout.home.display()
     ));
 
-    let tarball_url = format!("{SELF_REPOSITORY}/archive/refs/tags/{tag}.tar.gz");
+    let tarball_url = format!("{repository}/archive/refs/tags/{tag}.tar.gz");
     crate::ui::step(&format!("downloading {tarball_url}"));
     let tarball = crate::fetch::fetch_asset(&tarball_url)?;
     let source = extract_source_tarball(&tarball)?;

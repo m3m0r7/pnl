@@ -55,16 +55,10 @@ const NATIVE_LICENSES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Runtime composer dependencies of the PHP SDK. Keep in sync with
-/// `require` in composer.json (require-dev tools are not listed).
-const PHP_LICENSES: &[(&str, &str)] = &[
-    ("cebe/php-openapi", "MIT"),
-    ("justinrainbow/json-schema", "MIT"),
-    ("marc-mabe/php-enum", "BSD-3-Clause"),
-    ("symfony/deprecation-contracts", "MIT"),
-    ("symfony/polyfill-ctype", "MIT"),
-    ("symfony/yaml", "MIT"),
-];
+/// Third-party PHP runtime dependencies of the SDK. The SDK is self-contained
+/// (it relies only on the PHP runtime and the bundled native binaries), so there
+/// are none; this stays here as the place to list any that are added later.
+const PHP_LICENSES: &[(&str, &str)] = &[];
 
 #[derive(Debug, Clone, Copy)]
 pub enum Tool {

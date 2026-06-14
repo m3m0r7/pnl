@@ -21,75 +21,30 @@ declare(strict_types=1);
 
 namespace Pnlx\Example;
 
-use Pnlx\ContextInterface;
-use Pnlx\Exception\ExtensionLoadException;
-use Pnlx\RuntimeInterface;
-
-class ExampleContext implements ContextInterface
+/**
+ * Base wrapper around an `\FFI\CData` pointer produced or consumed by {@see Example}.
+ *
+ * Concrete per-type wrappers under {@see Example\Types} extend this class, and an
+ * opaque (`void *`) value falls back to it directly. Methods that take a pointer
+ * accept any {@see \Pnlx\Helpers\ContextInterface}; the inner `\FFI\CData` is
+ * unwrapped via {@see toValue()} before the native call. Pass {@see cdata()}
+ * when you need the underlying value.
+ */
+class ExampleContext implements \Pnlx\Helpers\ContextInterface
 {
     public function __construct(
-        private readonly RuntimeInterface $runtime,
+        protected readonly \FFI\CData $cdata,
     ) {
     }
 
-    public function name(): string
+    /** The wrapped FFI value. */
+    public function cdata(): \FFI\CData
     {
-        return $this->manifest()['name'];
+        return $this->cdata;
     }
 
-    public function version(): string
+    public function toValue(): \FFI\CData
     {
-        return $this->manifest()['version'];
-    }
-
-    public function hash(): string
-    {
-        return $this->bridge()['sha256'];
-    }
-
-    public function description(): string
-    {
-        return $this->manifest()['description'];
-    }
-
-    public function path(): string
-    {
-        return $this->absolutePath($this->bridge()['library']);
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    protected function manifest(): array
-    {
-        return $this->runtime->manifest(Example::class);
-    }
-
-    /**
-     * @return array{source: string, library: string, sha256: string}
-     */
-    protected function bridge(): array
-    {
-        $bridge = $this->runtime->pathmap()['bridges']['example'] ?? null;
-        if (!is_array($bridge)) {
-            throw new ExtensionLoadException('Bridge example is not installed.');
-        }
-
-        foreach (['source', 'library', 'sha256'] as $key) {
-            if (!isset($bridge[$key]) || !is_string($bridge[$key]) || $bridge[$key] === '') {
-                throw new ExtensionLoadException(sprintf('Bridge example is missing %s.', $key));
-            }
-        }
-
-        return $bridge;
-    }
-
-    protected function absolutePath(string $path): string
-    {
-        if (str_starts_with($path, '/')) {
-            return $path;
-        }
-
-        return $this->runtime->projectRoot() . '/' . $path;
+        return $this->cdata;
     }
 }

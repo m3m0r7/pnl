@@ -34,17 +34,40 @@ class RuntimeTest extends TestCase
         }
     }
 
-    public function testVerifierAcceptsCurrentFFIConfigurationAndSchemas(): void
+    public function testVerifierAcceptsCurrentFFIConfiguration(): void
     {
+        // Schema validation is owned by the Rust toolchain (read_json validates on
+        // install/validate); the PHP runtime only checks the FFI environment.
         Verifier::shouldEnabledFFI();
-        Verifier::shouldMatchSchema('pnl', self::$workspace->projectRoot . '/pnl.json');
-        Verifier::shouldMatchSchema('pnlx', self::$workspace->installedPackageRoot . '/pnlx.json');
-        Verifier::shouldMatchSchema('pnlx-pathmap', self::$workspace->projectRoot . '/@pnlx/pnlx-pathmap.json');
 
         self::assertFileExists(self::$workspace->projectRoot . '/pnlx-lock.json');
         self::assertFileExists(self::$workspace->projectRoot . '/@pnlx/autoload.php');
         self::assertFileExists(self::$workspace->installedPackageRoot . '/README.md');
         self::assertFileDoesNotExist(self::$workspace->installedPackageRoot . '/src/generated/stale.php');
+
+        // autoload.php exposes the built-in config.toml values and the build
+        // target as PHP constants (PNL_CONFIG_*/PNLX_CONFIG_*, PNLX_BUILD_*).
+        $autoload = (string) file_get_contents(self::$workspace->projectRoot . '/@pnlx/autoload.php');
+        self::assertStringContainsString(
+            "const PNLX_CONFIG_PACKAGES_REPOSITORY = 'https://github.com/m3m0r7/pnl-packages",
+            $autoload
+        );
+        self::assertStringContainsString('const PNL_CONFIG_SCHEMA_VERSION =', $autoload);
+        self::assertStringContainsString('const PNLX_BUILD_OS =', $autoload);
+        self::assertStringContainsString('const PNLX_BUILD_ARCH =', $autoload);
+        // The absolute pnl.json path captured at install time is baked in, so the
+        // workspace loads regardless of the current directory.
+        self::assertMatchesRegularExpression(
+            "#const PNLX_PROJECT_MANIFEST = '[^']*/pnl\\.json';#",
+            $autoload
+        );
+
+        // The pathmap records the absolute pnl.json path it was generated from.
+        $pathmap = self::$workspace->pathmap();
+        self::assertArrayHasKey('manifest', $pathmap);
+        $manifest = $pathmap['manifest'];
+        self::assertIsString($manifest);
+        self::assertStringEndsWith('/pnl.json', $manifest);
     }
 
     public function testInstallGeneratesExpectedWorkspaceArtifacts(): void
@@ -54,13 +77,26 @@ class RuntimeTest extends TestCase
             'index.php',
             'functions.php',
             'Example.php',
+            'cdata/Example.php',
+            'scalar/Example.php',
+            'cdata/scalar/Example.php',
+            'ExampleManifest.php',
             'ExampleContext.php',
+            'ExampleException.php',
             'function.aliases.php',
             'example.ffi.php',
             'example.bridge.rs',
         ] as $file) {
             self::assertFileExists($generated . '/' . $file);
         }
+
+        // The self-contained type layer ships with the SDK (one class per file)
+        // and is copied into @pnlx/runtime with the rest of the runtime.
+        $helpers = self::$workspace->projectRoot . '/@pnlx/runtime/Pnlx/Helpers';
+        self::assertFileExists($helpers . '/AbstractInteger.php');
+        self::assertFileExists($helpers . '/UnsignedInt64.php');
+        // The wrapper-aware is_*/gettype helpers live alongside is_null in Util.
+        self::assertFileExists(self::$workspace->projectRoot . '/@pnlx/runtime/Pnlx/Util/functions.php');
 
         // Global helpers are generated under the \Pnlx\Func\<Class> namespace.
         $functions = (string) file_get_contents($generated . '/functions.php');
@@ -128,7 +164,12 @@ class RuntimeTest extends TestCase
             'index.php',
             'functions.php',
             'Example.php',
+            'cdata/Example.php',
+            'scalar/Example.php',
+            'cdata/scalar/Example.php',
+            'ExampleManifest.php',
             'ExampleContext.php',
+            'ExampleException.php',
             'function.aliases.php',
             'example.ffi.php',
             'example.bridge.rs',
@@ -146,6 +187,9 @@ class RuntimeTest extends TestCase
 
             $goldenPath = $goldenDir . '/' . $file;
             if ($updating) {
+                if (!is_dir(dirname($goldenPath))) {
+                    mkdir(dirname($goldenPath), 0o777, true);
+                }
                 file_put_contents($goldenPath, $actual);
                 continue;
             }
@@ -180,12 +224,29 @@ class RuntimeTest extends TestCase
         $runtime = new Runtime(self::$workspace->projectRoot);
         $example = $runtime->load(self::EXAMPLE_CLASS);
 
-        self::assertSame('1.2.3', $example->{'example_version'}());
-        self::assertSame('1.2.3', $example->example_version());
-        self::assertSame(5, $example->{'example_add'}(2, 3));
-        self::assertSame(5, $example->example_add(2, 3));
-        self::assertSame(5, $example->{'exampleAdd'}(2, 3));
-        self::assertSame(5, $example->{'ExampleAdd'}(2, 3));
+        // Returns are wrapped value objects: String_ (Stringable) and an integer.
+        $version = $example->example_version();
+        self::assertInstanceOf(\Pnlx\Helpers\String_::class, $version);
+        self::assertSame('1.2.3', (string) $version);
+
+        $dynamicVersion = $example->{'example_version'}();
+        self::assertInstanceOf(\Pnlx\Helpers\String_::class, $dynamicVersion);
+        self::assertSame('1.2.3', (string) $dynamicVersion);
+
+        // Parameters accept a plain PHP int; returns come back wrapped.
+        $sum = $example->example_add(2, 3);
+        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $sum);
+        self::assertSame(5, $sum->toInt());
+
+        // Method names are case-insensitive (resolved through the alias map).
+        $aliased = $example->{'exampleAdd'}(2, 3);
+        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $aliased);
+        self::assertSame(5, $aliased->toInt());
+
+        // A wrapped integer can be passed straight back in as an argument.
+        $wrapped = $example->example_add(new \Pnlx\Helpers\Int_(2), new \Pnlx\Helpers\Int_(3));
+        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $wrapped);
+        self::assertSame(5, $wrapped->toInt());
     }
 
     public function testRuntimeCanExposeGeneratedGlobalFunctions(): void
@@ -197,7 +258,9 @@ class RuntimeTest extends TestCase
         // Generated global functions live under the \Pnlx\Func\<Class> namespace.
         self::assertFalse(function_exists('example_add'));
         self::assertTrue(function_exists('Pnlx\\Func\\Example\\example_add'));
-        self::assertSame(5, \Pnlx\Func\Example\example_add(2, 3));
+        $fnResult = \Pnlx\Func\Example\example_add(2, 3);
+        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $fnResult);
+        self::assertSame(5, $fnResult->toInt());
         self::assertStringContainsString(
             "require_once __DIR__ . '/packages/example/example/1.2.3/src/generated/index.php';",
             (string) file_get_contents(self::$workspace->projectRoot . '/@pnlx/autoload.php')
@@ -223,15 +286,23 @@ class RuntimeTest extends TestCase
         self::assertTrue($GLOBALS['pnlx_test_postload_entity_loaded'] ?? false);
     }
 
-    public function testRuntimeReturnsBridgeContextByClass(): void
+    public function testRuntimeReturnsBridgeInfoByClass(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
-        $context = $runtime->context(self::EXAMPLE_CLASS);
+        $info = $runtime->loadManifest(self::EXAMPLE_CLASS);
 
-        self::assertSame('example/example', $context->name());
-        self::assertSame('1.2.3', $context->version());
-        self::assertSame(hash_file('sha256', self::$workspace->bridgeLibraryPath), $context->hash());
-        self::assertSame(self::$workspace->bridgeLibraryPath, $context->path());
+        self::assertSame('example/example', $info->name());
+        self::assertSame('1.2.3', $info->version());
+        self::assertSame(hash_file('sha256', self::$workspace->bridgeLibraryPath), $info->hash());
+        self::assertSame(self::$workspace->bridgeLibraryPath, $info->path());
+
+        // The same metadata is readable as a field on the entity via __get
+        // (`$ext->name` ≡ `$ext->manifest->name()`).
+        $example = $runtime->load(self::EXAMPLE_CLASS);
+        $get = (new \ReflectionObject($example))->getMethod('__get');
+        self::assertSame('example/example', $get->invoke($example, 'name'));
+        self::assertSame('1.2.3', $get->invoke($example, 'version'));
+        self::assertSame(self::$workspace->bridgeLibraryPath, $get->invoke($example, 'path'));
     }
 
     public function testGeneratedEntityShapeIsOverrideFriendly(): void
@@ -241,11 +312,31 @@ class RuntimeTest extends TestCase
         $reflection = new \ReflectionObject($example);
 
         self::assertFalse($reflection->isFinal());
-        self::assertFalse($reflection->hasMethod('__get'));
+        self::assertTrue($reflection->hasMethod('__get'));
         self::assertFalse($reflection->hasMethod('cdefPath'));
         self::assertFalse($reflection->hasMethod('aliasesPath'));
         self::assertTrue($reflection->hasMethod('example_version'));
         self::assertTrue($reflection->hasMethod('exampleAdd'));
+
+        // Metadata is exposed as a readonly field (`$example->manifest->name()`),
+        // so it never collides with a generated method named after a C function.
+        self::assertTrue($reflection->hasProperty('manifest'));
+        self::assertTrue($reflection->getProperty('manifest')->isReadOnly());
+
+        // The class carries the native-library attributes …
+        $libNameAttrs = $reflection->getAttributes(\Pnlx\Attribute\NativeLibraryName::class);
+        self::assertCount(1, $libNameAttrs);
+        $libName = $libNameAttrs[0]->newInstance();
+        self::assertInstanceOf(\Pnlx\Attribute\NativeLibraryName::class, $libName);
+        self::assertSame('example/example', $libName->name);
+        self::assertCount(1, $reflection->getAttributes(\Pnlx\Attribute\AutoGeneratedByPnlx::class));
+
+        // … and each generated method records the raw C symbol it wraps.
+        $rawAttrs = $reflection->getMethod('exampleAdd')->getAttributes(\Pnlx\Attribute\RawNativeName::class);
+        self::assertCount(1, $rawAttrs);
+        $raw = $rawAttrs[0]->newInstance();
+        self::assertInstanceOf(\Pnlx\Attribute\RawNativeName::class, $raw);
+        self::assertSame('example_add', $raw->name);
     }
 
     public function testRuntimeProvidesAllocatorAndStaticUtil(): void

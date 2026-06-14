@@ -33,7 +33,7 @@ pub struct ExtensionRequirement {
 }
 
 fn default_output_dir() -> String {
-    "@pnlx".to_owned()
+    crate::config::DEFAULT_OUTPUT_DIR.to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,19 +47,59 @@ pub struct PnlManifest {
     pub output_dir: String,
     #[serde(default)]
     pub features: PnlFeatures,
+    /// Per-project overrides for built-in endpoints; omitted when no override
+    /// is set.
+    #[serde(default, skip_serializing_if = "WorkspaceConfig::is_empty")]
+    pub config: WorkspaceConfig,
     pub extensions: BTreeMap<String, ExtensionRequirement>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlFeatures {
     pub use_functions: bool,
+    /// Expose raw `\FFI\CData` alongside the generated wrapper in entity
+    /// signatures (loads the `cdata/<Class>.php` variant). Defaults to false.
+    #[serde(default)]
+    pub allow_cdata: bool,
+    /// Accept a raw PHP scalar (not only a generated wrapper) as a generated
+    /// method argument. When false, passing a raw scalar throws at runtime.
+    /// Defaults to false.
+    #[serde(default)]
+    pub use_php_scalars_in_params: bool,
+    /// Return PHP native `int`/`float`/`string` for scalars that fit losslessly
+    /// (the `scalar/<Class>.php` entity variant) instead of the generated value
+    /// wrappers (64-bit unsigned still wrapped). Defaults to false.
+    #[serde(default)]
+    pub use_php_scalars_in_return: bool,
 }
 
-/// The default package repository. It is not written into `pnl.json`; pnl keeps
-/// it internally as the lowest-priority fallback so bare names like
-/// `pnl install libusb` resolve out of the box.
-pub const DEFAULT_PACKAGES_REPOSITORY: &str =
-    "https://github.com/m3m0r7/pnl-packages/tree/main/packages";
+/// Per-project overrides for the built-in service endpoints (see `config.toml`).
+/// Absent fields fall back to the values baked into the binary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceConfig {
+    /// Override the repository pnl releases come from (the startup update check
+    /// and `pnl self-upgrade`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_repository: Option<String>,
+    /// Override the default package registry used as the lowest-priority
+    /// fallback when resolving a bare name like `pnl install <name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages_repository: Option<String>,
+}
+
+impl WorkspaceConfig {
+    /// Whether no override is set, so `config` can be omitted from `pnl.json`.
+    pub fn is_empty(&self) -> bool {
+        self.self_repository.is_none() && self.packages_repository.is_none()
+    }
+
+    /// The package registry: the workspace override or the built-in default.
+    pub fn packages_repository(&self) -> String {
+        self.packages_repository
+            .clone()
+            .unwrap_or_else(|| crate::config::default_packages_repository().to_owned())
+    }
+}
 
 impl Default for PnlManifest {
     fn default() -> Self {
@@ -69,6 +109,7 @@ impl Default for PnlManifest {
             load_paths: Vec::new(),
             output_dir: default_output_dir(),
             features: PnlFeatures::default(),
+            config: WorkspaceConfig::default(),
             extensions: BTreeMap::new(),
         }
     }
@@ -118,13 +159,19 @@ impl RepositoryIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexPackage {
+    /// Alias: when set, this package name redirects to the named package in the
+    /// same index (e.g. `sdl` → `ref: "libsdl"`), so `pnl install sdl` resolves
+    /// and installs the referenced package.
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub versions: BTreeMap<String, IndexPackageVersion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexPackageVersion {
     /// Path to the package's pnlx.json within the repository (e.g.
-    /// `packages/libusb/pnlx.json`).
+    /// `packages/<name>/pnlx.json`).
     pub manifest: String,
     pub dist: Dist,
     pub source: Source,
@@ -146,6 +193,10 @@ pub struct LockedExtension {
     pub constraint: String,
     pub source: Source,
     pub dist: Dist,
+    /// Fully-qualified generated entity class names this extension exposes, so
+    /// `pnl_is_installed(<Class>::class)` resolves straight from the lockfile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
     pub dependencies: BTreeMap<String, String>,
     pub requires: BTreeMap<String, LockedNativeLibrary>,
 }
@@ -370,8 +421,9 @@ pub struct ResolvedNativeLibrary {
     pub version: String,
     pub sha256: String,
     /// RFC3339 timestamp of when this native library was first resolved into the
-    /// pathmap. Preserved across reinstalls; absent on pathmaps written before
-    /// this field existed.
+    /// pathmap, preserved across reinstalls. Optional: virtual/system libraries
+    /// and entries not stamped by `pnl install` carry no timestamp (the pathmap
+    /// schema and the PHP reader both treat it as nullable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_at: Option<String>,
 }
@@ -394,6 +446,17 @@ pub struct PnlxPathmap {
     pub schema_version: String,
     pub generated_at: String,
     pub platform: Platform,
+    /// Lockfile path relative to this pathmap's directory (the workspace),
+    /// recorded at install so the generated autoload locates the lock without
+    /// assuming a fixed `../` layout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lock: String,
+    /// Absolute path of the `pnl.json` this workspace was generated from, recorded
+    /// at install/init so tooling can locate the project even when run from an
+    /// unrelated directory. (Runtime resolution itself uses the move-safe
+    /// `PNLX_PROJECT_MANIFEST` constant in the generated autoload.)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manifest: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, ResolvedHeader>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -407,6 +470,8 @@ impl PnlxPathmap {
             schema_version: SCHEMA_VERSION.to_owned(),
             generated_at: crate::platform::now(),
             platform: current_platform(),
+            lock: String::new(),
+            manifest: String::new(),
             headers: BTreeMap::new(),
             bridges: BTreeMap::new(),
             requires: BTreeMap::new(),

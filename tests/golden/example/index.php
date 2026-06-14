@@ -19,8 +19,27 @@ declare(strict_types=1);
  * PHP version: <normalized>
  */
 
+require_once __DIR__ . '/ExampleManifest.php';
 require_once __DIR__ . '/ExampleContext.php';
-require_once __DIR__ . '/Example.php';
+require_once __DIR__ . '/ExampleException.php';
+
+// The per-C-type pointer wrappers, one class per file under types/.
+foreach (glob(__DIR__ . '/types/*.php') ?: [] as $typeFile) {
+    require_once $typeFile;
+}
+
+// Two feature flags select one of the four generated entity variants at runtime:
+// `allow_cdata` (the cdata/ subdir, params also accept raw \FFI\CData) and
+// `use_php_scalars_in_return` (the scalar/ subdir, methods return native scalars).
+$entityVariant = '';
+if (\Pnlx\Runtime::allowCData()) {
+    $entityVariant .= 'cdata/';
+}
+if (\Pnlx\Runtime::useScalarsInReturn()) {
+    $entityVariant .= 'scalar/';
+}
+require_once __DIR__ . '/' . $entityVariant . 'Example.php';
+unset($entityVariant);
 
 $runtimeVarName = 'runtime_6cb1b74a9104bd0eeefa7e6d7fd08b2fefed1647746599904aa7415da88519fe';
 $runtime = new \Pnlx\Runtime();

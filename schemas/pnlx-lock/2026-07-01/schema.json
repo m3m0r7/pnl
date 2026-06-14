@@ -193,6 +193,12 @@
           "dist": {
             "$ref": "#/components/schemas/dist"
           },
+          "classes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "headers": {
             "type": "object",
             "additionalProperties": {

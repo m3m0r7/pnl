@@ -13,23 +13,30 @@ declare(strict_types=1);
  * generated file, and managing it in a version control system such as git or svn
  * is not recommended.
  *
- * Generated at: {{GENERATED_AT}}
- * Generated on: {{GENERATED_HOST}}
- * Generator OS: {{GENERATED_OS}}
- * PHP version: {{GENERATED_PHP_VERSION}}
+ * Generated at: <normalized>
+ * Generated on: <normalized>
+ * Generator OS: <normalized>
+ * PHP version: <normalized>
  */
 
-namespace {{NAMESPACE}};
+namespace Pnlx\Example;
 
-use Pnlx\ContextInterface;
 use Pnlx\Exception\ExtensionLoadException;
+use Pnlx\ManifestInterface;
+use Pnlx\Runtime;
 use Pnlx\RuntimeInterface;
 
-class {{CLASS}}Context implements ContextInterface
+class ExampleManifest implements ManifestInterface
 {
-    public function __construct(
-        private readonly RuntimeInterface $runtime,
-    ) {
+    private readonly RuntimeInterface $runtime;
+
+    /**
+     * @param RuntimeInterface|null $runtime Optional runtime; when omitted the
+     *     manifest instantiates its own, so callers can simply `new ExampleManifest()`.
+     */
+    public function __construct(?RuntimeInterface $runtime = null)
+    {
+        $this->runtime = $runtime ?? new Runtime();
     }
 
     public function name(): string
@@ -62,7 +69,7 @@ class {{CLASS}}Context implements ContextInterface
      */
     protected function manifest(): array
     {
-        return $this->runtime->manifest({{CLASS}}::class);
+        return $this->runtime->manifest(Example::class);
     }
 
     /**
@@ -70,14 +77,14 @@ class {{CLASS}}Context implements ContextInterface
      */
     protected function bridge(): array
     {
-        $bridge = $this->runtime->pathmap()['bridges']['{{LIBRARY_KEY}}'] ?? null;
+        $bridge = $this->runtime->pathmap()['bridges']['example'] ?? null;
         if (!is_array($bridge)) {
-            throw new ExtensionLoadException('Bridge {{LIBRARY_KEY}} is not installed.');
+            throw new ExtensionLoadException('Bridge example is not installed.');
         }
 
         foreach (['source', 'library', 'sha256'] as $key) {
             if (!isset($bridge[$key]) || !is_string($bridge[$key]) || $bridge[$key] === '') {
-                throw new ExtensionLoadException(sprintf('Bridge {{LIBRARY_KEY}} is missing %s.', $key));
+                throw new ExtensionLoadException(sprintf('Bridge example is missing %s.', $key));
             }
         }
 

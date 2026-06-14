@@ -42,6 +42,9 @@
           "features": {
             "$ref": "#/components/schemas/features"
           },
+          "config": {
+            "$ref": "#/components/schemas/config"
+          },
           "extensions": {
             "type": "object",
             "x-propertyNames": {
@@ -62,6 +65,32 @@
         "properties": {
           "use_functions": {
             "type": "boolean"
+          },
+          "allow_cdata": {
+            "type": "boolean"
+          },
+          "use_php_scalars_in_params": {
+            "type": "boolean"
+          },
+          "use_php_scalars_in_return": {
+            "type": "boolean"
+          }
+        }
+      },
+      "config": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Per-project overrides for the endpoints baked into the pnl binary (config.toml). Absent fields fall back to the built-in defaults.",
+        "properties": {
+          "self_repository": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Override the repository pnl releases come from (update check / self-upgrade)."
+          },
+          "packages_repository": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Override the default package registry used as the lowest-priority fallback for bare-name installs."
           }
         }
       },

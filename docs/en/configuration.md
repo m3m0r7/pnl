@@ -111,8 +111,27 @@ What each field means:
 | `repositories` | array | yes | Where packages come from. Currently used as a file-repository fallback; full index solving is not complete. |
 | `load_paths` | array | yes | Folders for C libraries, checked before system defaults and environment-derived paths. |
 | `output_dir` | string | no | Directory (relative to the project root) for generated workspace files — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`. |
-| `features.use_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. |
+| `features.use_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. Required whenever a `features` object is present (the object itself is optional). |
+| `features.allow_cdata` | boolean | no | When `true`, generated method/function parameters also accept a raw `\FFI\CData` alongside the wrapper types — useful when interoperating with hand-written FFI code. |
+| `features.use_php_scalars_in_params` | boolean | no | When `true`, methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false` (the default), a scalar must be passed wrapped in its `\Pnlx\Helpers\*` value type. |
+| `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Helpers\*` wrapper. |
+| `config` | object | no | Per-project overrides for the endpoints baked into the binary (see below). Omit it to use the built-in defaults. |
 | `extensions` | object | yes | The extensions you want, keyed by `vendor/package`. `pnl install` adds entries here automatically. |
+
+### Overriding built-in endpoints
+
+pnl ships with two default endpoints baked in from `config.toml` at build time: the package registry consulted for bare-name installs, and the repository pnl itself is released from (used by the startup update check and `pnl self-upgrade`). Override either per project under `config` — handy when you self-host a fork of pnl or a private package registry:
+
+```jsonc
+"config": {
+  // Where `pnl self-upgrade` and the update check look for new pnl releases.
+  "self_repository": "https://github.com/acme/pnl",
+  // The lowest-priority fallback registry for bare-name installs.
+  "packages_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
+}
+```
+
+Both fields are optional; an absent field falls back to the built-in default.
 
 Examples of `repositories` entries:
 
@@ -184,4 +203,4 @@ Example of global-function mode:
 }
 ```
 
-When enabled, a generated package entrypoint defines namespaced functions under `\Pnlx\Func\<Class>` (one segment per package), such as `\Pnlx\Func\Libusb\libusb_init()` — but only when no function of that name already exists. Call them fully qualified, or import them with `use function Pnlx\Func\Libusb\libusb_init;` and then call `libusb_init()`. Keeping them under a namespace avoids clobbering the global namespace. When disabled, you call methods on the object you got from `$runtime->load(...)` instead.
+When enabled, a generated package entrypoint defines namespaced functions under `\Pnlx\Func\<Class>` (one segment per package), such as `\Pnlx\Func\Libusb\libusb_init()` — but only when no function of that name already exists. Call them fully qualified, or import them with `use function Pnlx\Func\Libusb\libusb_init;` and then call `libusb_init()`. Keeping them under a namespace avoids clobbering the global namespace. When disabled, you call methods on the entity object you instantiated with `new <Class>()` instead.

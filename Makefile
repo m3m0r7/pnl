@@ -9,8 +9,12 @@ VERSION = $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 
 .PHONY: build install test fmt cs analyse validate validate-workspace clean
 
+# Two passes: the first produces the support cdylib, the second embeds it into
+# the pnl/pnlx binaries (see build.rs). Built without --bins so the cdylib is
+# produced alongside the binaries.
 build:
-	$(CARGO) build --release --bins
+	$(CARGO) build --release
+	$(CARGO) build --release
 
 # Binaries live under $(PNL_HOME)/versions/<version>/bin; $(PNL_HOME)/current
 # points at the active version and $(BIN_DIR) holds symlinks only, so an

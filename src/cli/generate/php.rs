@@ -4,31 +4,24 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use super::names::alias_names;
-use super::types::{is_char_pointer, normalize_c_type, php_param_type, php_return_type};
-use super::{FunctionParam, PhpPackageTemplateOptions};
-
-/// A PHP parameter as the templates consume it: a type hint and a name.
-#[derive(Debug, Serialize)]
-struct PhpParam {
-    php_type: String,
-    name: String,
-}
+use super::names::method_names;
+use super::types::{HELPERS_NS, ValueKind, fits_php_scalar, value_kind};
+use super::{FunctionParam, FunctionSignature, PhpPackageTemplateOptions};
 
 /// A generated entity method, with everything the template needs to emit it.
 #[derive(Debug, Serialize)]
 struct MethodView {
     /// The public method name (with `--function-prefix` applied).
     name: String,
-    /// The original symbol name dispatched through `__call`.
-    dispatch: String,
-    params: Vec<PhpParam>,
+    /// The original C-library symbol name (without `--function-prefix` or the
+    /// alias-case variation) — emitted as the `#[RawNativeName(...)]` attribute.
+    raw_name: String,
+    /// Pre-rendered parameter list, e.g. `int|\Pnlx\Helpers\AnySizeInteger $x`.
+    params: String,
+    /// The method's PHP return type.
     return_type: String,
-    is_void: bool,
-    /// Wrap the result with `\Pnlx\Util::cString` (a `char *` return).
-    cstring: bool,
-    /// A leading cast for scalar returns: `(int) `, `(float) `, or empty.
-    cast: String,
+    /// The full method body statement (already unwraps args and wraps the result).
+    body: String,
 }
 
 /// A generated global helper function.
@@ -39,24 +32,48 @@ struct FunctionView {
     /// backslashes must not sit next to a `{{ }}` placeholder (Handlebars treats
     /// `\{{` as an escape and would drop a backslash).
     fqn: String,
-    params: Vec<PhpParam>,
+    params: String,
     return_type: String,
     is_void: bool,
 }
 
-pub(super) fn render_methods(options: &PhpPackageTemplateOptions<'_>) -> String {
+/// FQ namespace of this package's per-type pointer wrapper classes.
+fn types_ns(options: &PhpPackageTemplateOptions<'_>) -> String {
+    format!("\\{}\\Types", options.namespace)
+}
+
+/// FQ name of this package's base context wrapper (opaque pointer fallback).
+fn base_context(options: &PhpPackageTemplateOptions<'_>) -> String {
+    format!("\\{}\\{}Context", options.namespace, options.class_name)
+}
+
+/// Render the entity method bodies for one entity variant. `allow_cdata` widens
+/// pointer/scalar params to also accept a raw `\FFI\CData`; `scalars_in_return`
+/// returns PHP-native scalars (the `scalar/` variant) instead of wrappers.
+pub(super) fn render_methods(
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    scalars_in_return: bool,
+) -> String {
     let prefix = options.function_prefix;
     let mut methods = Vec::new();
     let mut emitted = BTreeMap::new();
 
     for signature in options.signatures {
-        for name in alias_names(&signature.name) {
+        for name in method_names(&signature.name) {
             if emitted.insert(name.to_ascii_lowercase(), true).is_some() {
                 continue;
             }
             // `--function-prefix` renames the public method but dispatch still
             // uses the original symbol name (the alias map is keyed by it).
-            methods.push(method_view(prefix, &name, signature));
+            methods.push(method_view(
+                prefix,
+                &name,
+                signature,
+                options,
+                allow_cdata,
+                scalars_in_return,
+            ));
         }
     }
 
@@ -76,21 +93,20 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             continue;
         }
         // `--function-prefix` renames the function; it dispatches to the matching
-        // (also-prefixed) entity method.
-        let c_type = normalize_c_type(&signature.return_type);
+        // (also-prefixed) entity method. Global functions accept the permissive
+        // (cdata-allowing) parameter union so they work with either entity variant.
         let name = format!("{prefix}{}", signature.name);
+        let kind = value_kind(&signature.return_type);
         functions.push(FunctionView {
             // `\\` segments: a PHP single-quoted literal of `Pnlx\Func\<Class>\<name>`.
             fqn: format!("Pnlx\\\\Func\\\\{}\\\\{name}", options.class_name),
             name,
-            params: php_params(&signature.params),
-            return_type: php_return_type(&signature.return_type).to_owned(),
-            is_void: c_type == "void",
+            params: param_list(&signature.params, options, true),
+            return_type: return_php_type_union(&kind, options),
+            is_void: matches!(kind, ValueKind::Void),
         });
     }
 
-    // `runtime_var` is referenced as `../` from inside the each-loop (the
-    // `$GLOBALS` runtime key shared by every function).
     super::render_inner_template(
         super::GLOBAL_FUNCTIONS_TEMPLATE,
         json!({
@@ -100,28 +116,157 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
     )
 }
 
-fn method_view(prefix: &str, name: &str, signature: &super::FunctionSignature) -> MethodView {
-    let c_type = normalize_c_type(&signature.return_type);
-    let is_void = c_type == "void";
-    let cstring = !is_void && is_char_pointer(&c_type);
-    let cast = if is_void || cstring {
-        String::new()
-    } else {
-        match php_return_type(&c_type) {
-            "int" => "(int) ".to_owned(),
-            "float" => "(float) ".to_owned(),
-            _ => String::new(),
+/// Distinct per-type pointer wrapper class names referenced by this package's
+/// signatures (returns and parameters), so the generator can emit a class each.
+pub(super) fn collect_pointer_types(options: &PhpPackageTemplateOptions<'_>) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    for signature in options.signatures {
+        if let ValueKind::Pointer(Some(name)) = value_kind(&signature.return_type) {
+            names.insert(name);
         }
+        for param in &signature.params {
+            if let ValueKind::Pointer(Some(name)) = value_kind(&param.type_name) {
+                names.insert(name);
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn method_view(
+    prefix: &str,
+    name: &str,
+    signature: &FunctionSignature,
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    native: bool,
+) -> MethodView {
+    // Arguments are marshalled by `\Pnlx\FFI\ArgumentMarshaller` (a static call, so
+    // a C function named `unwrap`/`scalarArg` can't shadow it): scalars enforce
+    // `use_php_scalars_in_params` at runtime, pointers just unwrap.
+    let args = signature
+        .params
+        .iter()
+        .map(|param| match value_kind(&param.type_name) {
+            ValueKind::Pointer(_) | ValueKind::Void => {
+                format!("\\Pnlx\\FFI\\ArgumentMarshaller::unwrap(${})", param.name)
+            }
+            _ => format!(
+                "\\Pnlx\\FFI\\ArgumentMarshaller::scalarArg(${}, $this->scalarParamsAllowed)",
+                param.name
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call = format!("$this->__call('{name}', [{args}])");
+    let kind = value_kind(&signature.return_type);
+    let body = match &kind {
+        ValueKind::Void => format!("{call};"),
+        ValueKind::Str if native => format!("return \\Pnlx\\Util::cString({call});"),
+        ValueKind::Str => {
+            format!("return new {HELPERS_NS}\\String_(\\Pnlx\\Util::cString({call}));")
+        }
+        ValueKind::Int(wrapper) if native && fits_php_scalar(wrapper) => {
+            format!("return (int) {call};")
+        }
+        ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => {
+            format!("return (float) {call};")
+        }
+        ValueKind::Int(wrapper) | ValueKind::Float(wrapper) => {
+            format!("return new {HELPERS_NS}\\{}({call});", wrapper.class)
+        }
+        ValueKind::Pointer(Some(class)) => {
+            format!("return new {}\\{class}({call});", types_ns(options))
+        }
+        ValueKind::Pointer(None) => format!("return new {}({call});", base_context(options)),
     };
 
     MethodView {
         name: format!("{prefix}{name}"),
-        dispatch: name.to_owned(),
-        params: php_params(&signature.params),
-        return_type: php_return_type(&signature.return_type).to_owned(),
-        is_void,
-        cstring,
-        cast,
+        raw_name: signature.name.clone(),
+        params: param_list(&signature.params, options, allow_cdata),
+        return_type: return_php_type(&kind, options, native),
+        body,
+    }
+}
+
+fn param_list(
+    params: &[FunctionParam],
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+) -> String {
+    params
+        .iter()
+        .map(|param| {
+            format!(
+                "{} ${}",
+                param_php_type(&param.type_name, options, allow_cdata),
+                param.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn return_php_type(
+    kind: &ValueKind,
+    options: &PhpPackageTemplateOptions<'_>,
+    native: bool,
+) -> String {
+    match kind {
+        ValueKind::Void => "void".to_owned(),
+        ValueKind::Str if native => "string".to_owned(),
+        ValueKind::Str => format!("{HELPERS_NS}\\String_"),
+        ValueKind::Int(wrapper) if native && fits_php_scalar(wrapper) => "int".to_owned(),
+        ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => "float".to_owned(),
+        ValueKind::Int(wrapper) | ValueKind::Float(wrapper) => {
+            format!("{HELPERS_NS}\\{}", wrapper.class)
+        }
+        ValueKind::Pointer(Some(class)) => format!("{}\\{class}", types_ns(options)),
+        ValueKind::Pointer(None) => base_context(options),
+    }
+}
+
+/// The return type for a global function, which dispatches to whichever entity
+/// variant is loaded at runtime — so a fits-native scalar can come back either
+/// native or wrapped, and the declared type is the union of both.
+fn return_php_type_union(kind: &ValueKind, options: &PhpPackageTemplateOptions<'_>) -> String {
+    match kind {
+        ValueKind::Str => format!("string|{HELPERS_NS}\\String_"),
+        ValueKind::Int(wrapper) if fits_php_scalar(wrapper) => {
+            format!("int|{HELPERS_NS}\\{}", wrapper.class)
+        }
+        ValueKind::Float(wrapper) if fits_php_scalar(wrapper) => {
+            format!("float|{HELPERS_NS}\\{}", wrapper.class)
+        }
+        _ => return_php_type(kind, options, false),
+    }
+}
+
+fn param_php_type(
+    c_type: &str,
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+) -> String {
+    // Parameters always accept a PHP scalar alongside the generated wrapper, so
+    // callers can pass plain ints/floats/strings regardless of the feature flags.
+    // `allow_cdata` additionally admits a raw `\FFI\CData`.
+    let base = match value_kind(c_type) {
+        // A void parameter never occurs, but keep the layer total.
+        ValueKind::Void => "mixed".to_owned(),
+        ValueKind::Str => format!("string|{HELPERS_NS}\\String_|\\Stringable|null"),
+        ValueKind::Int(_) => format!("int|{HELPERS_NS}\\AnySizeInteger"),
+        ValueKind::Float(_) => format!("float|int|{HELPERS_NS}\\AnyFloat"),
+        ValueKind::Pointer(Some(class)) => format!(
+            "{}\\{class}|{HELPERS_NS}\\ContextInterface|null",
+            types_ns(options)
+        ),
+        ValueKind::Pointer(None) => format!("{HELPERS_NS}\\ContextInterface|null"),
+    };
+    if allow_cdata {
+        format!("{base}|\\FFI\\CData")
+    } else {
+        base
     }
 }
 
@@ -134,14 +279,4 @@ pub(super) fn runtime_variable_name(options: &PhpPackageTemplateOptions<'_>) -> 
         .as_bytes(),
     );
     format!("runtime_{digest:x}")
-}
-
-fn php_params(params: &[FunctionParam]) -> Vec<PhpParam> {
-    params
-        .iter()
-        .map(|param| PhpParam {
-            php_type: php_param_type(&param.type_name).to_owned(),
-            name: param.name.clone(),
-        })
-        .collect()
 }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::io::read_json;
 use crate::manifest::PnlManifest;
 
-pub const DEFAULT_OUTPUT_DIR: &str = "@pnlx";
+pub use crate::config::DEFAULT_OUTPUT_DIR;
 
 /// The absolute path of the generated workspace directory under `root`.
 pub fn workspace_dir(root: &Path) -> PathBuf {

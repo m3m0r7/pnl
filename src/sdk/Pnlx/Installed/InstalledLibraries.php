@@ -60,8 +60,8 @@ final class InstalledLibraries
      * Whether the extension identified by `$target` is installed, optionally
      * constrained to `$version`.
      *
-     * `$target` accepts either a generated class name (e.g. `Libsdl::class`) or a
-     * `vendor/package` name (e.g. `libsdl/libsdl`). `$version`, when given, is a
+     * `$target` accepts either a generated class name (e.g. `Example::class`) or a
+     * `vendor/package` name (e.g. `acme/example`). `$version`, when given, is a
      * constraint expression such as `>3.0.0 & <4.0.0`.
      *
      * @param array<string, array{version: string, classes: list<string>}> $packages
@@ -80,6 +80,61 @@ final class InstalledLibraries
     }
 
     /**
+     * Whether the extension identified by `$target` is installed, resolving the
+     * lockfile through the pathmap: the pathmap records the lock's location
+     * (relative to itself), so the workspace layout is not assumed.
+     *
+     * `$target` accepts a generated class name or a `vendor/package` name;
+     * `$version`, when given, is a constraint such as `>3.0.0 & <4.0.0`.
+     */
+    public static function isInstalledFromPathmap(string $pathmapPath, string $target, ?string $version = null): bool
+    {
+        $pathmap = self::readJson($pathmapPath);
+        $lock = self::stringField($pathmap, 'lock');
+        if ($lock === '') {
+            return false;
+        }
+
+        return self::isInstalledFromLock(dirname($pathmapPath) . '/' . $lock, $target, $version);
+    }
+
+    /**
+     * Whether the extension identified by `$target` is installed, read straight
+     * from a `pnlx-lock.json` file (its `extensions` map provides the version and
+     * the generated class names) rather than a baked-in package map.
+     *
+     * `$target` accepts a generated class name or a `vendor/package` name;
+     * `$version`, when given, is a constraint such as `>3.0.0 & <4.0.0`.
+     */
+    public static function isInstalledFromLock(string $lockPath, string $target, ?string $version = null): bool
+    {
+        $lock = self::readJson($lockPath);
+        $extensions = self::section($lock, 'extensions');
+
+        $packages = [];
+        foreach ($extensions as $name => $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $classes = [];
+            $rawClasses = $entry['classes'] ?? [];
+            if (is_array($rawClasses)) {
+                foreach ($rawClasses as $class) {
+                    if (is_string($class)) {
+                        $classes[] = $class;
+                    }
+                }
+            }
+            $packages[(string) $name] = [
+                'version' => self::stringField($entry, 'version'),
+                'classes' => $classes,
+            ];
+        }
+
+        return self::isInstalled($packages, $target, $version);
+    }
+
+    /**
      * @param array<string, array{version: string, classes: list<string>}> $packages
      * @return array{version: string, classes: list<string>}|null
      */
@@ -87,7 +142,7 @@ final class InstalledLibraries
     {
         $needle = ltrim($target, '\\');
 
-        // A class name (e.g. `Pnlx\Libsdl\Libsdl`) resolves through the class map.
+        // A class name (e.g. `Pnlx\Example\Example`) resolves through the class map.
         if (str_contains($needle, '\\')) {
             foreach ($packages as $package) {
                 if (in_array($needle, $package['classes'], true)) {
@@ -103,7 +158,7 @@ final class InstalledLibraries
             return $packages[$needle];
         }
 
-        // A bare leaf (e.g. `libsdl`) matches `vendor/libsdl`.
+        // A bare leaf (e.g. `example`) matches `vendor/example`.
         foreach ($packages as $name => $package) {
             $slash = strrpos($name, '/');
             $leaf = $slash === false ? $name : substr($name, $slash + 1);

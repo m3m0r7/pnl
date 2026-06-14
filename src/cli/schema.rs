@@ -30,6 +30,19 @@ impl SchemaKind {
         }
     }
 
+    /// Resolve a schema by its short name (`pnl`, `pnlx`, `pnlx-lock`,
+    /// `pnlx-pathmap`, `repository-index`) — the form the PHP runtime passes over FFI.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "pnl" => Some(Self::Pnl),
+            "pnlx" => Some(Self::Pnlx),
+            "pnlx-lock" => Some(Self::PnlxLock),
+            "pnlx-pathmap" => Some(Self::PnlxPathmap),
+            "repository-index" => Some(Self::RepositoryIndex),
+            _ => None,
+        }
+    }
+
     fn directory(self) -> &'static str {
         match self {
             Self::Pnl => "pnl",
@@ -39,6 +52,13 @@ impl SchemaKind {
             Self::RepositoryIndex => "repository-index",
         }
     }
+}
+
+/// Validate a JSON string against the schema for `kind`. Used by the FFI bridge
+/// so the PHP runtime can re-validate workspace files without an OpenAPI library.
+pub fn validate_json_str(kind: SchemaKind, json: &str) -> Result<()> {
+    let value: Value = serde_json::from_str(json).context("input is not valid JSON")?;
+    validate_json_value(kind, Path::new("<input>"), &value)
 }
 
 pub fn validate_json_value(kind: SchemaKind, path: &Path, value: &Value) -> Result<()> {
@@ -152,5 +172,35 @@ fn normalize_openapi_schema(value: &Value) -> Value {
             Value::Object(out)
         }
         _ => value.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaKind, validate_json_str};
+    use crate::SCHEMA_VERSION;
+
+    #[test]
+    fn validates_alias_pnlx_manifest() {
+        let alias = format!(r#"{{"schema_version": "{SCHEMA_VERSION}", "ref": "../libsdl"}}"#);
+        validate_json_str(SchemaKind::Pnlx, &alias).unwrap();
+    }
+
+    #[test]
+    fn rejects_alias_pnlx_with_extra_package_fields() {
+        // An alias manifest is `oneOf` the alias or full form; mixing a `ref`
+        // with package-only fields like `version` must not validate as either.
+        let bad = format!(
+            r#"{{"schema_version": "{SCHEMA_VERSION}", "ref": "../libsdl", "version": "1.0.0"}}"#
+        );
+        assert!(validate_json_str(SchemaKind::Pnlx, &bad).is_err());
+    }
+
+    #[test]
+    fn validates_repository_index_alias_entry() {
+        let index = format!(
+            r#"{{"schema_version": "{SCHEMA_VERSION}", "packages": {{"sdl": {{"ref": "libsdl"}}}}}}"#
+        );
+        validate_json_str(SchemaKind::RepositoryIndex, &index).unwrap();
     }
 }

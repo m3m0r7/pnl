@@ -28,6 +28,12 @@
           "platform": {
             "$ref": "#/components/schemas/platform"
           },
+          "lock": {
+            "type": "string"
+          },
+          "manifest": {
+            "type": "string"
+          },
           "headers": {
             "type": "object",
             "additionalProperties": {

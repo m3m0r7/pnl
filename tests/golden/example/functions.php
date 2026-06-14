@@ -27,14 +27,14 @@ declare(strict_types=1);
 namespace Pnlx\Func\Example;
 
 if (!function_exists('Pnlx\\Func\\Example\\example_version')) {
-    function example_version(): string
+    function example_version(): string|\Pnlx\Helpers\String_
     {
         return $GLOBALS['runtime_6cb1b74a9104bd0eeefa7e6d7fd08b2fefed1647746599904aa7415da88519fe']->{'example_version'}(...func_get_args());
     }
 }
 
 if (!function_exists('Pnlx\\Func\\Example\\example_add')) {
-    function example_add(int $left, int $right): int
+    function example_add(int|\Pnlx\Helpers\AnySizeInteger|\FFI\CData $left, int|\Pnlx\Helpers\AnySizeInteger|\FFI\CData $right): int|\Pnlx\Helpers\Int_
     {
         return $GLOBALS['runtime_6cb1b74a9104bd0eeefa7e6d7fd08b2fefed1647746599904aa7415da88519fe']->{'example_add'}(...func_get_args());
     }

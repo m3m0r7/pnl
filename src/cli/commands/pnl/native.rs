@@ -103,8 +103,8 @@ fn native_library_not_found_message(
     searched: &[PathBuf],
 ) -> String {
     let stem = key_without_version(key);
-    // Many library keys already start with `lib` (e.g. `libpq`); avoid suggesting
-    // `liblibpq-dev`.
+    // Many library keys already start with `lib` (e.g. `libfoo`); avoid suggesting
+    // `liblibfoo-dev`.
     let dev_package = if stem.starts_with("lib") {
         format!("{stem}-dev")
     } else {

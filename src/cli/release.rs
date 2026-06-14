@@ -22,17 +22,14 @@ use anyhow::{Context, Result};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-/// The repository pnl releases come from.
-pub const SELF_REPOSITORY: &str = "https://github.com/m3m0r7/pnl";
-
 /// How long a "latest release" lookup stays fresh before we re-check remotely.
-pub const CHECK_TTL: Duration = Duration::from_secs(3600);
+pub const CHECK_TTL: Duration = Duration::from_secs(crate::config::UPDATE_CHECK_TTL_SECONDS);
 
 /// Cache key for the latest-release lookup under the shared cache.
-const CACHE_KEY: &str = "latest-release";
+const CACHE_KEY: &str = crate::config::UPDATE_CHECK_CACHE_KEY;
 
 /// Set to any value to skip the startup update check entirely.
-const OPT_OUT_ENV: &str = "PNL_NO_UPDATE_CHECK";
+const OPT_OUT_ENV: &str = crate::config::UPDATE_CHECK_OPT_OUT_ENV;
 
 /// A release tag (e.g. `v0.2.0`) and the version parsed from it.
 #[derive(Debug, Clone)]
@@ -71,7 +68,8 @@ pub fn notify_if_update_available() {
     let upgrade_hint = match detect_install_kind() {
         InstallKind::Managed => "→ run `pnl self-upgrade` to update".to_owned(),
         InstallKind::Standalone => {
-            format!("→ download it from {SELF_REPOSITORY}/releases and reinstall")
+            let repository = crate::config::self_repository();
+            format!("→ download it from {repository}/releases and reinstall")
         }
     };
     crate::ui::notice_box(
@@ -99,7 +97,7 @@ fn latest_cached_or_live(ttl: Duration) -> Result<Option<Release>> {
 
 /// Look up the latest release over the network and refresh the cache.
 pub fn latest_live() -> Result<Option<Release>> {
-    let tags = list_remote_tags(&format!("{SELF_REPOSITORY}.git"))?;
+    let tags = list_remote_tags(&format!("{}.git", crate::config::self_repository()))?;
     let release = latest_release(&tags);
     if let Some(release) = &release {
         let _ = crate::cache::write(

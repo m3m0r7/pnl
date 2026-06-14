@@ -8,14 +8,6 @@
     "bin/pnl",
     "bin/pnlx"
   ],
-  "autoload": {
-    "psr-4": {
-      "Pnlx\\": "src/sdk/Pnlx/"
-    },
-    "files": [
-      "src/sdk/Pnlx/Util/functions.php"
-    ]
-  },
   "autoload-dev": {
     "psr-4": {
       "Pnlx\\Tests\\": "tests/"
@@ -39,8 +31,7 @@
     "validate:schemas": "vendor/bin/phpunit --filter SchemaFormatTest"
   },
   "require": {
-    "php": ">=8.2",
-    "composer-plugin-api": "^2.0",
-    "cebe/php-openapi": "^1.8"
+    "php": ">=8.3",
+    "composer-plugin-api": "^2.0"
   }
 }

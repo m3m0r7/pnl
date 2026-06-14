@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace Pnlx\Tests;
 
-use cebe\openapi\Reader;
-use cebe\openapi\spec\OpenApi;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Validates that every bundled JSON schema under schemas/ is a well-formed
- * OpenAPI document, using cebe/php-openapi as the OpenAPI format validator.
+ * Sanity-checks every bundled JSON schema under schemas/: that it parses and has
+ * the expected OpenAPI shape. Strict OpenAPI validation is owned by the Rust
+ * toolchain, which compiles these schemas (a malformed schema breaks `cargo test`),
+ * so the SDK no longer depends on a PHP OpenAPI validator.
  */
 final class SchemaFormatTest extends TestCase
 {
@@ -24,18 +24,24 @@ final class SchemaFormatTest extends TestCase
      * @param string $path
      */
     #[DataProvider('schemaFileProvider')]
-    public function testSchemaIsValidOpenApi(string $path): void
+    public function testSchemaHasExpectedOpenApiShape(string $path): void
     {
-        $document = Reader::readFromJsonFile($path, OpenApi::class, false);
+        $raw = file_get_contents($path);
+        self::assertIsString($raw, "{$path} could not be read");
 
-        self::assertTrue(
-            $document->validate(),
-            sprintf(
-                "%s is not a valid OpenAPI document:\n%s",
-                $path,
-                implode("\n", $document->getErrors())
-            )
-        );
+        $document = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($document, "{$path} is not a JSON object");
+        self::assertArrayHasKey('openapi', $document, "{$path} is missing the openapi version");
+
+        self::assertArrayHasKey('components', $document, "{$path} is missing components");
+        $components = $document['components'];
+        self::assertIsArray($components, "{$path} components is not an object");
+
+        self::assertArrayHasKey('schemas', $components, "{$path} is missing components.schemas");
+        $schemas = $components['schemas'];
+        self::assertIsArray($schemas, "{$path} components.schemas is not an object");
+
+        self::assertArrayHasKey('Document', $schemas, "{$path} is missing components.schemas.Document");
     }
 
     /**

@@ -43,9 +43,26 @@ pub fn select_package_version(
     package: &str,
     constraint: Option<&str>,
 ) -> Result<Option<(String, IndexPackageVersion)>> {
-    let Some(package) = index.packages.get(package) else {
+    select_package_version_following_aliases(index, package, constraint, 0)
+}
+
+/// Resolve `package`, following `ref` aliases (`sdl` → `ref: "libsdl"`) within the
+/// index, with a depth bound so a misconfigured cycle fails instead of looping.
+fn select_package_version_following_aliases(
+    index: &RepositoryIndex,
+    name: &str,
+    constraint: Option<&str>,
+    depth: usize,
+) -> Result<Option<(String, IndexPackageVersion)>> {
+    if depth > 16 {
+        bail!("repository index alias chain for {name:?} is too deep (possible cycle)");
+    }
+    let Some(package) = index.packages.get(name) else {
         return Ok(None);
     };
+    if let Some(target) = &package.alias {
+        return select_package_version_following_aliases(index, target, constraint, depth + 1);
+    }
     let constraint = constraint
         .map(VersionConstraint::parse)
         .transpose()
@@ -273,5 +290,50 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(version, "1.0.0");
+    }
+
+    #[test]
+    fn follows_package_alias_ref() {
+        let index: RepositoryIndex = serde_json::from_str(
+            r#"{
+              "schema_version": "2026-07-01",
+              "packages": {
+                "sdl": {"ref": "libsdl"},
+                "libsdl": {
+                  "versions": {
+                    "2.0.0": {
+                      "manifest": "libsdl/pnlx.json",
+                      "dist": {"url": "https://example.test/sdl", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                      "source": {"type": "git", "url": "https://example.test/sdl", "reference": "main"}
+                    }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        // `sdl` resolves through its `ref` to `libsdl`'s versions.
+        let (version, entry) = select_package_version(&index, "sdl", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(version, "2.0.0");
+        assert_eq!(entry.manifest, "libsdl/pnlx.json");
+    }
+
+    #[test]
+    fn detects_alias_cycle() {
+        let index: RepositoryIndex = serde_json::from_str(
+            r#"{
+              "schema_version": "2026-07-01",
+              "packages": {
+                "a": {"ref": "b"},
+                "b": {"ref": "a"}
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(select_package_version(&index, "a", None).is_err());
     }
 }

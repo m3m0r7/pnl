@@ -15,7 +15,7 @@ use Pnlx\FFI\NativeLibrary;
  * collaborators: a {@see RuntimeConfig} (path/output-dir resolution), a
  * {@see WorkspaceRepository} (JSON manifests/lock/pathmap), and an
  * {@see ExtensionRegistry} (locating installed packages). It then loads generated
- * extension entrypoints, instantiates their classes/contexts, and exposes the
+ * extension entrypoints, instantiates their classes and manifests, and exposes the
  * compiled native bridge via {@see NativeLibrary}. Each of the collaborators can
  * be injected for testing.
  */
@@ -53,9 +53,28 @@ class Runtime implements RuntimeInterface
 
         // Prefer the caller's root, then the scope of an enclosing (generated) load, then cwd.
         $this->config = $config ?? new RuntimeConfig($projectRoot ?? self::$activeProjectRoot);
-        $jsonReader = new JsonReader();
+        $jsonReader = new JsonReader($this->schemaValidator());
         $this->repository = $repository ?? new WorkspaceRepository($this->config, $jsonReader);
         $this->registry = $registry ?? new ExtensionRegistry($this->config, $this->repository);
+        // The self-contained type layer (Pnlx\Helpers\*) ships with the SDK and is
+        // resolved by the SDK autoloader, so nothing extra is loaded here.
+    }
+
+    /**
+     * Build the FFI-backed schema validator pointed at the support library that
+     * `pnl install` expands into `@pnlx/runtime`. It no-ops when the library is
+     * absent, so workspaces without it still load (files were validated at install).
+     */
+    private function schemaValidator(): \Pnlx\Schema\SchemaValidator
+    {
+        $library = match (PHP_OS_FAMILY) {
+            'Darwin' => 'libpnl.dylib',
+            'Windows' => 'pnl.dll',
+            default => 'libpnl.so',
+        };
+        $path = $this->config->projectRoot() . '/' . $this->config->outputDir() . '/runtime/' . $library;
+
+        return new \Pnlx\Schema\SchemaValidator($path);
     }
 
     /**
@@ -65,54 +84,95 @@ class Runtime implements RuntimeInterface
      */
     public static function enableFunctions(?string $projectRoot = null): bool
     {
+        return self::feature('use_functions', $projectRoot);
+    }
+
+    /**
+     * Whether the workspace's `pnl.json` opts into exposing raw `\FFI\CData` in
+     * generated signatures (the `cdata/<Class>.php` entity variant).
+     *
+     * Reads `features.allow_cdata` from the manifest without constructing a full runtime.
+     */
+    public static function allowCData(?string $projectRoot = null): bool
+    {
+        return self::feature('allow_cdata', $projectRoot);
+    }
+
+    /**
+     * Whether `features.use_php_scalars_in_params` is on, i.e. generated methods
+     * accept a raw PHP scalar argument (otherwise a raw scalar throws and the
+     * caller must pass a `Pnlx\Helpers\*` wrapper).
+     */
+    public static function useScalarsInParams(?string $projectRoot = null): bool
+    {
+        return self::feature('use_php_scalars_in_params', $projectRoot);
+    }
+
+    /**
+     * Whether `features.use_php_scalars_in_return` is on, i.e. methods return PHP
+     * native scalars (the `scalar/<Class>.php` entity variant) instead of wrappers.
+     */
+    public static function useScalarsInReturn(?string $projectRoot = null): bool
+    {
+        return self::feature('use_php_scalars_in_return', $projectRoot);
+    }
+
+    /** Read a boolean `features.*` flag from `pnl.json` without a full runtime. */
+    private static function feature(string $name, ?string $projectRoot): bool
+    {
         $config = new RuntimeConfig($projectRoot ?? self::$activeProjectRoot);
         $manifest = (new WorkspaceRepository($config, new JsonReader()))->pnlManifest();
         $features = $manifest['features'] ?? [];
 
-        return is_array($features) && ($features['use_functions'] ?? false) === true;
+        return is_array($features) && ($features[$name] ?? false) === true;
     }
 
     /**
-     * Load the extension's entrypoint then instantiate the class, passing in this runtime.
+     * Load the extension's entrypoint then instantiate the class.
+     *
+     * The generated entity takes no constructor argument: its own `new Runtime()`
+     * resolves this runtime's project root through the active scope (see
+     * {@see withProjectRootScope()}).
      *
      * @throws ExtensionLoadException When the class is still undefined after loading.
      */
     public function load(string $class): object
     {
-        $this->withProjectRootScope(fn () => $this->registry->loadEntrypoint($class));
+        return $this->withProjectRootScope(function () use ($class) {
+            $this->registry->loadEntrypoint($class);
+            if (!class_exists($class)) {
+                throw new ExtensionLoadException(sprintf('Extension class %s was not loaded.', $class));
+            }
 
-        if (!class_exists($class)) {
-            throw new ExtensionLoadException(sprintf('Extension class %s was not loaded.', $class));
-        }
-
-        return new $class($this);
+            return new $class();
+        });
     }
 
     /**
-     * Load the extension and build its generated `<Class>Context`.
+     * Load the extension and build its generated `<Class>Manifest`.
      *
-     * @throws ExtensionLoadException When the context class is missing or not a {@see ContextInterface}.
+     * @throws ExtensionLoadException When the manifest class is missing or not an {@see ManifestInterface}.
      */
-    public function context(string $class): ContextInterface
+    public function loadManifest(string $class): ManifestInterface
     {
         $this->withProjectRootScope(fn () => $this->registry->loadEntrypoint($class));
 
-        // Generated context classes follow the `<Class>Context` naming convention.
-        $contextClass = $class . 'Context';
-        if (!class_exists($contextClass)) {
-            throw new ExtensionLoadException(sprintf('Extension context class %s was not loaded.', $contextClass));
+        // Generated manifest classes follow the `<Class>Manifest` naming convention.
+        $manifestClass = $class . 'Manifest';
+        if (!class_exists($manifestClass)) {
+            throw new ExtensionLoadException(sprintf('Extension manifest class %s was not loaded.', $manifestClass));
         }
 
-        $context = new $contextClass($this);
-        if (!$context instanceof ContextInterface) {
+        $manifest = new $manifestClass($this);
+        if (!$manifest instanceof ManifestInterface) {
             throw new ExtensionLoadException(sprintf(
-                'Extension context class %s must implement %s.',
-                $contextClass,
-                ContextInterface::class
+                'Extension manifest class %s must implement %s.',
+                $manifestClass,
+                ManifestInterface::class
             ));
         }
 
-        return $context;
+        return $manifest;
     }
 
     /** Absolute directory of the installed extension declaring the given class. */
@@ -160,18 +220,18 @@ class Runtime implements RuntimeInterface
      */
     public function native(string $class, string $ffiFile): NativeLibrary
     {
-        $context = $this->context($class);
-        if (!is_file($context->path())) {
+        $manifest = $this->loadManifest($class);
+        if (!is_file($manifest->path())) {
             throw new ExtensionLoadException('an extension cannot be loaded');
         }
-        $actualHash = hash_file('sha256', $context->path());
-        if ($actualHash === false || !hash_equals($context->hash(), $actualHash)) {
+        $actualHash = hash_file('sha256', $manifest->path());
+        if ($actualHash === false || !hash_equals($manifest->hash(), $actualHash)) {
             throw new ExtensionLoadException('Native bridge hash does not match the pathmap.');
         }
 
         return NativeLibrary::load(
             $this->generatedPath($class, $ffiFile),
-            $context->path(),
+            $manifest->path(),
             $this->generatedPath($class, $this->aliasesFile())
         );
     }
@@ -183,20 +243,27 @@ class Runtime implements RuntimeInterface
     }
 
     /**
-     * Run a callback with this runtime's project root published as the active scope.
+     * Run a callback with this runtime's project root published as the active
+     * scope, returning whatever the callback returns.
      *
      * Nested loads triggered by generated entrypoints (which may build a Runtime
      * without an explicit root) inherit this root, and the previous scope is
      * always restored afterwards.
+     *
+     * @template T
+     *
+     * @param callable(): T $callback
+     *
+     * @return T
      */
-    private function withProjectRootScope(callable $callback): void
+    private function withProjectRootScope(callable $callback): mixed
     {
         // Generated entrypoints are regular PHP files, so root scoping is process-local.
         $previous = self::$activeProjectRoot;
         self::$activeProjectRoot = $this->projectRoot();
 
         try {
-            $callback();
+            return $callback();
         } finally {
             self::$activeProjectRoot = $previous;
         }

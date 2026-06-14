@@ -25,11 +25,11 @@ interface RuntimeInterface
     public function load(string $class): object;
 
     /**
-     * Load the extension and return its generated `*Context` describing the native bridge.
+     * Load the extension and return its generated `*Manifest` describing the native bridge.
      *
-     * @throws \Pnlx\Exception\ExtensionLoadException When the context class is missing or not a {@see ContextInterface}.
+     * @throws \Pnlx\Exception\ExtensionLoadException When the info class is missing or not an {@see ManifestInterface}.
      */
-    public function context(string $class): ContextInterface;
+    public function loadManifest(string $class): ManifestInterface;
 
     /** Absolute directory of the installed extension that declares the given class. */
     public function extensionRoot(string $class): string;

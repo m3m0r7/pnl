@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use crate::commands::pnl::build_installed_bridges;
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_bridge_ffi_php, generate_bridge_rs,
-    generate_context_php, generate_entity_php, generate_functions_php, generate_index_php,
-    parse_function_signatures,
+    generate_context_php, generate_entity_php, generate_exception_php, generate_functions_php,
+    generate_index_php, generate_manifest_php, generate_types_php, parse_function_signatures,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
@@ -134,29 +134,19 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
                 .collect()
         };
 
-    let generated_dir = root.join("src/generated");
-    let out = generated_dir.join(format!("{artifact_stem}.ffi.php"));
-    let entity_out = generated_dir.join(format!("{class_name}.php"));
-    let context_out = generated_dir.join(format!("{class_name}Context.php"));
-    let index_out = generated_dir.join("index.php");
-    let aliases_out = generated_dir.join("function.aliases.php");
-    let bridge_out = generated_dir.join(format!("{artifact_stem}.bridge.rs"));
-
-    generate_all(
-        &headers,
-        &out,
-        &namespace,
-        &class_name,
-        &library_key,
-        symbol_prefix_for_library(&manifest, &library_key).as_deref(),
-        None,
-        "",
-        &entity_out,
-        &context_out,
-        &index_out,
-        &aliases_out,
-        &bridge_out,
-    )
+    generate_all(&GenerateArtifacts {
+        generated_dir: &root.join("src/generated"),
+        artifact_stem: &artifact_stem,
+        namespace: &namespace,
+        class_name: &class_name,
+        library_key: &library_key,
+        symbol_prefix: symbol_prefix_for_library(&manifest, &library_key),
+        alias_class: None,
+        function_prefix: "",
+        native_library_name: &manifest.name,
+        native_library_version: &manifest.version,
+        headers: &headers,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -173,76 +163,119 @@ pub(crate) fn generate_installed_package_artifacts(
     let artifact_stem = sanitize_artifact_stem(package_leaf);
     let (namespace, manifest_class) = split_class(&manifest.class)?;
     let class_name = format!("{}{}", manifest.class_prefix, manifest_class);
-    let generated_dir = root.join("src/generated");
 
-    generate_all(
-        headers,
-        &generated_dir.join(format!("{artifact_stem}.ffi.php")),
-        &namespace,
-        &class_name,
+    generate_all(&GenerateArtifacts {
+        generated_dir: &root.join("src/generated"),
+        artifact_stem: &artifact_stem,
+        namespace: &namespace,
+        class_name: &class_name,
         library_key,
-        symbol_prefix_for_library(manifest, library_key).as_deref(),
+        symbol_prefix: symbol_prefix_for_library(manifest, library_key),
         alias_class,
-        function_prefix.unwrap_or(""),
-        &generated_dir.join(format!("{class_name}.php")),
-        &generated_dir.join(format!("{class_name}Context.php")),
-        &generated_dir.join("index.php"),
-        &generated_dir.join("function.aliases.php"),
-        &generated_dir.join(format!("{artifact_stem}.bridge.rs")),
-    )
+        function_prefix: function_prefix.unwrap_or(""),
+        native_library_name: &manifest.name,
+        native_library_version: &manifest.version,
+        headers,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn generate_all(
-    headers: &[PathBuf],
-    out: &Path,
-    namespace: &str,
-    class_name: &str,
-    library_key: &str,
-    symbol_prefix: Option<&str>,
-    alias_class: Option<&str>,
-    function_prefix: &str,
-    entity_out: &Path,
-    context_out: &Path,
-    index_out: &Path,
-    aliases_out: &Path,
-    bridge_out: &Path,
-) -> Result<()> {
-    let cdef = if headers.is_empty() {
-        read_existing_ffi_cdef(out)?
+/// Everything `generate_all` needs to emit a package's generated artifacts.
+struct GenerateArtifacts<'a> {
+    /// `<package>/src/generated` directory the artifacts are written into.
+    generated_dir: &'a Path,
+    /// File stem for the per-library `*.ffi.php` / `*.bridge.rs` artifacts.
+    artifact_stem: &'a str,
+    namespace: &'a str,
+    class_name: &'a str,
+    library_key: &'a str,
+    symbol_prefix: Option<String>,
+    alias_class: Option<&'a str>,
+    function_prefix: &'a str,
+    /// Native library package name/version, for the entity's `#[NativeLibrary*]`
+    /// attributes.
+    native_library_name: &'a str,
+    native_library_version: &'a str,
+    headers: &'a [PathBuf],
+}
+
+fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
+    let generated_dir = args.generated_dir;
+    let class_name = args.class_name;
+    let out = generated_dir.join(format!("{}.ffi.php", args.artifact_stem));
+    let cdef = if args.headers.is_empty() {
+        read_existing_ffi_cdef(&out)?
     } else {
         cdef_from_header(
-            &read_headers(headers)?,
+            &read_headers(args.headers)?,
             &HeaderAdapterOptions {
-                symbol_prefix: symbol_prefix
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| symbol_prefix_from_library_key(library_key)),
+                symbol_prefix: args
+                    .symbol_prefix
+                    .clone()
+                    .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
             },
         )?
     };
     let signatures = parse_function_signatures(&cdef);
-    generate_bridge_ffi_php(&signatures, out)?;
+    generate_bridge_ffi_php(&signatures, &out)?;
     let ffi_file = out
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("extension.ffi.php");
     let template_options = PhpPackageTemplateOptions {
-        namespace,
+        namespace: args.namespace,
         class_name,
-        library_key,
+        library_key: args.library_key,
         ffi_file,
         signatures: &signatures,
-        alias_class,
-        function_prefix,
+        alias_class: args.alias_class,
+        function_prefix: args.function_prefix,
+        native_library_name: args.native_library_name,
+        native_library_version: args.native_library_version,
     };
-    generate_entity_php(entity_out, &template_options)?;
-    generate_context_php(context_out, &template_options)?;
-    generate_index_php(index_out, &template_options)?;
-    if let Some(generated_dir) = index_out.parent() {
-        generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
+    // Metadata, the CData wrapper, and the per-extension exception are shared by
+    // every entity variant.
+    generate_manifest_php(
+        &generated_dir.join(format!("{class_name}Manifest.php")),
+        &template_options,
+    )?;
+    generate_context_php(
+        &generated_dir.join(format!("{class_name}Context.php")),
+        &template_options,
+    )?;
+    generate_exception_php(
+        &generated_dir.join(format!("{class_name}Exception.php")),
+        &template_options,
+    )?;
+    generate_types_php(&generated_dir.join("types"), &template_options)?;
+    // Four entity variants on two axes, selected at runtime by `index.php`:
+    // `allow_cdata` (the `cdata/` subdir, params also accept raw `\FFI\CData`) and
+    // `use_php_scalars_in_return` (the `scalar/` subdir, methods return native
+    // scalars). `use_php_scalars_in_params` is enforced at runtime, not by variant.
+    for allow_cdata in [false, true] {
+        for scalars_in_return in [false, true] {
+            let mut dir = generated_dir.to_path_buf();
+            if allow_cdata {
+                dir.push("cdata");
+            }
+            if scalars_in_return {
+                dir.push("scalar");
+            }
+            generate_entity_php(
+                &dir.join(format!("{class_name}.php")),
+                &template_options,
+                allow_cdata,
+                scalars_in_return,
+            )?;
+        }
     }
-    generate_aliases_php(aliases_out, &signatures)?;
-    generate_bridge_rs(bridge_out, &template_options, &signatures)?;
+    generate_index_php(&generated_dir.join("index.php"), &template_options)?;
+    generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
+    generate_aliases_php(&generated_dir.join("function.aliases.php"), &signatures)?;
+    generate_bridge_rs(
+        &generated_dir.join(format!("{}.bridge.rs", args.artifact_stem)),
+        &template_options,
+        &signatures,
+    )?;
     Ok(())
 }
 

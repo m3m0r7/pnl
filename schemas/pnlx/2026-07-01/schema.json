@@ -9,6 +9,38 @@
     "schemas": {
       "Document": {
         "title": "pnlx.json",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/packageDocument"
+          },
+          {
+            "$ref": "#/components/schemas/aliasDocument"
+          }
+        ]
+      },
+      "aliasDocument": {
+        "title": "pnlx.json (alias)",
+        "type": "object",
+        "additionalProperties": false,
+        "description": "An alias manifest: redirects this package name to another package (e.g. sdl -> ../libsdl). Published by `pnl repo index` as a repository-index alias.",
+        "required": [
+          "schema_version",
+          "ref"
+        ],
+        "properties": {
+          "schema_version": {
+            "$ref": "#/components/schemas/schemaVersion"
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "$ref": "#/components/schemas/packageName"
+          }
+        }
+      },
+      "packageDocument": {
         "type": "object",
         "additionalProperties": false,
         "required": [

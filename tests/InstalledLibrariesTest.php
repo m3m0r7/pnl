@@ -106,4 +106,44 @@ final class InstalledLibrariesTest extends TestCase
         self::assertFalse(InstalledLibraries::isInstalled($packages, 'libsdl/libsdl', '>=3.0.0'));
         self::assertTrue(InstalledLibraries::isInstalled($packages, 'libusb/libusb', '^1.0.0'));
     }
+
+    public function testIsInstalledFromLockReadsExtensionsAndClasses(): void
+    {
+        $lock = tempnam(sys_get_temp_dir(), 'pnlx-lock-') ?: '';
+        self::assertNotSame('', $lock);
+
+        try {
+            file_put_contents($lock, json_encode([
+                'extensions' => [
+                    'libsdl/libsdl' => [
+                        'version' => '2.32.10',
+                        'classes' => ['Pnlx\\Libsdl\\Libsdl'],
+                    ],
+                    'libusb/libusb' => [
+                        'version' => '1.0.29',
+                        'classes' => ['Pnlx\\Libusb\\Libusb'],
+                    ],
+                ],
+            ], JSON_THROW_ON_ERROR));
+
+            // By full name, bare leaf, and generated class name.
+            self::assertTrue(InstalledLibraries::isInstalledFromLock($lock, 'libsdl/libsdl'));
+            self::assertTrue(InstalledLibraries::isInstalledFromLock($lock, 'libusb'));
+            self::assertTrue(InstalledLibraries::isInstalledFromLock($lock, 'Pnlx\\Libsdl\\Libsdl'));
+            self::assertFalse(InstalledLibraries::isInstalledFromLock($lock, 'acme/missing'));
+
+            // Version constraints are honoured from the lock's recorded version.
+            self::assertTrue(InstalledLibraries::isInstalledFromLock($lock, 'libsdl/libsdl', '>2.0.0 & <3.0.0'));
+            self::assertFalse(InstalledLibraries::isInstalledFromLock($lock, 'libsdl/libsdl', '>=3.0.0'));
+        } finally {
+            if (is_file($lock)) {
+                unlink($lock);
+            }
+        }
+    }
+
+    public function testIsInstalledFromLockIsFalseForMissingLock(): void
+    {
+        self::assertFalse(InstalledLibraries::isInstalledFromLock('/no/such/lock.json', 'libsdl/libsdl'));
+    }
 }

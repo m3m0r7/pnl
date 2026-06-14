@@ -27,11 +27,18 @@ class RuntimeConfig implements RuntimeConfigInterface
     public function __construct(?string $projectRoot = null)
     {
         if ($projectRoot === null) {
-            $cwd = getcwd();
-            if ($cwd === false) {
-                throw new ExtensionLoadException('Unable to determine the current working directory.');
+            // Prefer the pnl.json that `@pnlx/autoload.php` resolved from its own
+            // location (cwd-independent and move-safe); fall back to cwd.
+            $manifest = defined('PNLX_PROJECT_MANIFEST') ? constant('PNLX_PROJECT_MANIFEST') : null;
+            if (is_string($manifest) && is_file($manifest)) {
+                $projectRoot = dirname($manifest);
+            } else {
+                $cwd = getcwd();
+                if ($cwd === false) {
+                    throw new ExtensionLoadException('Unable to determine the current working directory.');
+                }
+                $projectRoot = $cwd;
             }
-            $projectRoot = $cwd;
         }
 
         $this->projectRoot = $this->normalizeDirectory($projectRoot);

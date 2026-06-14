@@ -65,25 +65,18 @@ declare(strict_types=1);
 // Run from the project root regardless of the caller's working directory.
 chdir(__DIR__);
 
-// Composer loads the SDK; @pnlx loads the generated package entrypoints.
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx loads the generated package entrypoints (and the SDK with them).
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
-use Pnlx\Runtime;
 
-// Runtime resolves the config, pathmap, generated entrypoints, and bridge FFI.
-$runtime = new Runtime(__DIR__);
+// The extension builds its own runtime; metadata is reachable straight off it.
+$libusb = new Libusb();
 
-/** @var Libusb $libusb */
-// Get the generated libusb object through Runtime.
-$libusb = $runtime->load(Libusb::class);
-
-// Read package metadata and the compiled bridge path.
-$context = $runtime->context(Libusb::class);
-
-printf("extension: %s %s\n", $context->name(), $context->version());
-printf("bridge: %s\n", $context->path());
+// Read package metadata and the compiled bridge path. The same values are also
+// available as method calls: $libusb->manifest->name(), ->version(), ->path().
+printf("extension: %s %s\n", $libusb->name, $libusb->version);
+printf("bridge: %s\n", $libusb->path);
 printf("error name for 0: %s\n", $libusb->libusb_error_name(0));
 printf("strerror for 0: %s\n", $libusb->libusbStrerror(0));
 
@@ -93,7 +86,7 @@ printf("libusb_init: %d (%s)\n", $result, $libusb->libusbErrorName($result));
 
 if ($result === 0) {
     // Allocate void *[1] without exposing raw FFI::new() to user code.
-    $deviceList = $runtime->allocator()->voidPointerArray(1);
+    $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
 
     // libusb writes the device-list pointer into $deviceList[0].
     $deviceCount = $libusb->libusbGetDeviceList(null, $deviceList);
@@ -138,12 +131,10 @@ declare(strict_types=1);
 // Run from the project root regardless of the caller's working directory.
 chdir(__DIR__);
 
-// Composer loads the SDK; @pnlx loads the generated package entrypoints.
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx loads the generated package entrypoints (and the SDK with them).
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libsdl\Libsdl;
-use Pnlx\Runtime;
 use function Pnlx\Util\is_null;
 
 // Flag for SDL's video subsystem.
@@ -155,12 +146,9 @@ const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
 // Flag for creating a visible window.
 const SDL_WINDOW_SHOWN = 0x00000004;
 
-// Runtime loads the generated SDL object and its bridge.
-$runtime = new Runtime(__DIR__);
-
-/** @var Libsdl $sdl */
+// Just `new` the generated SDL object; it loads its own bridge.
 // Use methods like SDL_Init() and SDL_CreateWindow().
-$sdl = $runtime->load(Libsdl::class);
+$sdl = new Libsdl();
 
 // A tiny 5x7 bitmap font for the characters in "Hello World!".
 // '1' marks a lit pixel; rows are top-to-bottom.
@@ -270,8 +258,7 @@ declare(strict_types=1);
 // Run from the project root regardless of the caller's working directory.
 chdir(__DIR__);
 
-// Composer loads the SDK; @pnlx loads the generated package entrypoints.
-require_once __DIR__ . '/vendor/autoload.php';
+// @pnlx loads the generated package entrypoints (and the SDK with them).
 require_once __DIR__ . '/@pnlx/autoload.php';
 
 use function Pnlx\Util\is_null;

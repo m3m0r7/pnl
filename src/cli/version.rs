@@ -121,7 +121,7 @@ fn build_comparator(operator: &str, version: &str) -> Result<VersionReq> {
     Version::parse(version).map_err(|err| anyhow!("invalid version {version:?}: {err}"))?;
 
     let normalized = match operator {
-        // A bare version (or `==`) means an exact match, matching Composer.
+        // A bare version (or `==`) means an exact match.
         "" | "==" | "=" => format!("={version}"),
         ">=" | "<=" | ">" | "<" | "^" | "~" => format!("{operator}{version}"),
         other => bail!("invalid version operator {other:?}"),

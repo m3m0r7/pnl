@@ -19,22 +19,28 @@ use bridge::{render_bridge_cdef, render_bridge_functions};
 use php::{render_global_functions, render_methods, runtime_variable_name};
 use types::sanitize_php_param_name;
 
-const FFI_TEMPLATE: &str = include_str!("templates/ffi.php.tpl");
-const ENTITY_TEMPLATE: &str = include_str!("templates/entity.php.tpl");
-const CONTEXT_TEMPLATE: &str = include_str!("templates/context.php.tpl");
-const INDEX_TEMPLATE: &str = include_str!("templates/index.php.tpl");
-const ALIASES_TEMPLATE: &str = include_str!("templates/aliases.php.tpl");
-const FUNCTIONS_TEMPLATE: &str = include_str!("templates/functions.php.tpl");
-const BRIDGE_TEMPLATE: &str = include_str!("templates/bridge.rs.tpl");
+const FFI_TEMPLATE: &str = include_str!("templates/package/src/generated/ffi.php.tpl");
+const ENTITY_TEMPLATE: &str = include_str!("templates/package/src/generated/entity.php.tpl");
+const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/manifest.php.tpl");
+const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
+const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
+const TYPE_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/types.php.tpl");
+const AUTOLOAD_TEMPLATE: &str = include_str!("templates/workspace/autoload.php.tpl");
+const IDE_HELPER_TEMPLATE: &str = include_str!("templates/workspace/ide-helper.php.tpl");
+const INDEX_TEMPLATE: &str = include_str!("templates/package/src/generated/index.php.tpl");
+const ALIASES_TEMPLATE: &str =
+    include_str!("templates/package/src/generated/function.aliases.php.tpl");
+const FUNCTIONS_TEMPLATE: &str = include_str!("templates/package/src/generated/functions.php.tpl");
+const BRIDGE_TEMPLATE: &str = include_str!("templates/package/src/generated/bridge.rs.tpl");
 
 // Inner templates: the repeated, per-symbol bodies that used to be assembled
 // with `format!`/`push_str` in Rust now live here as Handlebars `{{#each}}`
 // loops, so the generated layout is editable without touching code.
-const METHODS_TEMPLATE: &str = include_str!("templates/methods.php.tpl");
-const GLOBAL_FUNCTIONS_TEMPLATE: &str = include_str!("templates/global_functions.php.tpl");
-const ALIASES_ENTRIES_TEMPLATE: &str = include_str!("templates/aliases_entries.php.tpl");
-const BRIDGE_CDEF_TEMPLATE: &str = include_str!("templates/bridge_cdef.c.tpl");
-const BRIDGE_FUNCTIONS_TEMPLATE: &str = include_str!("templates/bridge_functions.rs.tpl");
+const METHODS_TEMPLATE: &str = include_str!("templates/partials/methods.php.tpl");
+const GLOBAL_FUNCTIONS_TEMPLATE: &str = include_str!("templates/partials/global_functions.php.tpl");
+const ALIASES_ENTRIES_TEMPLATE: &str = include_str!("templates/partials/aliases_entries.php.tpl");
+const BRIDGE_CDEF_TEMPLATE: &str = include_str!("templates/partials/bridge_cdef.c.tpl");
+const BRIDGE_FUNCTIONS_TEMPLATE: &str = include_str!("templates/partials/bridge_functions.rs.tpl");
 
 pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
     let mut context = generated_template_context();
@@ -64,18 +70,157 @@ pub struct PhpPackageTemplateOptions<'a> {
     pub alias_class: Option<&'a str>,
     /// Prefix prepended to every generated method/function name ("" = none).
     pub function_prefix: &'a str,
+    /// The native library's package name, emitted as the entity class's
+    /// `#[NativeLibraryName(...)]` attribute (e.g. `libsdl/libsdl`).
+    pub native_library_name: &'a str,
+    /// The native library's package version, emitted as the entity class's
+    /// `#[NativeLibraryVersion(...)]` attribute (e.g. `2.32.10`).
+    pub native_library_version: &'a str,
 }
 
-pub fn generate_entity_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
-    write_template(out, ENTITY_TEMPLATE, options)
+/// Generate one entity variant. `allow_cdata` selects whether pointer parameters
+/// also admit a raw `\FFI\CData` (the `cdata/` variant); `scalars_in_return`
+/// selects the `scalar/` variant whose methods return PHP-native scalars.
+pub fn generate_entity_php(
+    out: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    scalars_in_return: bool,
+) -> Result<()> {
+    write_template(
+        out,
+        ENTITY_TEMPLATE,
+        options,
+        allow_cdata,
+        scalars_in_return,
+    )
 }
 
+/// Generate the `<Class>Manifest` metadata class (manifest/bridge accessors).
+pub fn generate_manifest_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    write_template(out, MANIFEST_TEMPLATE, options, false, false)
+}
+
+/// Generate the `<Class>Context` wrapper class for FFI values.
 pub fn generate_context_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
-    write_template(out, CONTEXT_TEMPLATE, options)
+    write_template(out, CONTEXT_TEMPLATE, options, false, false)
+}
+
+/// Generate the per-extension `<Class>Exception` base exception class.
+pub fn generate_exception_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
+    write_template(out, EXCEPTION_TEMPLATE, options, false, false)
 }
 
 pub fn generate_index_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
-    write_template(out, INDEX_TEMPLATE, options)
+    write_template(out, INDEX_TEMPLATE, options, false, false)
+}
+
+/// Generate the per-package pointer wrappers into `dir` (`src/generated/types/`),
+/// one class per file. Returns the type class names that were written (so the
+/// package's `index.php` can require each one).
+pub fn generate_types_php(
+    dir: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+) -> Result<Vec<String>> {
+    let base = format!("\\{}\\{}Context", options.namespace, options.class_name);
+    let types = php::collect_pointer_types(options);
+    for type_name in &types {
+        let mut context = generated_template_context();
+        context.insert(
+            "NAMESPACE".to_owned(),
+            Value::String(options.namespace.to_owned()),
+        );
+        context.insert("BASE".to_owned(), Value::String(base.clone()));
+        context.insert("TYPE".to_owned(), Value::String(type_name.clone()));
+        write_generated(
+            &dir.join(format!("{type_name}.php")),
+            render_handlebars(TYPE_FILE_TEMPLATE, context)?,
+        )?;
+    }
+    Ok(types)
+}
+
+/// Generate the workspace `@pnlx/autoload.php`. `packages` are the per-package
+/// entrypoint paths (already escaped for a single-quoted PHP literal), relative
+/// to the workspace. The lockfile is located at runtime through the pathmap.
+pub fn generate_autoload_php(
+    out: &Path,
+    version: &str,
+    packages: &[String],
+    manifest_path: &str,
+) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert("VERSION".to_owned(), Value::String(version.to_owned()));
+    context.insert(
+        "PACKAGES".to_owned(),
+        serde_json::to_value(packages).expect("package paths serialize to JSON"),
+    );
+    // The absolute pnl.json path, escaped for a single-quoted PHP literal.
+    context.insert(
+        "PROJECT_MANIFEST".to_owned(),
+        Value::String(manifest_path.replace('\\', "\\\\").replace('\'', "\\'")),
+    );
+    // Surface the built-in config.toml values and the binary's build target as
+    // PHP constants (PNL_CONFIG_*/PNLX_CONFIG_*, PNLX_BUILD_OS/ARCH).
+    context.insert(
+        "CONFIG_SCHEMA_VERSION".to_owned(),
+        Value::String(crate::config::SCHEMA_VERSION.to_owned()),
+    );
+    context.insert(
+        "CONFIG_SELF_REPOSITORY".to_owned(),
+        Value::String(crate::config::SELF_REPOSITORY.to_owned()),
+    );
+    context.insert(
+        "CONFIG_PACKAGES_REPOSITORY".to_owned(),
+        Value::String(crate::config::PACKAGES_REPOSITORY.to_owned()),
+    );
+    context.insert(
+        "CONFIG_OUTPUT_DIR".to_owned(),
+        Value::String(crate::config::DEFAULT_OUTPUT_DIR.to_owned()),
+    );
+    context.insert(
+        "CONFIG_TTL_SECONDS".to_owned(),
+        Value::Number(crate::config::UPDATE_CHECK_TTL_SECONDS.into()),
+    );
+    context.insert(
+        "CONFIG_OPT_OUT_ENV".to_owned(),
+        Value::String(crate::config::UPDATE_CHECK_OPT_OUT_ENV.to_owned()),
+    );
+    context.insert(
+        "CONFIG_CACHE_KEY".to_owned(),
+        Value::String(crate::config::UPDATE_CHECK_CACHE_KEY.to_owned()),
+    );
+    context.insert(
+        "CONFIG_BINARIES".to_owned(),
+        serde_json::to_value(crate::config::BINARIES).expect("binaries serialize to JSON"),
+    );
+    context.insert(
+        "BUILD_OS".to_owned(),
+        Value::String(crate::config::BUILD_OS.to_owned()),
+    );
+    context.insert(
+        "BUILD_ARCH".to_owned(),
+        Value::String(crate::config::BUILD_ARCH.to_owned()),
+    );
+    write_generated(out, render_handlebars(AUTOLOAD_TEMPLATE, context)?)
+}
+
+/// Generate the workspace `@pnlx/ide-helper.php` (guarded `\FFI` stubs).
+pub fn generate_ide_helper_php(out: &Path) -> Result<()> {
+    write_generated(
+        out,
+        render_handlebars(IDE_HELPER_TEMPLATE, generated_template_context())?,
+    )
+}
+
+fn write_generated(out: &Path, generated: String) -> Result<()> {
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
+    crate::ui::created("generated", out);
+    Ok(())
 }
 
 pub fn generate_aliases_php(out: &Path, signatures: &[FunctionSignature]) -> Result<()> {
@@ -144,8 +289,10 @@ fn write_template(
     out: &Path,
     template: &str,
     options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    scalars_in_return: bool,
 ) -> Result<()> {
-    let generated = render_template(template, options)?;
+    let generated = render_template(template, options, allow_cdata, scalars_in_return)?;
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -155,7 +302,12 @@ fn write_template(
     Ok(())
 }
 
-fn render_template(template: &str, options: &PhpPackageTemplateOptions<'_>) -> Result<String> {
+fn render_template(
+    template: &str,
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    scalars_in_return: bool,
+) -> Result<String> {
     let mut context = generated_template_context();
     context.insert(
         "NAMESPACE".to_owned(),
@@ -181,7 +333,18 @@ fn render_template(template: &str, options: &PhpPackageTemplateOptions<'_>) -> R
         "RUNTIME_VAR".to_owned(),
         Value::String(runtime_variable_name(options)),
     );
-    context.insert("METHODS".to_owned(), Value::String(render_methods(options)));
+    context.insert(
+        "METHODS".to_owned(),
+        Value::String(render_methods(options, allow_cdata, scalars_in_return)),
+    );
+    context.insert(
+        "NATIVE_LIBRARY_NAME".to_owned(),
+        Value::String(options.native_library_name.to_owned()),
+    );
+    context.insert(
+        "NATIVE_LIBRARY_VERSION".to_owned(),
+        Value::String(options.native_library_version.to_owned()),
+    );
     // `--alias-class` exposes the generated class under an additional name while
     // keeping the original. Emitted in index.php; empty for other templates.
     let class_alias = match options.alias_class {
@@ -386,13 +549,23 @@ double demo_scale(double value, int factor);\n";
             signatures,
             alias_class: None,
             function_prefix: "",
+            native_library_name: "demo/demo",
+            native_library_version: "1.0.0",
         }
     }
 
     #[test]
     fn renders_php_methods() {
         let signatures = sample_signatures();
-        insta::assert_snapshot!(render_methods(&sample_options(&signatures)));
+        // Default variant: wrapper returns (scalars_in_return = false).
+        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, false));
+    }
+
+    #[test]
+    fn renders_php_methods_using_php_scalars() {
+        let signatures = sample_signatures();
+        // The `scalar/` variant: methods return PHP-native scalars.
+        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, true));
     }
 
     #[test]

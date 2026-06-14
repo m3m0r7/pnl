@@ -24,16 +24,13 @@ Then call it from PHP (`quickstart.php`):
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/vendor/autoload.php';   // the Pnlx SDK (via Composer)
-require_once __DIR__ . '/@pnlx/autoload.php';    // the installed extensions
+// One require: the SDK loads itself (no Composer autoloader needed at runtime).
+require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libc\Libc;
-use Pnlx\Runtime;
 
-$runtime = new Runtime(__DIR__);
-
-/** @var Libc $libc */
-$libc = $runtime->load(Libc::class);
+// The extension instantiates its own runtime — just `new`.
+$libc = new Libc();
 
 $libc->printf("Hello, World from libc!\n");
 $libc->puts("And this line is printed by libc puts.");

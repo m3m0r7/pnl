@@ -17,27 +17,16 @@ declare(strict_types=1);
  * Generated on: {{GENERATED_HOST}}
  * Generator OS: {{GENERATED_OS}}
  * PHP version: {{GENERATED_PHP_VERSION}}
+ *
+ * Per-C-type wrapper for a pointer this extension exposes. It extends the
+ * package's base context wrapper, so it can be passed where a pointer is
+ * accepted, and a returned pointer of this type arrives as this class. It is not
+ * final: subclass it to add domain behaviour.
  */
 
-require_once __DIR__ . '/{{CLASS}}Context.php';
-require_once __DIR__ . '/{{CLASS}}.php';
-{{CLASS_ALIAS}}
-$runtimeVarName = '{{RUNTIME_VAR}}';
-$runtime = new \Pnlx\Runtime();
+namespace {{NAMESPACE}}\Types;
 
-if (is_file(__DIR__ . '/preload.php')) {
-    require __DIR__ . '/preload.php';
+/** Typed wrapper for a C `{{TYPE}}` pointer value. */
+class {{TYPE}} extends {{BASE}}
+{
 }
-
-if (\Pnlx\Runtime::enableFunctions()) {
-    $GLOBALS[$runtimeVarName] = $runtime->load({{FQCN}}::class);
-
-    require_once __DIR__ . '/functions.php';
-}
-
-if (is_file(__DIR__ . '/postload.php')) {
-    require __DIR__ . '/postload.php';
-}
-
-unset($runtimeVarName);
-unset($runtime);

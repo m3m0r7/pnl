@@ -9,11 +9,12 @@ use RuntimeException;
 /**
  * Resolves the native `pnl` / `pnlx` binaries on demand for the `bin/` shims.
  *
- * pnl ships as an ordinary composer library (no plugin, so no `allow-plugins`
- * prompt). The native binaries are produced lazily the first time the CLI runs:
- * built from the bundled Rust sources when a toolchain is present, and otherwise
- * downloaded from the GitHub release that matches the bundled version. The
- * result is cached under `bin/.native/<version>/` so later runs exec it directly.
+ * pnl ships as an ordinary PHP library package (no plugin, so no `allow-plugins`
+ * prompt). The native binaries are fetched lazily the first time the CLI runs:
+ * downloaded from the GitHub release that matches the bundled version (the
+ * release build embeds the native support library, so no Rust toolchain is
+ * needed). The result is cached under `bin/.native/<version>/` so later runs exec
+ * it directly. Building from source is done by `make build`.
  *
  * This class is intentionally dependency-free so the `bin/` shims can `require`
  * it without an autoloader being available yet.
@@ -42,10 +43,17 @@ final class NativeBinaryLocator
             throw new RuntimeException(sprintf('pnl: failed to create %s', $dir));
         }
 
-        // Prefer a from-source build (guaranteed ABI match); fall back to the
-        // prebuilt release binary when no Rust toolchain is available.
-        if (!self::tryBuild($packageRoot, $dir)) {
-            self::download($version, $dir);
+        // Download the prebuilt release binary. The release build embeds the
+        // native support library, so the downloaded binary works out of the box.
+        // (Building from source is done by `make build`.)
+        if (!self::tryDownload($version, $dir)) {
+            throw new RuntimeException(sprintf(
+                'pnl: could not download the %s binary (version %s). Connect to the network and retry, '
+                . 'or download a release manually from %s/releases. To build from source, run `make build`.',
+                $name,
+                $version,
+                self::REPOSITORY,
+            ));
         }
 
         // The binary was just produced; drop the stat cache so the freshly
@@ -53,8 +61,8 @@ final class NativeBinaryLocator
         clearstatcache(true, $binary);
         if (!is_executable($binary)) {
             throw new RuntimeException(sprintf(
-                'pnl: the %s binary is still missing after build/download; '
-                . 'install a Rust toolchain (https://rustup.rs) or download a release from %s/releases',
+                'pnl: the %s binary is still missing after download/build; '
+                . 'download a release from %s/releases or install a Rust toolchain (https://rustup.rs).',
                 $name,
                 self::REPOSITORY,
             ));
@@ -102,38 +110,11 @@ final class NativeBinaryLocator
     }
 
     /**
-     * Build both binaries from the bundled Rust sources, copying them into
-     * `$dir`. Returns false (so the caller falls back to a download) when the
-     * toolchain is missing or the build fails.
+     * Download the matching release archive and unpack the binaries into `$dir`.
+     * Returns false when the download or extraction fails — e.g. offline, or no
+     * release for this target.
      */
-    private static function tryBuild(string $packageRoot, string $dir): bool
-    {
-        if (!is_file($packageRoot . '/Cargo.toml')) {
-            return false;
-        }
-        if (self::run(['cargo', '--version'], $packageRoot, true) !== 0) {
-            return false;
-        }
-
-        fwrite(STDERR, "pnl: building native binaries from source (first run; this may take a few minutes)\n");
-        if (self::run(['cargo', 'build', '--release', '--bins', '--locked'], $packageRoot) !== 0) {
-            fwrite(STDERR, "pnl: source build failed; falling back to a prebuilt release\n");
-            return false;
-        }
-
-        $release = $packageRoot . '/target/release';
-        foreach (self::BINARIES as $binary) {
-            $name = self::executableName($binary);
-            if (!@copy($release . '/' . $name, $dir . '/' . $name)) {
-                return false;
-            }
-            @chmod($dir . '/' . $name, 0o755);
-        }
-        return true;
-    }
-
-    /** Download the matching release archive and unpack the binaries into `$dir`. */
-    private static function download(string $version, string $dir): void
+    private static function tryDownload(string $version, string $dir): bool
     {
         $target = self::rustTarget();
         $isWindows = PHP_OS_FAMILY === 'Windows';
@@ -144,33 +125,32 @@ final class NativeBinaryLocator
         fwrite(STDERR, sprintf("pnl: downloading prebuilt binaries from %s\n", $url));
         $data = @file_get_contents($url);
         if ($data === false) {
-            throw new RuntimeException(sprintf(
-                'pnl: failed to download %s. Install a Rust toolchain (https://rustup.rs) to build from '
-                . 'source, or download a release manually from %s/releases',
-                $url,
-                self::REPOSITORY,
-            ));
+            fwrite(STDERR, "pnl: download unavailable; will try building from source\n");
+            return false;
         }
 
-        $work = self::tempDir();
-        $archivePath = $work . '/' . $archiveName;
-        file_put_contents($archivePath, $data);
-        self::unpack($archivePath, $work, $isWindows);
+        try {
+            $work = self::tempDir();
+            $archivePath = $work . '/' . $archiveName;
+            file_put_contents($archivePath, $data);
+            self::unpack($archivePath, $work, $isWindows);
 
-        // Release archives wrap the binaries in a `pnl-<version>-<target>/` dir.
-        foreach (self::BINARIES as $binary) {
-            $name = self::executableName($binary);
-            $from = $work . '/' . $package . '/' . $name;
-            if (!is_file($from)) {
-                throw new RuntimeException(sprintf('pnl: %s is missing from the downloaded archive', $name));
+            // Release archives wrap the binaries in a `pnl-<version>-<target>/` dir.
+            foreach (self::BINARIES as $binary) {
+                $name = self::executableName($binary);
+                $from = $work . '/' . $package . '/' . $name;
+                if (!is_file($from) || !@copy($from, $dir . '/' . $name)) {
+                    return false;
+                }
+                @chmod($dir . '/' . $name, 0o755);
             }
-            if (!@copy($from, $dir . '/' . $name)) {
-                throw new RuntimeException(sprintf('pnl: failed to install %s into %s', $name, $dir));
-            }
-            @chmod($dir . '/' . $name, 0o755);
+
+            self::removeTree($work);
+        } catch (\Throwable) {
+            return false;
         }
 
-        self::removeTree($work);
+        return true;
     }
 
     private static function unpack(string $archivePath, string $destination, bool $isWindows): void

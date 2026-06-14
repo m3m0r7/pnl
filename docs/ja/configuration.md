@@ -111,8 +111,27 @@ project-root/
 | `repositories` | 配列 | はい | パッケージの取得元。現状はファイルリポジトリのフォールバック用で、本格的なインデックス解決は未完成です。 |
 | `load_paths` | 配列 | はい | システム標準や環境変数由来のパスより先に探す、C ライブラリのフォルダ。 |
 | `output_dir` | 文字列 | いいえ | 生成物（ロック・パスマップ・インストール済みパッケージ・autoload）の出力先（プロジェクトルートからの相対）。既定は `@pnlx`。 |
-| `features.use_functions` | 真偽値 | はい | `true` にすると、C 関数名の PHP 関数を `\Pnlx\Func` 名前空間配下に生成します。 |
+| `features.use_functions` | 真偽値 | はい | `true` にすると、C 関数名の PHP 関数を `\Pnlx\Func` 名前空間配下に生成します。`features` オブジェクトを書く場合は必須です（オブジェクト自体は省略可能）。 |
+| `features.allow_cdata` | 真偽値 | いいえ | `true` にすると、生成されるメソッド/関数の引数がラッパー型に加えて生の `\FFI\CData` も受け付けます。手書きの FFI コードと連携するときに便利です。 |
+| `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true` にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false`（既定）の場合、スカラーは対応する `\Pnlx\Helpers\*` 値型でラップして渡す必要があります。 |
+| `features.use_php_scalars_in_return` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Helpers\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
+| `config` | オブジェクト | いいえ | バイナリに埋め込まれた既定エンドポイントのプロジェクト単位の上書き（下記参照）。省略すると既定値を使います。 |
 | `extensions` | オブジェクト | はい | 入れたい拡張を `vendor/package` をキーにして並べます。`pnl install` がここに自動で追記します。 |
+
+### 既定エンドポイントの上書き
+
+pnl はビルド時に `config.toml` から 2 つの既定エンドポイントを埋め込みます。1 つは名前指定インストールで参照するパッケージレジストリ、もう 1 つは pnl 自身のリリース元リポジトリ（起動時の更新チェックと `pnl self-upgrade` が使用）です。pnl のフォークやプライベートなレジストリを自分でホストする場合は、`config` でプロジェクトごとに上書きできます。
+
+```jsonc
+"config": {
+  // `pnl self-upgrade` と更新チェックが新しい pnl リリースを探す先。
+  "self_repository": "https://github.com/acme/pnl",
+  // 名前指定インストールの最も優先度が低いフォールバックレジストリ。
+  "packages_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
+}
+```
+
+どちらの項目も任意で、省略した項目は埋め込みの既定値にフォールバックします。
 
 `repositories` に書ける取得元の例です。
 
@@ -184,4 +203,4 @@ project-root/
 }
 ```
 
-有効にすると、生成されたパッケージの入口が、同名の関数がまだ無いときに限り `\Pnlx\Func\Libusb\libusb_init()` のように `\Pnlx\Func\<Class>`（パッケージごとに1セグメント）配下へ関数を定義します。完全修飾で呼ぶか、`use function Pnlx\Func\Libusb\libusb_init;` で読み込んでから `libusb_init()` と呼びます。名前空間に置くことでグローバル名前空間を汚しません。無効の場合は、`$runtime->load(...)` で取得したオブジェクトのメソッドとして呼び出します。
+有効にすると、生成されたパッケージの入口が、同名の関数がまだ無いときに限り `\Pnlx\Func\Libusb\libusb_init()` のように `\Pnlx\Func\<Class>`（パッケージごとに1セグメント）配下へ関数を定義します。完全修飾で呼ぶか、`use function Pnlx\Func\Libusb\libusb_init;` で読み込んでから `libusb_init()` と呼びます。名前空間に置くことでグローバル名前空間を汚しません。無効の場合は、`new <Class>()` で生成したエンティティオブジェクトのメソッドとして呼び出します。
