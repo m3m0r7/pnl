@@ -26,6 +26,8 @@ const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/con
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
 const TYPE_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/types.php.tpl");
 const CONST_TEMPLATE: &str = include_str!("templates/package/src/generated/const.php.tpl");
+const MACRO_FUNCTIONS_TEMPLATE: &str =
+    include_str!("templates/package/src/generated/macro.functions.php.tpl");
 const AUTOLOAD_TEMPLATE: &str = include_str!("templates/workspace/autoload.php.tpl");
 const IDE_HELPER_TEMPLATE: &str = include_str!("templates/workspace/ide-helper.php.tpl");
 const INDEX_TEMPLATE: &str = include_str!("templates/package/src/generated/index.php.tpl");
@@ -285,6 +287,55 @@ pub fn generate_functions_php(out: &Path, options: &PhpPackageTemplateOptions<'_
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
     crate::ui::created("generated", out);
     Ok(())
+}
+
+/// Generate `macro.functions.php`: function-like C macros surfaced as PHP
+/// functions under `\Pnlx\Func\<Class>`. Always loaded.
+pub fn generate_macro_functions_php(
+    out: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    macro_functions: &[crate::header_adapter::MacroFunction],
+) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert(
+        "FUNC_NAMESPACE".to_owned(),
+        Value::String(format!("Pnlx\\Func\\{}", options.class_name)),
+    );
+    context.insert(
+        "FUNCTIONS".to_owned(),
+        Value::String(render_macro_functions(macro_functions, options.class_name)),
+    );
+    write_generated(out, render_handlebars(MACRO_FUNCTIONS_TEMPLATE, context)?)
+}
+
+/// Render the PHP function definitions for the function-like macros, in Rust so
+/// the namespace backslashes never sit next to a `{{ }}` placeholder.
+fn render_macro_functions(
+    macro_functions: &[crate::header_adapter::MacroFunction],
+    class_name: &str,
+) -> String {
+    let mut out = String::new();
+    for function in macro_functions {
+        let fqn = format!("Pnlx\\Func\\{class_name}\\{}", function.name);
+        let params = function
+            .params
+            .iter()
+            .map(|param| format!("${param}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let body = match &function.body {
+            Ok(expr) => format!("        return {expr};"),
+            Err(symbol) => format!(
+                "        throw new \\Pnlx\\Exception\\PHPNativeLibraryException('{} calls the undefined C function {}.');",
+                function.name, symbol
+            ),
+        };
+        out.push_str(&format!(
+            "if (!function_exists('{fqn}')) {{\n    function {}({params})\n    {{\n{body}\n    }}\n}}\n\n",
+            function.name
+        ));
+    }
+    out
 }
 
 pub fn generate_bridge_rs(

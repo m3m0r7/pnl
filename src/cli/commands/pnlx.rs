@@ -7,8 +7,8 @@ use crate::commands::pnl::build_installed_bridges;
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_bridge_ffi_php, generate_bridge_rs,
     generate_const_php, generate_context_php, generate_entity_php, generate_exception_php,
-    generate_functions_php, generate_index_php, generate_manifest_php, generate_types_php,
-    parse_function_signatures,
+    generate_functions_php, generate_index_php, generate_macro_functions_php,
+    generate_manifest_php, generate_types_php, parse_function_signatures,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
@@ -203,8 +203,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     let generated_dir = args.generated_dir;
     let class_name = args.class_name;
     let out = generated_dir.join(format!("{}.ffi.php", args.artifact_stem));
-    let (cdef, constants) = if args.headers.is_empty() {
-        (read_existing_ffi_cdef(&out)?, Vec::new())
+    let (cdef, constants, macro_functions) = if args.headers.is_empty() {
+        (read_existing_ffi_cdef(&out)?, Vec::new(), Vec::new())
     } else {
         let artifacts = cdef_from_header(
             &read_headers(args.headers)?,
@@ -213,9 +213,14 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                     .symbol_prefix
                     .clone()
                     .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
+                entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
             },
         )?;
-        (artifacts.cdef, artifacts.constants)
+        (
+            artifacts.cdef,
+            artifacts.constants,
+            artifacts.macro_functions,
+        )
     };
     let signatures = parse_function_signatures(&cdef);
     generate_bridge_ffi_php(&signatures, &out)?;
@@ -274,6 +279,11 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         &generated_dir.join("const.php"),
         &template_options,
         &constants,
+    )?;
+    generate_macro_functions_php(
+        &generated_dir.join("macro.functions.php"),
+        &template_options,
+        &macro_functions,
     )?;
     generate_index_php(&generated_dir.join("index.php"), &template_options)?;
     generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;

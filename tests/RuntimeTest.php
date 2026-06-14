@@ -94,6 +94,7 @@ class RuntimeTest extends TestCase
         foreach ([
             'index.php',
             'functions.php',
+            'macro.functions.php',
             'Example.php',
             'cdata/Example.php',
             'scalar/Example.php',
@@ -182,6 +183,7 @@ class RuntimeTest extends TestCase
         $files = [
             'index.php',
             'functions.php',
+            'macro.functions.php',
             'Example.php',
             'cdata/Example.php',
             'scalar/Example.php',
@@ -270,6 +272,24 @@ class RuntimeTest extends TestCase
         $wrapped = $cls::example_add(new \Pnlx\Helpers\Int_(2), new \Pnlx\Helpers\Int_(3));
         self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $wrapped);
         self::assertSame(5, $wrapped->toInt());
+    }
+
+    public function testFunctionLikeMacrosBecomePhpFunctions(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+
+        // EXAMPLE_TWICE(N) -> example_add(N, N), delegating to the static entity.
+        self::assertTrue(function_exists('Pnlx\\Func\\Example\\EXAMPLE_TWICE'));
+        $twice = \Pnlx\Func\Example\EXAMPLE_TWICE(21);
+        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $twice);
+        self::assertSame(42, $twice->toInt());
+
+        // EXAMPLE_MISSING(X) calls a C function this library does not define, so it
+        // was generated as a thrower.
+        self::assertTrue(function_exists('Pnlx\\Func\\Example\\EXAMPLE_MISSING'));
+        $this->expectException(\Pnlx\Exception\PHPNativeLibraryException::class);
+        \Pnlx\Func\Example\EXAMPLE_MISSING(1);
     }
 
     public function testRuntimeCanExposeGeneratedGlobalFunctions(): void

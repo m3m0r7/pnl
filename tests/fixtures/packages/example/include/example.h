@@ -10,5 +10,10 @@ enum example_mode {
     EXAMPLE_MODE_AUTO = 10
 };
 
+// Function-like macro that calls a library function: becomes a PHP function.
+#define EXAMPLE_TWICE(N) example_add(N, N)
+// Calls a function this library does not define: becomes a throwing function.
+#define EXAMPLE_MISSING(X) example_absent(X)
+
 const char *example_version(void);
 int example_add(int left, int right);

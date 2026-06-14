@@ -25,15 +25,30 @@ type Token = (TokenKind, String);
 #[derive(Debug, Clone)]
 pub struct HeaderAdapterOptions {
     pub symbol_prefix: String,
+    /// The generated entity's fully-qualified class name (e.g. `\Pnlx\Libsdl\Libsdl`),
+    /// used to render the C-function calls inside function-like macros.
+    pub entity_fqcn: String,
 }
 
-/// The two things extracted from a C header: the cdef text for PHP `FFI::cdef`,
-/// and the object-like `#define` constants worth surfacing as PHP `const`s.
+/// A function-like macro turned into a PHP function (in `\Pnlx\Func\<Class>`).
+#[derive(Debug)]
+pub struct MacroFunction {
+    pub name: String,
+    pub params: Vec<String>,
+    /// The PHP body: `Ok(expr)` for `return <expr>;`, or `Err(symbol)` for a
+    /// function that throws because it calls the undefined C function `symbol`.
+    pub body: std::result::Result<String, String>,
+}
+
+/// Everything extracted from a C header: the cdef text for PHP `FFI::cdef`, the
+/// object-like `#define` constants (for `const.php`), and the function-like
+/// macros turned into PHP functions.
 #[derive(Debug, Default)]
 pub struct HeaderArtifacts {
     pub cdef: String,
     /// `(name, php_value_expression)` pairs, in source order, for `const.php`.
     pub constants: Vec<(String, String)>,
+    pub macro_functions: Vec<MacroFunction>,
 }
 
 /// Translate a C header into a normalised cdef suitable for PHP `FFI::cdef`,
@@ -47,7 +62,7 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     if prefix.is_empty() {
         return Ok(HeaderArtifacts {
             cdef: header.to_owned(),
-            constants: Vec::new(),
+            ..HeaderArtifacts::default()
         });
     }
 
@@ -60,9 +75,12 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let prelude_path = workspace.write("prelude.h", PRELUDE)?;
 
     let collected = parse_with_neutralized_macros(&index, &workspace, &prelude_path, header)?;
+    let constants = header_constants(&collected, prefix);
+    let constant_names: BTreeSet<String> = constants.iter().map(|(name, _)| name.clone()).collect();
     Ok(HeaderArtifacts {
         cdef: render(&collected, prefix),
-        constants: header_constants(&collected, prefix),
+        macro_functions: macro_functions(&collected, prefix, &constant_names, &options.entity_fqcn),
+        constants,
     })
 }
 
@@ -265,6 +283,9 @@ struct Collected {
     macros: Vec<RawMacro>,
     /// Function-like macros by name, for constant-argument expansion.
     fn_macros: BTreeMap<String, RawFnMacro>,
+    /// Names of the kept (externally-linked) C functions, for resolving the
+    /// calls inside function-like macros.
+    function_names: BTreeSet<String>,
     /// `(name, value)` for every enumerator, in source order, for `const.php`.
     enum_constants: Vec<(String, i64)>,
 }
@@ -412,6 +433,7 @@ fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
         params.join(", ")
     };
 
+    collected.function_names.insert(name.clone());
     collected
         .functions
         .push(format!("{}({});", declarator(&return_type, &name), params));
@@ -725,6 +747,141 @@ fn is_allowed_operator(token: &str) -> bool {
     )
 }
 
+/// Why a function-like macro body could not be rendered as a PHP expression.
+enum FnBodyError {
+    /// It calls a C function that is not in this library (named here).
+    UndefinedCall(String),
+    /// It uses something with no PHP equivalent (cast, char literal, unknown name).
+    Untranslatable,
+}
+
+/// Turn each prefix-matching function-like macro into a [`MacroFunction`].
+///
+/// A macro whose body renders cleanly becomes a `return <expr>;` function; one
+/// that calls a C function this library does not define becomes a throwing
+/// function; anything untranslatable is dropped.
+fn macro_functions(
+    collected: &Collected,
+    prefix: &str,
+    consts: &BTreeSet<String>,
+    entity_fqcn: &str,
+) -> Vec<MacroFunction> {
+    let needle = prefix.to_ascii_lowercase();
+    // Constants live in the entity's namespace (the parent of the entity class).
+    let const_namespace = entity_fqcn
+        .rsplit_once('\\')
+        .map_or(entity_fqcn, |(namespace, _)| namespace);
+
+    let mut functions = Vec::new();
+    for (name, macro_def) in &collected.fn_macros {
+        if !name.to_ascii_lowercase().contains(&needle) {
+            continue;
+        }
+        let params: BTreeSet<&str> = macro_def.params.iter().map(String::as_str).collect();
+        let body = match render_fn_body(
+            &macro_def.body,
+            &params,
+            consts,
+            &collected.function_names,
+            &collected.fn_macros,
+            entity_fqcn,
+            const_namespace,
+            0,
+        ) {
+            Ok(expr) => Ok(expr),
+            Err(FnBodyError::UndefinedCall(symbol)) => Err(symbol),
+            Err(FnBodyError::Untranslatable) => continue,
+        };
+        functions.push(MacroFunction {
+            name: name.clone(),
+            params: macro_def.params.clone(),
+            body,
+        });
+    }
+    functions
+}
+
+/// Render a function-like macro body as a PHP expression: parameters become
+/// `$param`, this library's C functions become `<Class>::fn(...)` static calls,
+/// known constants become fully-qualified references, and a nested function-like
+/// macro call is expanded inline.
+#[allow(clippy::too_many_arguments)]
+fn render_fn_body(
+    tokens: &[Token],
+    params: &BTreeSet<&str>,
+    consts: &BTreeSet<String>,
+    functions: &BTreeSet<String>,
+    fn_macros: &BTreeMap<String, RawFnMacro>,
+    entity_fqcn: &str,
+    const_namespace: &str,
+    depth: usize,
+) -> std::result::Result<String, FnBodyError> {
+    if depth > MAX_MACRO_EXPANSION_DEPTH {
+        return Err(FnBodyError::Untranslatable);
+    }
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let (kind, spelling) = &tokens[index];
+        let is_call = tokens.get(index + 1).is_some_and(|(_, next)| next == "(");
+        match kind {
+            TokenKind::Literal => {
+                parts.push(translate_literal(spelling).ok_or(FnBodyError::Untranslatable)?);
+                index += 1;
+            }
+            TokenKind::Punctuation if is_allowed_operator(spelling) => {
+                parts.push(spelling.clone());
+                index += 1;
+            }
+            TokenKind::Identifier if is_call => {
+                let (args, after) =
+                    parse_call_args(tokens, index + 1).ok_or(FnBodyError::Untranslatable)?;
+                let recurse = |body: &[Token], depth: usize| {
+                    render_fn_body(
+                        body,
+                        params,
+                        consts,
+                        functions,
+                        fn_macros,
+                        entity_fqcn,
+                        const_namespace,
+                        depth,
+                    )
+                };
+                if let Some(macro_def) = fn_macros.get(spelling) {
+                    if args.len() != macro_def.params.len() {
+                        return Err(FnBodyError::Untranslatable);
+                    }
+                    let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
+                    parts.push(format!("({})", recurse(&substituted, depth + 1)?));
+                } else if functions.contains(spelling) {
+                    let rendered = args
+                        .iter()
+                        .map(|arg| recurse(arg, depth + 1))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    parts.push(format!(
+                        "{entity_fqcn}::{spelling}({})",
+                        rendered.join(", ")
+                    ));
+                } else {
+                    return Err(FnBodyError::UndefinedCall(spelling.clone()));
+                }
+                index = after;
+            }
+            TokenKind::Identifier if params.contains(spelling.as_str()) => {
+                parts.push(format!("${spelling}"));
+                index += 1;
+            }
+            TokenKind::Identifier if consts.contains(spelling) => {
+                parts.push(format!("{const_namespace}\\{spelling}"));
+                index += 1;
+            }
+            _ => return Err(FnBodyError::Untranslatable),
+        }
+    }
+    Ok(parts.join(" "))
+}
+
 fn render(collected: &Collected, prefix: &str) -> String {
     let typedefs = collected
         .typedefs
@@ -848,6 +1005,7 @@ mod tests {
             header,
             &HeaderAdapterOptions {
                 symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
             },
         )
         .expect("libclang must be available to run header_adapter tests")
@@ -868,6 +1026,9 @@ mod tests {
         #define EX_POS_MASK 0x2FFF0000
         #define EX_POS_DISPLAY(X) (EX_POS_MASK | (X))
         #define EX_POS_CENTERED EX_POS_DISPLAY(0)
+        #define EX_DOUBLE(N) ex_add(N, N)
+        #define EX_MIX(X, Y) ex_add(1, ex_add(X, Y))
+        #define EX_BADCALL(Z) ex_unknown(Z)
         typedef enum ex_color { EX_RED = 0, EX_GREEN, EX_BLUE } ex_color;
         typedef struct ex_point { int x; int y; } ex_point;
         typedef void (*ex_callback)(int code, void *user);
@@ -948,6 +1109,7 @@ mod tests {
             "struct ex_bind { int kind; union { int button; int axis; } value; };",
             &HeaderAdapterOptions {
                 symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
             },
         )
         .unwrap()
@@ -973,11 +1135,13 @@ mod tests {
             "int whatever(void);",
             &HeaderAdapterOptions {
                 symbol_prefix: "  ".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
             },
         )
         .unwrap();
         assert_eq!(out.cdef, "int whatever(void);");
         assert!(out.constants.is_empty());
+        assert!(out.macro_functions.is_empty());
     }
 
     #[test]
@@ -1009,5 +1173,31 @@ mod tests {
         assert_eq!(lookup("EX_RED"), Some("0"));
         assert_eq!(lookup("EX_GREEN"), Some("1"));
         assert_eq!(lookup("EX_BLUE"), Some("2"));
+    }
+
+    #[test]
+    fn turns_function_like_macros_into_php_functions() {
+        let functions = artifacts(HEADER).macro_functions;
+        let find = |name: &str| functions.iter().find(|function| function.name == name);
+
+        // A macro that calls this library's C function resolves to a static call.
+        let double = find("EX_DOUBLE").expect("EX_DOUBLE function");
+        assert_eq!(double.params, vec!["N".to_owned()]);
+        assert_eq!(double.body, Ok("\\Pnlx\\Ex\\Ex::ex_add($N, $N)".to_owned()));
+
+        // Nested calls and the literal/parameter mix are rendered positionally.
+        let mix = find("EX_MIX").expect("EX_MIX function");
+        assert_eq!(
+            mix.body,
+            Ok("\\Pnlx\\Ex\\Ex::ex_add(1, \\Pnlx\\Ex\\Ex::ex_add($X, $Y))".to_owned())
+        );
+
+        // A call to a C function this library does not define becomes a thrower.
+        let bad = find("EX_BADCALL").expect("EX_BADCALL function");
+        assert_eq!(bad.body, Err("ex_unknown".to_owned()));
+
+        // EX_MAX uses `?:`, which has no allowed-operator rendering, so it is
+        // dropped entirely rather than emitted.
+        assert!(find("EX_MAX").is_none());
     }
 }
