@@ -136,15 +136,14 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libsdl\Libsdl;
 use function Pnlx\Util\is_null;
+// SDL_INIT_VIDEO (a #define) and SDL_WINDOW_SHOWN (an enum value) are generated
+// into the package's const.php, so import them instead of redefining them.
+use const Pnlx\Libsdl\SDL_INIT_VIDEO;
+use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 
-// Flag for SDL's video subsystem.
-const SDL_INIT_VIDEO = 0x00000020;
-
-// Value that asks SDL to center the window on the current display.
+// SDL_WINDOWPOS_CENTERED is a function-like macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
+// so it is not generated — define it by hand.
 const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
-
-// Flag for creating a visible window.
-const SDL_WINDOW_SHOWN = 0x00000004;
 
 // Just `new` the generated SDL object; it loads its own bridge.
 // Use methods like SDL_Init() and SDL_CreateWindow().
@@ -280,15 +279,14 @@ use function Pnlx\Func\Libsdl\{
     SDL_DestroyWindow,
     SDL_Quit,
 };
+// SDL_INIT_VIDEO (a #define) and SDL_WINDOW_SHOWN (an enum value) are generated
+// into the package's const.php, so import them instead of redefining them.
+use const Pnlx\Libsdl\SDL_INIT_VIDEO;
+use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 
-// Flag for SDL's video subsystem.
-const SDL_INIT_VIDEO = 0x00000020;
-
-// Value that asks SDL to center the window on the current display.
+// SDL_WINDOWPOS_CENTERED is a function-like macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
+// so it is not generated — define it by hand.
 const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
-
-// Flag for creating a visible window.
-const SDL_WINDOW_SHOWN = 0x00000004;
 
 if (!function_exists('Pnlx\\Func\\Libsdl\\SDL_Init')) {
     // @pnlx/autoload.php defines \Pnlx\Func functions only when features.use_functions is true.
