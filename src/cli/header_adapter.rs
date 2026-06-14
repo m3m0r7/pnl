@@ -22,12 +22,16 @@ const PRELUDE: &str = include_str!("templates/header/prelude.h");
 /// A lexer token kept for macro analysis: its kind and its spelling.
 type Token = (TokenKind, String);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HeaderAdapterOptions {
     pub symbol_prefix: String,
     /// The generated entity's fully-qualified class name (e.g. `\Pnlx\Libsdl\Libsdl`),
     /// used to render the C-function calls inside function-like macros.
     pub entity_fqcn: String,
+    /// `C function name -> dependency entity FQCN` for functions this library does
+    /// not define but a (recursive) `dependencies` package does, so a macro that
+    /// calls one renders a static call to the dependency instead of throwing.
+    pub dependency_functions: BTreeMap<String, String>,
 }
 
 /// A function-like macro turned into a PHP function (in `\Pnlx\Func\<Class>`).
@@ -79,7 +83,7 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let constant_names: BTreeSet<String> = constants.iter().map(|(name, _)| name.clone()).collect();
     Ok(HeaderArtifacts {
         cdef: render(&collected, prefix),
-        macro_functions: macro_functions(&collected, prefix, &constant_names, &options.entity_fqcn),
+        macro_functions: macro_functions(&collected, prefix, &constant_names, options),
         constants,
     })
 }
@@ -764,30 +768,34 @@ fn macro_functions(
     collected: &Collected,
     prefix: &str,
     consts: &BTreeSet<String>,
-    entity_fqcn: &str,
+    options: &HeaderAdapterOptions,
 ) -> Vec<MacroFunction> {
     let needle = prefix.to_ascii_lowercase();
-    // Constants live in the entity's namespace (the parent of the entity class).
-    let const_namespace = entity_fqcn
-        .rsplit_once('\\')
-        .map_or(entity_fqcn, |(namespace, _)| namespace);
+    let params_per_macro: BTreeMap<&String, BTreeSet<&str>> = collected
+        .fn_macros
+        .iter()
+        .map(|(name, macro_def)| (name, macro_def.params.iter().map(String::as_str).collect()))
+        .collect();
 
     let mut functions = Vec::new();
     for (name, macro_def) in &collected.fn_macros {
         if !name.to_ascii_lowercase().contains(&needle) {
             continue;
         }
-        let params: BTreeSet<&str> = macro_def.params.iter().map(String::as_str).collect();
-        let body = match render_fn_body(
-            &macro_def.body,
-            &params,
+        let context = FnBodyContext {
+            params: &params_per_macro[name],
             consts,
-            &collected.function_names,
-            &collected.fn_macros,
-            entity_fqcn,
-            const_namespace,
-            0,
-        ) {
+            functions: &collected.function_names,
+            fn_macros: &collected.fn_macros,
+            entity_fqcn: &options.entity_fqcn,
+            // Constants live in the entity's namespace (parent of the entity class).
+            const_namespace: options
+                .entity_fqcn
+                .rsplit_once('\\')
+                .map_or(options.entity_fqcn.as_str(), |(namespace, _)| namespace),
+            dependency_functions: &options.dependency_functions,
+        };
+        let body = match render_fn_body(&macro_def.body, &context, 0) {
             Ok(expr) => Ok(expr),
             Err(FnBodyError::UndefinedCall(symbol)) => Err(symbol),
             Err(FnBodyError::Untranslatable) => continue,
@@ -801,19 +809,25 @@ fn macro_functions(
     functions
 }
 
+/// Everything `render_fn_body` needs to resolve the identifiers in a macro body.
+struct FnBodyContext<'a> {
+    params: &'a BTreeSet<&'a str>,
+    consts: &'a BTreeSet<String>,
+    functions: &'a BTreeSet<String>,
+    fn_macros: &'a BTreeMap<String, RawFnMacro>,
+    entity_fqcn: &'a str,
+    const_namespace: &'a str,
+    dependency_functions: &'a BTreeMap<String, String>,
+}
+
 /// Render a function-like macro body as a PHP expression: parameters become
-/// `$param`, this library's C functions become `<Class>::fn(...)` static calls,
-/// known constants become fully-qualified references, and a nested function-like
-/// macro call is expanded inline.
-#[allow(clippy::too_many_arguments)]
+/// `$param`, this library's C functions become `<Class>::fn(...)` static calls
+/// (a dependency's function calls the dependency's class), known constants become
+/// fully-qualified references, and a nested function-like macro call is expanded
+/// inline. A call to a C function nobody defines yields `UndefinedCall`.
 fn render_fn_body(
     tokens: &[Token],
-    params: &BTreeSet<&str>,
-    consts: &BTreeSet<String>,
-    functions: &BTreeSet<String>,
-    fn_macros: &BTreeMap<String, RawFnMacro>,
-    entity_fqcn: &str,
-    const_namespace: &str,
+    context: &FnBodyContext<'_>,
     depth: usize,
 ) -> std::result::Result<String, FnBodyError> {
     if depth > MAX_MACRO_EXPANSION_DEPTH {
@@ -836,44 +850,40 @@ fn render_fn_body(
             TokenKind::Identifier if is_call => {
                 let (args, after) =
                     parse_call_args(tokens, index + 1).ok_or(FnBodyError::Untranslatable)?;
-                let recurse = |body: &[Token], depth: usize| {
-                    render_fn_body(
-                        body,
-                        params,
-                        consts,
-                        functions,
-                        fn_macros,
-                        entity_fqcn,
-                        const_namespace,
-                        depth,
-                    )
+                let render_args = || {
+                    args.iter()
+                        .map(|arg| render_fn_body(arg, context, depth + 1))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map(|rendered| rendered.join(", "))
                 };
-                if let Some(macro_def) = fn_macros.get(spelling) {
+                if let Some(macro_def) = context.fn_macros.get(spelling) {
                     if args.len() != macro_def.params.len() {
                         return Err(FnBodyError::Untranslatable);
                     }
                     let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
-                    parts.push(format!("({})", recurse(&substituted, depth + 1)?));
-                } else if functions.contains(spelling) {
-                    let rendered = args
-                        .iter()
-                        .map(|arg| recurse(arg, depth + 1))
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     parts.push(format!(
-                        "{entity_fqcn}::{spelling}({})",
-                        rendered.join(", ")
+                        "({})",
+                        render_fn_body(&substituted, context, depth + 1)?
                     ));
+                } else if context.functions.contains(spelling) {
+                    parts.push(format!(
+                        "{}::{spelling}({})",
+                        context.entity_fqcn,
+                        render_args()?
+                    ));
+                } else if let Some(dep_fqcn) = context.dependency_functions.get(spelling) {
+                    parts.push(format!("{dep_fqcn}::{spelling}({})", render_args()?));
                 } else {
                     return Err(FnBodyError::UndefinedCall(spelling.clone()));
                 }
                 index = after;
             }
-            TokenKind::Identifier if params.contains(spelling.as_str()) => {
+            TokenKind::Identifier if context.params.contains(spelling.as_str()) => {
                 parts.push(format!("${spelling}"));
                 index += 1;
             }
-            TokenKind::Identifier if consts.contains(spelling) => {
-                parts.push(format!("{const_namespace}\\{spelling}"));
+            TokenKind::Identifier if context.consts.contains(spelling) => {
+                parts.push(format!("{}\\{spelling}", context.const_namespace));
                 index += 1;
             }
             _ => return Err(FnBodyError::Untranslatable),
@@ -998,6 +1008,8 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{HeaderAdapterOptions, HeaderArtifacts, cdef_from_header};
 
     fn artifacts(header: &str) -> HeaderArtifacts {
@@ -1006,6 +1018,7 @@ mod tests {
             &HeaderAdapterOptions {
                 symbol_prefix: "ex_".to_owned(),
                 entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
             },
         )
         .expect("libclang must be available to run header_adapter tests")
@@ -1110,6 +1123,7 @@ mod tests {
             &HeaderAdapterOptions {
                 symbol_prefix: "ex_".to_owned(),
                 entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1136,6 +1150,7 @@ mod tests {
             &HeaderAdapterOptions {
                 symbol_prefix: "  ".to_owned(),
                 entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1199,5 +1214,33 @@ mod tests {
         // EX_MAX uses `?:`, which has no allowed-operator rendering, so it is
         // dropped entirely rather than emitted.
         assert!(find("EX_MAX").is_none());
+    }
+
+    #[test]
+    fn resolves_dependency_functions_in_macros() {
+        let mut dependency_functions = BTreeMap::new();
+        dependency_functions.insert("ex_dep_call".to_owned(), "\\Pnlx\\Dep\\Dep".to_owned());
+
+        let macro_functions = cdef_from_header(
+            "#define EX_USE_DEP(X) ex_dep_call(X)\nint ex_local(int a);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                dependency_functions,
+            },
+        )
+        .expect("libclang must be available to run header_adapter tests")
+        .macro_functions;
+
+        // A C function this library lacks but a dependency provides resolves to a
+        // static call on the dependency's class instead of a thrower.
+        let use_dep = macro_functions
+            .iter()
+            .find(|function| function.name == "EX_USE_DEP")
+            .expect("EX_USE_DEP function");
+        assert_eq!(
+            use_dep.body,
+            Ok("\\Pnlx\\Dep\\Dep::ex_dep_call($X)".to_owned())
+        );
     }
 }

@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::archive::{extract_extension_archive, is_archive_source};
-use crate::commands::pnlx::generate_installed_package_artifacts;
+use crate::commands::pnlx::{generate_installed_package_artifacts, read_existing_ffi_cdef};
 use crate::fetch::{fetch_asset, is_remote_source};
+use crate::generate::parse_function_signatures;
 use crate::git_source::{GitSource, install_git_source};
 use crate::io::{read_json, read_or_default, write_json};
 use crate::manifest::{
@@ -25,9 +26,9 @@ use super::native::{
     generation_headers_from_resolved_header, resolve_header_for_native, resolve_native_library,
 };
 use super::package::{
-    absolutize, entity_class_fqn, file_url_for_path, install_extension_files, pnl_lock_path,
-    read_lock_for_current_platform, read_pathmap_for_current_platform, tree_sha256, write_pathmap,
-    write_pnlx_autoload,
+    absolutize, entity_class_fqn, file_url_for_path, install_extension_files,
+    installed_extension_dir, pnl_lock_path, read_lock_for_current_platform,
+    read_pathmap_for_current_platform, tree_sha256, write_pathmap, write_pnlx_autoload,
 };
 
 /// Options supplied on the `pnl install` command line.
@@ -777,6 +778,11 @@ fn install_local_extension(
     let mut pathmap = read_pathmap_for_current_platform(root)?;
     pathmap.generated_at = now();
 
+    // Map a (recursive) dependency's C functions to its entity class, so a
+    // function-like macro that calls one resolves to that class instead of
+    // becoming a thrower. The dependencies were installed (and locked) above.
+    let dependency_functions = collect_dependency_functions(root, &extension.dependencies, &lock);
+
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
         // Stamp the first-install time, preserving it across reinstalls so the
@@ -818,6 +824,7 @@ fn install_local_extension(
             &generation_headers,
             options.alias_class.as_deref(),
             options.function_prefix.as_deref(),
+            &dependency_functions,
         )?;
         if let Some(bridge) = compile_bridge_for_library(
             root,
@@ -961,6 +968,56 @@ impl ExtensionSource {
             ),
         }
     }
+}
+
+/// Build a `C function name -> dependency entity FQCN` map by walking a package's
+/// `dependencies` (recursively, through the lockfile). Each installed dependency
+/// contributes its locked entity class for every C function in its generated
+/// cdef, so a function-like macro that calls one can render a static call to it.
+fn collect_dependency_functions(
+    root: &Path,
+    dependencies: &BTreeMap<String, ExtensionRequirement>,
+    lock: &crate::manifest::PnlLock,
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack: Vec<String> = dependencies.keys().cloned().collect();
+
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(locked) = lock.extensions.get(&name) else {
+            continue;
+        };
+        // The dependency's entity class, made absolute for a static `::` call.
+        let Some(class) = locked.classes.first() else {
+            continue;
+        };
+        let fqcn = format!("\\{}", class.trim_start_matches('\\'));
+
+        let generated = installed_extension_dir(root, &name, &locked.version).join("src/generated");
+        if let Ok(entries) = std::fs::read_dir(&generated) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if !path
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    .is_some_and(|file| file.ends_with(".ffi.php"))
+                {
+                    continue;
+                }
+                if let Ok(cdef) = read_existing_ffi_cdef(&path) {
+                    for signature in parse_function_signatures(&cdef) {
+                        map.entry(signature.name).or_insert_with(|| fqcn.clone());
+                    }
+                }
+            }
+        }
+
+        // Recurse into the dependency's own dependencies (recorded in the lock).
+        stack.extend(locked.dependencies.keys().cloned());
+    }
+    map
 }
 
 /// Reject an install whose content digest differs from a previously locked

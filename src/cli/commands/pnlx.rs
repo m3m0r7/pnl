@@ -147,6 +147,7 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         native_library_name: &manifest.name,
         native_library_version: &manifest.version,
         headers: &headers,
+        dependency_functions: &std::collections::BTreeMap::new(),
     })
 }
 
@@ -159,6 +160,7 @@ pub(crate) fn generate_installed_package_artifacts(
     headers: &[PathBuf],
     alias_class: Option<&str>,
     function_prefix: Option<&str>,
+    dependency_functions: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(package_leaf);
@@ -177,6 +179,7 @@ pub(crate) fn generate_installed_package_artifacts(
         native_library_name: &manifest.name,
         native_library_version: &manifest.version,
         headers,
+        dependency_functions,
     })
 }
 
@@ -197,6 +200,9 @@ struct GenerateArtifacts<'a> {
     native_library_name: &'a str,
     native_library_version: &'a str,
     headers: &'a [PathBuf],
+    /// `C function name -> dependency entity FQCN` for resolving cross-package
+    /// calls inside function-like macros (empty for the local `pnlx gen` path).
+    dependency_functions: &'a std::collections::BTreeMap<String, String>,
 }
 
 fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
@@ -214,6 +220,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                     .clone()
                     .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
                 entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
+                dependency_functions: args.dependency_functions.clone(),
             },
         )?;
         (
@@ -296,7 +303,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     Ok(())
 }
 
-fn read_existing_ffi_cdef(out: &Path) -> Result<String> {
+pub(crate) fn read_existing_ffi_cdef(out: &Path) -> Result<String> {
     let content = std::fs::read_to_string(out).with_context(|| {
         format!(
             "no pnlx.json header was configured; failed to read existing {} as CDEF source",
