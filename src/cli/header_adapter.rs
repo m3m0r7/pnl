@@ -59,7 +59,7 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let collected = parse_with_neutralized_macros(&index, &workspace, &prelude_path, header)?;
     Ok(HeaderArtifacts {
         cdef: render(&collected, prefix),
-        constants: macro_constants(&collected.macros, prefix),
+        constants: header_constants(&collected, prefix),
     })
 }
 
@@ -252,6 +252,8 @@ struct Collected {
     typedefs: Vec<String>,
     functions: Vec<String>,
     macros: Vec<RawMacro>,
+    /// `(name, value)` for every enumerator, in source order, for `const.php`.
+    enum_constants: Vec<(String, i64)>,
 }
 
 fn collect(translation_unit: &Entity<'_>) -> Collected {
@@ -265,11 +267,7 @@ fn collect(translation_unit: &Entity<'_>) -> Collected {
         match entity.get_kind() {
             EntityKind::FunctionDecl => collect_function(&entity, &mut collected),
             EntityKind::StructDecl => collect_struct(&entity, &mut collected),
-            EntityKind::EnumDecl => {
-                if let Some(name) = entity.get_name() {
-                    collected.enums.insert(name);
-                }
-            }
+            EntityKind::EnumDecl => collect_enum(&entity, &mut collected),
             EntityKind::TypedefDecl => collect_typedef(&entity, &mut collected),
             EntityKind::MacroDefinition => collect_macro(&entity, &mut collected),
             _ => {}
@@ -281,6 +279,24 @@ fn collect(translation_unit: &Entity<'_>) -> Collected {
     collected.typedefs.sort();
     collected.typedefs.dedup();
     collected
+}
+
+/// Record the enum's name (projected onto `int` in the cdef) and each of its
+/// enumerators with its evaluated integer value (for `const.php`).
+fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
+    if let Some(name) = entity.get_name() {
+        collected.enums.insert(name);
+    }
+    for constant in entity.get_children() {
+        if constant.get_kind() != EntityKind::EnumConstantDecl {
+            continue;
+        }
+        if let (Some(name), Some((signed, _))) =
+            (constant.get_name(), constant.get_enum_constant_value())
+        {
+            collected.enum_constants.push((name, signed));
+        }
+    }
 }
 
 /// Record an object-like `#define`. Function-like and builtin macros, and any
@@ -467,18 +483,30 @@ fn typedef_declaration(name: &str, underlying: &str) -> String {
     }
 }
 
-/// Translate the prefix-matching object-like macros into `(name, php_value)`
-/// pairs, keeping only those whose replacement is a constant expression PHP can
-/// evaluate. A single forward pass over the source-ordered macros lets a later
-/// macro reference an already-emitted one by name (e.g. composite flag masks),
-/// while anything untranslatable (casts, char literals, calls, unknown names) is
-/// silently dropped.
-fn macro_constants(macros: &[RawMacro], prefix: &str) -> Vec<(String, String)> {
+/// The prefix-matching constants worth surfacing as PHP `const`s, in emit order:
+/// enum constants first (exact integer values), then object-like `#define`s.
+///
+/// A macro is kept only if its replacement is a constant expression PHP can
+/// evaluate; a single forward pass lets a later macro reference an
+/// already-emitted constant by name — including the enum constants seeded ahead
+/// of it (e.g. `#define FOO (SOME_ENUM | 1)`). Anything untranslatable (casts,
+/// char literals, calls, unknown names) is silently dropped, and an enum value
+/// wins over any later macro of the same name.
+fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)> {
     let needle = prefix.to_ascii_lowercase();
     let mut emitted = BTreeSet::new();
     let mut constants = Vec::new();
-    for macro_def in macros {
-        if !macro_def.name.to_ascii_lowercase().contains(&needle) {
+
+    for (name, value) in &collected.enum_constants {
+        if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.clone()) {
+            constants.push((name.clone(), value.to_string()));
+        }
+    }
+
+    for macro_def in &collected.macros {
+        if !macro_def.name.to_ascii_lowercase().contains(&needle)
+            || emitted.contains(&macro_def.name)
+        {
             continue;
         }
         if let Some(value) = translate_macro_value(&macro_def.tokens, &emitted) {
@@ -486,6 +514,7 @@ fn macro_constants(macros: &[RawMacro], prefix: &str) -> Vec<(String, String)> {
             constants.push((macro_def.name.clone(), value));
         }
     }
+
     constants
 }
 
@@ -825,7 +854,9 @@ mod tests {
 
         // Function-like macros cannot be translated to a PHP const.
         assert_eq!(lookup("EX_MAX"), None);
-        // Enum constants are emitted via the enum projection, not as macros.
-        assert_eq!(lookup("EX_RED"), None);
+        // Enum constants are emitted too, with their evaluated integer values.
+        assert_eq!(lookup("EX_RED"), Some("0"));
+        assert_eq!(lookup("EX_GREEN"), Some("1"));
+        assert_eq!(lookup("EX_BLUE"), Some("2"));
     }
 }

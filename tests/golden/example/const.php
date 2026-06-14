@@ -21,6 +21,9 @@ declare(strict_types=1);
 
 namespace Pnlx\Example;
 
+const EXAMPLE_MODE_OFF = 0;
+const EXAMPLE_MODE_ON = 1;
+const EXAMPLE_MODE_AUTO = 10;
 const EXAMPLE_VERSION_MAJOR = 1;
 const EXAMPLE_FLAG_NONE = 0x00;
 const EXAMPLE_FLAG_FAST = ( 1 << 0 );
