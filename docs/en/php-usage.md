@@ -133,14 +133,13 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libsdl\Libsdl;
 use function Pnlx\Util\is_null;
-// SDL_INIT_VIDEO (a #define) and SDL_WINDOW_SHOWN (an enum value) are generated
-// into the package's const.php, so import them instead of redefining them.
+// SDL constants are generated into the package's const.php, so import them
+// instead of redefining them.
 use const Pnlx\Libsdl\SDL_INIT_VIDEO;
 use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
-
-// SDL_WINDOWPOS_CENTERED is a function-like macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
-// so it is not generated — define it by hand.
-const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+// SDL_WINDOWPOS_CENTERED is a constant-argument macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
+// which is expanded and generated too.
+use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 // Call SDL statically, e.g. Libsdl::SDL_Init() / Libsdl::SDL_CreateWindow();
 // the first call boots the extension automatically.
@@ -275,14 +274,13 @@ use function Pnlx\Func\Libsdl\{
     SDL_DestroyWindow,
     SDL_Quit,
 };
-// SDL_INIT_VIDEO (a #define) and SDL_WINDOW_SHOWN (an enum value) are generated
-// into the package's const.php, so import them instead of redefining them.
+// SDL constants are generated into the package's const.php, so import them
+// instead of redefining them.
 use const Pnlx\Libsdl\SDL_INIT_VIDEO;
 use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
-
-// SDL_WINDOWPOS_CENTERED is a function-like macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
-// so it is not generated — define it by hand.
-const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+// SDL_WINDOWPOS_CENTERED is a constant-argument macro (SDL_WINDOWPOS_CENTERED_DISPLAY(0)),
+// which is expanded and generated too.
+use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 if (!function_exists('Pnlx\\Func\\Libsdl\\SDL_Init')) {
     // @pnlx/autoload.php defines \Pnlx\Func functions only when features.use_functions is true.

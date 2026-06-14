@@ -127,14 +127,12 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libsdl\Libsdl;
 use function Pnlx\Util\is_null;
-// SDL_INIT_VIDEO（#define）と SDL_WINDOW_SHOWN（enum 値）はパッケージの const.php に
-// 生成されるので、手書きせず import します。
+// SDL の定数はパッケージの const.php に生成されるので、手書きせず import します。
 use const Pnlx\Libsdl\SDL_INIT_VIDEO;
 use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
-
-// SDL_WINDOWPOS_CENTERED は関数形式マクロ（SDL_WINDOWPOS_CENTERED_DISPLAY(0)）なので
-// 生成されません。手書きで定義します。
-const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+// SDL_WINDOWPOS_CENTERED は定数引数マクロ（SDL_WINDOWPOS_CENTERED_DISPLAY(0)）で、
+// これも展開して生成されます。
+use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 // SDL は static に呼びます（例: Libsdl::SDL_Init() / Libsdl::SDL_CreateWindow()）。
 // 最初の呼び出しで拡張が自動 boot します。
@@ -269,14 +267,12 @@ use function Pnlx\Func\Libsdl\{
     SDL_DestroyWindow,
     SDL_Quit,
 };
-// SDL_INIT_VIDEO（#define）と SDL_WINDOW_SHOWN（enum 値）はパッケージの const.php に
-// 生成されるので、手書きせず import します。
+// SDL の定数はパッケージの const.php に生成されるので、手書きせず import します。
 use const Pnlx\Libsdl\SDL_INIT_VIDEO;
 use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
-
-// SDL_WINDOWPOS_CENTERED は関数形式マクロ（SDL_WINDOWPOS_CENTERED_DISPLAY(0)）なので
-// 生成されません。手書きで定義します。
-const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+// SDL_WINDOWPOS_CENTERED は定数引数マクロ（SDL_WINDOWPOS_CENTERED_DISPLAY(0)）で、
+// これも展開して生成されます。
+use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 if (!function_exists('Pnlx\\Func\\Libsdl\\SDL_Init')) {
     // @pnlx/autoload.php は features.use_functions が true のときだけ \Pnlx\Func 関数を定義します。
