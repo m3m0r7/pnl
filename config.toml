@@ -32,7 +32,7 @@ packages = "https://github.com/m3m0r7/pnl-packages/tree/main/packages"
 # these prefixes is installed without asking "Continue installing …?". The
 # first-party package registry is listed so its packages install smoothly;
 # everything else still prompts. Matching is a plain URL-prefix check.
-authorized = [
+authorized_repositories = [
   "https://github.com/m3m0r7/pnl-packages",
 ]
 

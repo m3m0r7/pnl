@@ -88,7 +88,10 @@ fn generate_config_constants(out_dir: &Path) {
             .collect()
     };
     let binaries = string_array(&["binaries", "names"], "binaries.names");
-    let authorized = string_array(&["repositories", "authorized"], "repositories.authorized");
+    let authorized_repositories = string_array(
+        &["repositories", "authorized_repositories"],
+        "repositories.authorized_repositories",
+    );
 
     let context = json!({
         "schema_version": string(&["schema_version"]),
@@ -100,8 +103,8 @@ fn generate_config_constants(out_dir: &Path) {
         "cache_key": string(&["update_check", "cache_key"]),
         "binaries": binaries,
         "binaries_len": binaries.len(),
-        "authorized": authorized,
-        "authorized_len": authorized.len(),
+        "authorized_repositories": authorized_repositories,
+        "authorized_repositories_len": authorized_repositories.len(),
         // The build target, surfaced to the PHP layer as PNLX_BUILD_OS/ARCH.
         "build_os": env::var("CARGO_CFG_TARGET_OS").unwrap_or_default(),
         "build_arch": env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),

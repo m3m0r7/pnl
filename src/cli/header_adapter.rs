@@ -13,18 +13,10 @@ static CLANG_GUARD: Mutex<()> = Mutex::new(());
 /// `FFI::cdef` has no access to system headers, so these stand in for the
 /// fixed-width and SDL-style integer types the real headers rely on. The same
 /// text is fed to libclang while parsing so those names resolve there too.
-const PRELUDE: &str = concat!(
-    "typedef signed long ssize_t;\n",
-    "typedef unsigned long size_t;\n",
-    "typedef long intptr_t;\n",
-    "typedef unsigned char uint8_t;\n",
-    "typedef unsigned short uint16_t;\n",
-    "typedef unsigned int uint32_t;\n",
-    "typedef unsigned long long uint64_t;\n",
-    "typedef unsigned char Uint8;\n",
-    "typedef unsigned short Uint16;\n",
-    "typedef unsigned int Uint32;\n",
-);
+///
+/// The list lives in a template file so it sits alongside the other generated
+/// artifacts rather than being buried in Rust source.
+const PRELUDE: &str = include_str!("templates/header/prelude.h");
 
 #[derive(Debug, Clone)]
 pub struct HeaderAdapterOptions {
