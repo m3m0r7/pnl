@@ -31,7 +31,6 @@
     "validate:schemas": "vendor/bin/phpunit --filter SchemaFormatTest"
   },
   "require": {
-    "php": ">=8.3",
-    "composer-plugin-api": "^2.0"
+    "php": ">=8.3"
   }
 }

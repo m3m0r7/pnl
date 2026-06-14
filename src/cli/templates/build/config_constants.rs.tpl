@@ -7,6 +7,8 @@ pub const UPDATE_CHECK_TTL_SECONDS: u64 = {{ttl_seconds}};
 pub const UPDATE_CHECK_OPT_OUT_ENV: &str = "{{opt_out_env}}";
 pub const UPDATE_CHECK_CACHE_KEY: &str = "{{cache_key}}";
 pub const BINARIES: [&str; {{binaries_len}}] = [{{#each binaries}}"{{this}}"{{#unless @last}}, {{/unless}}{{/each}}];
+/// Install-source URL prefixes trusted to run install scripts without prompting.
+pub const AUTHORIZED_REPOSITORIES: [&str; {{authorized_len}}] = [{{#each authorized}}"{{this}}"{{#unless @last}}, {{/unless}}{{/each}}];
 /// The target OS this binary was built for (`std::env::consts::OS` form).
 pub const BUILD_OS: &str = "{{build_os}}";
 /// The target architecture this binary was built for (`std::env::consts::ARCH` form).

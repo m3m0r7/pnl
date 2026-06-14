@@ -61,7 +61,10 @@ jobs:
         # into the binaries (see build.rs). Built without --bins so the cdylib is
         # produced alongside the binaries.
         run: |
+          # Pass 1: produce the support cdylib (build.rs embeds an empty
+          # placeholder here, since the cdylib does not exist yet).
           cargo build --locked --release --target ${{ matrix.target }}
+          # Pass 2: rebuild so build.rs embeds the cdylib produced by pass 1.
           cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package Unix archive

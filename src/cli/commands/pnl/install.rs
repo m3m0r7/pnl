@@ -587,6 +587,18 @@ enum ExtensionSource {
     },
 }
 
+impl ExtensionSource {
+    /// The URL the package was installed from (used to match the authorized
+    /// repository whitelist).
+    fn source_url(&self) -> &str {
+        match self {
+            ExtensionSource::File { source_url } | ExtensionSource::Git { source_url, .. } => {
+                source_url
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_git_extension(
     root: &Path,
@@ -729,6 +741,7 @@ fn install_local_extension(
         &options.interaction,
         options.allow_unverified_install_scripts,
         &options.allowed_install_script_hashes,
+        crate::config::is_authorized_repository(source.source_url()),
     )?;
 
     ensure_not_cyclic(state, &extension.name)?;

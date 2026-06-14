@@ -75,6 +75,7 @@ pub fn verify_install_scripts(
     interaction: &Interaction,
     allow_unverified: bool,
     allowed_hashes: &[String],
+    trusted_source: bool,
 ) -> Result<Option<String>> {
     let Some(actual) = install_script_hash(package_root, manifest)? else {
         return Ok(None);
@@ -97,6 +98,7 @@ pub fn verify_install_scripts(
             manifest,
             interaction,
             allow_unverified,
+            trusted_source,
             &format!(
                 "install script hash changed for {name}\n  expected: {expected}\n  actual:   {actual}",
                 name = manifest.name
@@ -107,6 +109,7 @@ pub fn verify_install_scripts(
             manifest,
             interaction,
             allow_unverified,
+            trusted_source,
             &format!(
                 "{name} declares install scripts but does not carry install_script_hash {actual}",
                 name = manifest.name
@@ -120,11 +123,24 @@ fn confirm_unverified(
     manifest: &PnlxManifest,
     interaction: &Interaction,
     allow_unverified: bool,
+    trusted_source: bool,
     message: &str,
 ) -> Result<()> {
     if allow_unverified {
         crate::ui::warn(message);
         crate::ui::warn("continuing because --allow-unverified-install-scripts was provided");
+        return Ok(());
+    }
+
+    // Packages from a built-in authorized repository (see config.toml
+    // `repositories.authorized`) are trusted to run their install scripts, so
+    // they install without the interactive confirmation.
+    if trusted_source {
+        crate::ui::warn(message);
+        crate::ui::warn(&format!(
+            "continuing because {name} comes from an authorized repository",
+            name = manifest.name
+        ));
         return Ok(());
     }
 

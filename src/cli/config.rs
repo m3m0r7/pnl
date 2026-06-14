@@ -14,8 +14,17 @@ use crate::manifest::PnlManifest;
 // Compile-time constants generated from `config.toml` by build.rs:
 //   SCHEMA_VERSION, SELF_REPOSITORY, PACKAGES_REPOSITORY, DEFAULT_OUTPUT_DIR,
 //   UPDATE_CHECK_TTL_SECONDS, UPDATE_CHECK_OPT_OUT_ENV, UPDATE_CHECK_CACHE_KEY,
-//   BINARIES.
+//   BINARIES, AUTHORIZED_REPOSITORIES.
 include!(concat!(env!("OUT_DIR"), "/config_constants.rs"));
+
+/// Whether an install-source URL is covered by a built-in authorized-repository
+/// prefix (`repositories.authorized` in `config.toml`). Packages from these
+/// trusted sources skip the "install scripts can run arbitrary commands" prompt.
+pub fn is_authorized_repository(source_url: &str) -> bool {
+    AUTHORIZED_REPOSITORIES
+        .iter()
+        .any(|prefix| source_url.starts_with(prefix))
+}
 
 /// The default repository pnl releases come from.
 pub fn default_self_repository() -> &'static str {
@@ -52,7 +61,10 @@ fn workspace_self_repository(root: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_packages_repository, default_self_repository, resolve_self_repository};
+    use super::{
+        default_packages_repository, default_self_repository, is_authorized_repository,
+        resolve_self_repository,
+    };
 
     #[test]
     fn embedded_config_parses_to_expected_defaults() {
@@ -61,6 +73,20 @@ mod tests {
             default_packages_repository(),
             "https://github.com/m3m0r7/pnl-packages/tree/main/packages"
         );
+    }
+
+    #[test]
+    fn authorizes_first_party_package_sources() {
+        // Both the direct-URL and bare-name (index-resolved) install URLs sit
+        // under the whitelisted prefix, so they skip the install-script prompt.
+        assert!(is_authorized_repository(
+            "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb"
+        ));
+        // An unrelated source still prompts.
+        assert!(!is_authorized_repository(
+            "https://github.com/someone-else/packages/tree/main/libusb"
+        ));
+        assert!(!is_authorized_repository("/local/path/to/package"));
     }
 
     #[test]

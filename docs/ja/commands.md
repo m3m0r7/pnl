@@ -135,7 +135,7 @@ initialized ./pnl.json
 
 パッケージが対象 OS / Linux ディストリビューションの `installation` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `checkIfExists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。Linux ではレシピは `/etc/os-release` から選択されます。ディストリビューションの `ID`（例: `alpine`・`ubuntu`・`fedora`）→ `ID_LIKE` の各祖先（例: `debian`・`rhel`）→ 汎用の `linux` キーの順で照合します。インストールコマンドが失敗した場合は、どのコマンドが失敗したかを表示し、手動でライブラリとヘッダーをインストールしてから改めて `pnl install` を実行するよう案内します。
 
-`installation` または `self_build` を持つパッケージは、`pnlx publish` が `pnlx.json` に記録した `install_script_hash` と現在のコマンド／スクリプト内容を照合します。不一致または未記録の場合、対話時は既定 No で確認します。`-y` 指定時は安全のため停止します。確認を明示的に上書きする場合は `--allow-install-script-hash <sha256>`（複数指定可）を使います。検証なしで通す最後の手段として `--allow-unverified-install-scripts` もあります。
+`installation` または `self_build` を持つパッケージは、`pnlx publish` が `pnlx.json` に記録した `install_script_hash` と現在のコマンド／スクリプト内容を照合します。不一致または未記録の場合、対話時は既定 No で確認します。`-y` 指定時は安全のため停止します。確認を明示的に上書きする場合は `--allow-install-script-hash <sha256>`（複数指定可）を使います。検証なしで通す最後の手段として `--allow-unverified-install-scripts` もあります。組み込みの**認可済みリポジトリ**（ファーストパーティの `m3m0r7/pnl-packages` レジストリ。バイナリに埋め込まれた `repositories.authorized` ホワイトリスト参照）からインストールするパッケージは、install スクリプトの実行を信頼してこの確認を省略します。
 
 生成される PHP を調整するフラグ:
 

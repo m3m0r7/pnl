@@ -27,6 +27,15 @@ self = "https://github.com/m3m0r7/pnl"
 # `repository-index.json` so `pnl find` can browse it without cloning.
 packages = "https://github.com/m3m0r7/pnl-packages/tree/main/packages"
 
+# Repositories trusted to run install scripts without the per-package
+# confirmation prompt. A package whose install source URL starts with one of
+# these prefixes is installed without asking "Continue installing …?". The
+# first-party package registry is listed so its packages install smoothly;
+# everything else still prompts. Matching is a plain URL-prefix check.
+authorized = [
+  "https://github.com/m3m0r7/pnl-packages",
+]
+
 [workspace]
 # Default directory (relative to the project root) for generated workspace
 # files — the lock, pathmap, installed packages, and autoload.

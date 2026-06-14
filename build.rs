@@ -74,17 +74,21 @@ fn generate_config_constants(out_dir: &Path) {
             .and_then(toml::Value::as_integer)
             .unwrap_or_else(|| panic!("config.toml is missing integer {}", path.join(".")))
     };
-    let binaries: Vec<String> = lookup(&config, &["binaries", "names"])
-        .and_then(toml::Value::as_array)
-        .expect("config.toml is missing array binaries.names")
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .expect("binaries.names must hold strings")
-                .to_owned()
-        })
-        .collect();
+    let string_array = |path: &[&str], item_desc: &str| -> Vec<String> {
+        lookup(&config, path)
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("config.toml is missing array {}", path.join(".")))
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{item_desc} must hold strings"))
+                    .to_owned()
+            })
+            .collect()
+    };
+    let binaries = string_array(&["binaries", "names"], "binaries.names");
+    let authorized = string_array(&["repositories", "authorized"], "repositories.authorized");
 
     let context = json!({
         "schema_version": string(&["schema_version"]),
@@ -96,6 +100,8 @@ fn generate_config_constants(out_dir: &Path) {
         "cache_key": string(&["update_check", "cache_key"]),
         "binaries": binaries,
         "binaries_len": binaries.len(),
+        "authorized": authorized,
+        "authorized_len": authorized.len(),
         // The build target, surfaced to the PHP layer as PNLX_BUILD_OS/ARCH.
         "build_os": env::var("CARGO_CFG_TARGET_OS").unwrap_or_default(),
         "build_arch": env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),
