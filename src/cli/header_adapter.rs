@@ -19,6 +19,9 @@ static CLANG_GUARD: Mutex<()> = Mutex::new(());
 /// artifacts rather than being buried in Rust source.
 const PRELUDE: &str = include_str!("templates/header/prelude.h");
 
+/// A lexer token kept for macro analysis: its kind and its spelling.
+type Token = (TokenKind, String);
+
 #[derive(Debug, Clone)]
 pub struct HeaderAdapterOptions {
     pub symbol_prefix: String,
@@ -242,7 +245,15 @@ fn unknown_type_name(message: &str) -> Option<String> {
 /// spelling), captured in header source order.
 struct RawMacro {
     name: String,
-    tokens: Vec<(TokenKind, String)>,
+    tokens: Vec<Token>,
+}
+
+/// A function-like `#define NAME(params) body`. Not emitted as a constant, but
+/// kept so an object-like macro that *invokes* it with constant arguments can be
+/// expanded (e.g. `#define X DISPLAY(0)`).
+struct RawFnMacro {
+    params: Vec<String>,
+    body: Vec<Token>,
 }
 
 #[derive(Default)]
@@ -252,6 +263,8 @@ struct Collected {
     typedefs: Vec<String>,
     functions: Vec<String>,
     macros: Vec<RawMacro>,
+    /// Function-like macros by name, for constant-argument expansion.
+    fn_macros: BTreeMap<String, RawFnMacro>,
     /// `(name, value)` for every enumerator, in source order, for `const.php`.
     enum_constants: Vec<(String, i64)>,
 }
@@ -299,12 +312,13 @@ fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
     }
 }
 
-/// Record an object-like `#define`. Function-like and builtin macros, and any
-/// with no replacement (e.g. the empty `#define`s used to neutralise ABI
-/// macros), are skipped. The macro's own name is the first token, so the
-/// replacement is everything after it.
+/// Record a `#define`. Object-like macros become constant candidates; the body
+/// of a function-like macro is kept for constant-argument expansion. Builtin
+/// macros and object-like macros with no replacement (e.g. the empty `#define`s
+/// used to neutralise ABI macros) are skipped. The macro's own name is the first
+/// token, so everything after it is the parameter list and/or replacement.
 fn collect_macro(entity: &Entity<'_>, collected: &mut Collected) {
-    if entity.is_function_like_macro() || entity.is_builtin_macro() {
+    if entity.is_builtin_macro() {
         return;
     }
     let Some(name) = entity.get_name() else {
@@ -313,16 +327,51 @@ fn collect_macro(entity: &Entity<'_>, collected: &mut Collected) {
     let Some(range) = entity.get_range() else {
         return;
     };
-    let tokens: Vec<(TokenKind, String)> = range
+    let rest: Vec<Token> = range
         .tokenize()
         .iter()
         .map(|token| (token.get_kind(), token.get_spelling()))
         .skip_while(|(_, spelling)| spelling == &name)
         .collect();
-    if tokens.is_empty() {
+
+    if entity.is_function_like_macro() {
+        if let Some((params, body)) = split_fn_macro(&rest) {
+            collected
+                .fn_macros
+                .insert(name, RawFnMacro { params, body });
+        }
         return;
     }
-    collected.macros.push(RawMacro { name, tokens });
+
+    if rest.is_empty() {
+        return;
+    }
+    collected.macros.push(RawMacro { name, tokens: rest });
+}
+
+/// Split a function-like macro's post-name tokens (`( p1 , p2 ) body…`) into its
+/// parameter names and body tokens. Returns `None` if the leading parameter list
+/// is malformed.
+fn split_fn_macro(tokens: &[Token]) -> Option<(Vec<String>, Vec<Token>)> {
+    if tokens.first().map(|(_, spelling)| spelling.as_str()) != Some("(") {
+        return None;
+    }
+    let mut params = Vec::new();
+    let mut depth = 0usize;
+    for (index, (kind, spelling)) in tokens.iter().enumerate() {
+        match spelling.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((params, tokens[index + 1..].to_vec()));
+                }
+            }
+            _ if depth == 1 && *kind == TokenKind::Identifier => params.push(spelling.clone()),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
@@ -509,7 +558,9 @@ fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)
         {
             continue;
         }
-        if let Some(value) = translate_macro_value(&macro_def.tokens, &emitted) {
+        if let Some(value) =
+            translate_macro_value(&macro_def.tokens, &emitted, &collected.fn_macros)
+        {
             emitted.insert(macro_def.name.clone());
             constants.push((macro_def.name.clone(), value));
         }
@@ -518,24 +569,114 @@ fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)
     constants
 }
 
-/// Translate macro replacement tokens into a PHP constant expression, or `None`
-/// if any token is not a literal, an allowed arithmetic/bitwise operator, or a
-/// reference to an already-emitted constant.
+/// Bounds nested function-like-macro expansions.
+const MAX_MACRO_EXPANSION_DEPTH: usize = 16;
+
+/// Translate macro replacement tokens into a PHP constant expression, expanding
+/// any constant-argument calls to known function-like macros. Returns `None` on
+/// anything untranslatable.
 fn translate_macro_value(
-    tokens: &[(TokenKind, String)],
+    tokens: &[Token],
     emitted: &BTreeSet<String>,
+    fn_macros: &BTreeMap<String, RawFnMacro>,
 ) -> Option<String> {
-    let mut parts = Vec::with_capacity(tokens.len());
-    for (kind, spelling) in tokens {
-        let part = match kind {
-            TokenKind::Literal => translate_literal(spelling)?,
-            TokenKind::Punctuation if is_allowed_operator(spelling) => spelling.clone(),
-            TokenKind::Identifier if emitted.contains(spelling) => spelling.clone(),
+    expand_tokens(tokens, emitted, fn_macros, 0)
+}
+
+/// Render a token stream as a PHP constant expression. Literals/operators pass
+/// through; an identifier resolves to an already-emitted constant; an
+/// identifier *called* with constant arguments (`DISPLAY(0)`) is expanded by
+/// substituting into the known function-like macro's body. Anything else (char
+/// literals, unknown names, calls to non-macro functions, excessive nesting)
+/// yields `None`.
+fn expand_tokens(
+    tokens: &[Token],
+    emitted: &BTreeSet<String>,
+    fn_macros: &BTreeMap<String, RawFnMacro>,
+    depth: usize,
+) -> Option<String> {
+    if depth > MAX_MACRO_EXPANSION_DEPTH {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let (kind, spelling) = &tokens[index];
+        match kind {
+            TokenKind::Literal => {
+                parts.push(translate_literal(spelling)?);
+                index += 1;
+            }
+            TokenKind::Punctuation if is_allowed_operator(spelling) => {
+                parts.push(spelling.clone());
+                index += 1;
+            }
+            TokenKind::Identifier if tokens.get(index + 1).is_some_and(|(_, next)| next == "(") => {
+                let macro_def = fn_macros.get(spelling)?;
+                let (args, after) = parse_call_args(tokens, index + 1)?;
+                if args.len() != macro_def.params.len() {
+                    return None;
+                }
+                let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
+                let expanded = expand_tokens(&substituted, emitted, fn_macros, depth + 1)?;
+                parts.push(format!("({expanded})"));
+                index = after;
+            }
+            TokenKind::Identifier if emitted.contains(spelling) => {
+                parts.push(spelling.clone());
+                index += 1;
+            }
             _ => return None,
-        };
-        parts.push(part);
+        }
     }
     Some(parts.join(" "))
+}
+
+/// Parse a parenthesised, comma-separated argument list starting at the `(` at
+/// `open`. Returns each argument's tokens and the index just past the matching
+/// `)`, or `None` if the parentheses are unbalanced.
+fn parse_call_args(tokens: &[Token], open: usize) -> Option<(Vec<Vec<Token>>, usize)> {
+    let mut depth = 0usize;
+    let mut args: Vec<Vec<Token>> = Vec::new();
+    let mut current: Vec<Token> = Vec::new();
+    for (offset, token) in tokens[open..].iter().enumerate() {
+        match token.1.as_str() {
+            "(" => {
+                depth += 1;
+                if depth > 1 {
+                    current.push(token.clone());
+                }
+            }
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    if !current.is_empty() || !args.is_empty() {
+                        args.push(current);
+                    }
+                    return Some((args, open + offset + 1));
+                }
+                current.push(token.clone());
+            }
+            "," if depth == 1 => args.push(std::mem::take(&mut current)),
+            _ => current.push(token.clone()),
+        }
+    }
+    None
+}
+
+/// Replace each parameter identifier in a macro body with its argument's tokens.
+fn substitute_params(body: &[Token], params: &[String], args: &[Vec<Token>]) -> Vec<Token> {
+    let mut out = Vec::new();
+    for token in body {
+        if token.0 == TokenKind::Identifier
+            && let Some(position) = params.iter().position(|param| *param == token.1)
+        {
+            out.extend(args[position].iter().cloned());
+        } else {
+            out.push(token.clone());
+        }
+    }
+    out
 }
 
 /// PHP-compatible rendering of a single C literal token (`0x20`, `1u`, `1.5f`,
@@ -554,14 +695,15 @@ fn translate_literal(literal: &str) -> Option<String> {
 fn translate_number(literal: &str) -> Option<String> {
     let lower = literal.to_ascii_lowercase();
     if let Some(hex) = lower.strip_prefix("0x") {
+        // Validate on the lowercased form but keep the original digit case.
         let digits = hex.trim_end_matches(['u', 'l']);
         return (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| format!("0x{digits}"));
+            .then(|| format!("0x{}", &literal[2..2 + digits.len()]));
     }
     if let Some(binary) = lower.strip_prefix("0b") {
         let digits = binary.trim_end_matches(['u', 'l']);
         return (!digits.is_empty() && digits.bytes().all(|b| b == b'0' || b == b'1'))
-            .then(|| format!("0b{digits}"));
+            .then(|| format!("0b{}", &literal[2..2 + digits.len()]));
     }
     let trimmed = lower.trim_end_matches(['u', 'l', 'f']);
     if trimmed.is_empty()
@@ -723,6 +865,9 @@ mod tests {
         #define EX_NAME "example"
         #define EX_RATIO 1.5f
         #define EX_MAX(a, b) ((a) > (b) ? (a) : (b))
+        #define EX_POS_MASK 0x2FFF0000
+        #define EX_POS_DISPLAY(X) (EX_POS_MASK | (X))
+        #define EX_POS_CENTERED EX_POS_DISPLAY(0)
         typedef enum ex_color { EX_RED = 0, EX_GREEN, EX_BLUE } ex_color;
         typedef struct ex_point { int x; int y; } ex_point;
         typedef void (*ex_callback)(int code, void *user);
@@ -852,8 +997,14 @@ mod tests {
         assert_eq!(lookup("EX_NAME"), Some("\"example\""));
         assert_eq!(lookup("EX_RATIO"), Some("1.5"));
 
-        // Function-like macros cannot be translated to a PHP const.
+        // Function-like macros are not emitted as constants themselves …
         assert_eq!(lookup("EX_MAX"), None);
+        assert_eq!(lookup("EX_POS_DISPLAY"), None);
+        // … but an object-like macro that calls one with constant arguments is
+        // expanded by substituting the body (EX_POS_DISPLAY(0) → (MASK | (0))).
+        assert_eq!(lookup("EX_POS_MASK"), Some("0x2FFF0000"));
+        assert_eq!(lookup("EX_POS_CENTERED"), Some("(( EX_POS_MASK | ( 0 ) ))"));
+
         // Enum constants are emitted too, with their evaluated integer values.
         assert_eq!(lookup("EX_RED"), Some("0"));
         assert_eq!(lookup("EX_GREEN"), Some("1"));
