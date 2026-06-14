@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
+use clang::token::TokenKind;
 use clang::{Clang, Entity, EntityKind, Index, Linkage, TypeKind};
 
 /// libclang holds process-global state and the `clang` crate only permits a
@@ -23,15 +24,28 @@ pub struct HeaderAdapterOptions {
     pub symbol_prefix: String,
 }
 
+/// The two things extracted from a C header: the cdef text for PHP `FFI::cdef`,
+/// and the object-like `#define` constants worth surfacing as PHP `const`s.
+#[derive(Debug, Default)]
+pub struct HeaderArtifacts {
+    pub cdef: String,
+    /// `(name, php_value_expression)` pairs, in source order, for `const.php`.
+    pub constants: Vec<(String, String)>,
+}
+
 /// Translate a C header into a normalised cdef suitable for PHP `FFI::cdef`,
-/// keeping only the declarations whose names start with `symbol_prefix`.
+/// keeping only the declarations whose names contain `symbol_prefix`, and
+/// extract its object-like `#define` constants.
 ///
 /// Parsing is delegated to libclang; only declaration discovery and the
 /// FFI-specific re-emission are performed here.
-pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<String> {
+pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<HeaderArtifacts> {
     let prefix = options.symbol_prefix.trim();
     if prefix.is_empty() {
-        return Ok(header.to_owned());
+        return Ok(HeaderArtifacts {
+            cdef: header.to_owned(),
+            constants: Vec::new(),
+        });
     }
 
     let _guard = CLANG_GUARD
@@ -43,7 +57,10 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let prelude_path = workspace.write("prelude.h", PRELUDE)?;
 
     let collected = parse_with_neutralized_macros(&index, &workspace, &prelude_path, header)?;
-    Ok(render(&collected, prefix))
+    Ok(HeaderArtifacts {
+        cdef: render(&collected, prefix),
+        constants: macro_constants(&collected.macros, prefix),
+    })
 }
 
 /// Parse the header, neutralising the ABI/attribute macros (e.g. `DECLSPEC`,
@@ -67,6 +84,10 @@ fn parse_with_neutralized_macros(
         "c",
         "-std=c11",
         "-ferror-limit=0",
+        // Keep `#define`s in the AST as MacroDefinition cursors so object-like
+        // constant macros can be re-emitted as PHP `const`s.
+        "-Xclang",
+        "-detailed-preprocessing-record",
         "-include",
         prelude_path.to_str().context("prelude path is not UTF-8")?,
     ];
@@ -217,12 +238,20 @@ fn unknown_type_name(message: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// An object-like `#define` macro: its name and replacement tokens (kind +
+/// spelling), captured in header source order.
+struct RawMacro {
+    name: String,
+    tokens: Vec<(TokenKind, String)>,
+}
+
 #[derive(Default)]
 struct Collected {
     structs: BTreeMap<String, String>,
     enums: BTreeSet<String>,
     typedefs: Vec<String>,
     functions: Vec<String>,
+    macros: Vec<RawMacro>,
 }
 
 fn collect(translation_unit: &Entity<'_>) -> Collected {
@@ -242,6 +271,7 @@ fn collect(translation_unit: &Entity<'_>) -> Collected {
                 }
             }
             EntityKind::TypedefDecl => collect_typedef(&entity, &mut collected),
+            EntityKind::MacroDefinition => collect_macro(&entity, &mut collected),
             _ => {}
         }
     }
@@ -251,6 +281,32 @@ fn collect(translation_unit: &Entity<'_>) -> Collected {
     collected.typedefs.sort();
     collected.typedefs.dedup();
     collected
+}
+
+/// Record an object-like `#define`. Function-like and builtin macros, and any
+/// with no replacement (e.g. the empty `#define`s used to neutralise ABI
+/// macros), are skipped. The macro's own name is the first token, so the
+/// replacement is everything after it.
+fn collect_macro(entity: &Entity<'_>, collected: &mut Collected) {
+    if entity.is_function_like_macro() || entity.is_builtin_macro() {
+        return;
+    }
+    let Some(name) = entity.get_name() else {
+        return;
+    };
+    let Some(range) = entity.get_range() else {
+        return;
+    };
+    let tokens: Vec<(TokenKind, String)> = range
+        .tokenize()
+        .iter()
+        .map(|token| (token.get_kind(), token.get_spelling()))
+        .skip_while(|(_, spelling)| spelling == &name)
+        .collect();
+    if tokens.is_empty() {
+        return;
+    }
+    collected.macros.push(RawMacro { name, tokens });
 }
 
 fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
@@ -411,6 +467,93 @@ fn typedef_declaration(name: &str, underlying: &str) -> String {
     }
 }
 
+/// Translate the prefix-matching object-like macros into `(name, php_value)`
+/// pairs, keeping only those whose replacement is a constant expression PHP can
+/// evaluate. A single forward pass over the source-ordered macros lets a later
+/// macro reference an already-emitted one by name (e.g. composite flag masks),
+/// while anything untranslatable (casts, char literals, calls, unknown names) is
+/// silently dropped.
+fn macro_constants(macros: &[RawMacro], prefix: &str) -> Vec<(String, String)> {
+    let needle = prefix.to_ascii_lowercase();
+    let mut emitted = BTreeSet::new();
+    let mut constants = Vec::new();
+    for macro_def in macros {
+        if !macro_def.name.to_ascii_lowercase().contains(&needle) {
+            continue;
+        }
+        if let Some(value) = translate_macro_value(&macro_def.tokens, &emitted) {
+            emitted.insert(macro_def.name.clone());
+            constants.push((macro_def.name.clone(), value));
+        }
+    }
+    constants
+}
+
+/// Translate macro replacement tokens into a PHP constant expression, or `None`
+/// if any token is not a literal, an allowed arithmetic/bitwise operator, or a
+/// reference to an already-emitted constant.
+fn translate_macro_value(
+    tokens: &[(TokenKind, String)],
+    emitted: &BTreeSet<String>,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(tokens.len());
+    for (kind, spelling) in tokens {
+        let part = match kind {
+            TokenKind::Literal => translate_literal(spelling)?,
+            TokenKind::Punctuation if is_allowed_operator(spelling) => spelling.clone(),
+            TokenKind::Identifier if emitted.contains(spelling) => spelling.clone(),
+            _ => return None,
+        };
+        parts.push(part);
+    }
+    Some(parts.join(" "))
+}
+
+/// PHP-compatible rendering of a single C literal token (`0x20`, `1u`, `1.5f`,
+/// `"text"`). Char literals and anything unrecognised yield `None`.
+fn translate_literal(literal: &str) -> Option<String> {
+    match literal.chars().next()? {
+        '"' => Some(literal.to_owned()),
+        '\'' => None,
+        _ => translate_number(literal),
+    }
+}
+
+/// Strip C integer/float suffixes and validate the remaining numeric literal so
+/// PHP reads the same value. Hex/binary keep their `0x`/`0b` prefix; the `f`/`F`
+/// hex digits are never mistaken for a float suffix.
+fn translate_number(literal: &str) -> Option<String> {
+    let lower = literal.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        let digits = hex.trim_end_matches(['u', 'l']);
+        return (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| format!("0x{digits}"));
+    }
+    if let Some(binary) = lower.strip_prefix("0b") {
+        let digits = binary.trim_end_matches(['u', 'l']);
+        return (!digits.is_empty() && digits.bytes().all(|b| b == b'0' || b == b'1'))
+            .then(|| format!("0b{digits}"));
+    }
+    let trimmed = lower.trim_end_matches(['u', 'l', 'f']);
+    if trimmed.is_empty()
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'+' | b'-'))
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// Operators safe to pass through verbatim into a PHP constant expression (they
+/// have the same meaning and precedence as in C).
+fn is_allowed_operator(token: &str) -> bool {
+    matches!(
+        token,
+        "(" | ")" | "+" | "-" | "*" | "/" | "%" | "<<" | ">>" | "&" | "|" | "^" | "~"
+    )
+}
+
 fn render(collected: &Collected, prefix: &str) -> String {
     let typedefs = collected
         .typedefs
@@ -527,9 +670,9 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeaderAdapterOptions, cdef_from_header};
+    use super::{HeaderAdapterOptions, HeaderArtifacts, cdef_from_header};
 
-    fn cdef(header: &str) -> String {
+    fn artifacts(header: &str) -> HeaderArtifacts {
         cdef_from_header(
             header,
             &HeaderAdapterOptions {
@@ -539,8 +682,18 @@ mod tests {
         .expect("libclang must be available to run header_adapter tests")
     }
 
+    fn cdef(header: &str) -> String {
+        artifacts(header).cdef
+    }
+
     const HEADER: &str = r#"
         /* example device library */
+        #define EX_FLAG_A 0x01
+        #define EX_FLAG_B (1 << 1)
+        #define EX_FLAGS (EX_FLAG_A | EX_FLAG_B)
+        #define EX_NAME "example"
+        #define EX_RATIO 1.5f
+        #define EX_MAX(a, b) ((a) > (b) ? (a) : (b))
         typedef enum ex_color { EX_RED = 0, EX_GREEN, EX_BLUE } ex_color;
         typedef struct ex_point { int x; int y; } ex_point;
         typedef void (*ex_callback)(int code, void *user);
@@ -623,7 +776,8 @@ mod tests {
                 symbol_prefix: "ex_".to_owned(),
             },
         )
-        .unwrap();
+        .unwrap()
+        .cdef;
 
         assert!(
             cdef.contains("struct ex_bind { int kind; union { int button; int axis; } value; };"),
@@ -648,6 +802,30 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(out, "int whatever(void);");
+        assert_eq!(out.cdef, "int whatever(void);");
+        assert!(out.constants.is_empty());
+    }
+
+    #[test]
+    fn extracts_translatable_object_like_macros() {
+        let constants = artifacts(HEADER).constants;
+        let lookup = |name: &str| {
+            constants
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+
+        // Integer, hex, shift, and a composite that references earlier constants.
+        assert_eq!(lookup("EX_FLAG_A"), Some("0x01"));
+        assert_eq!(lookup("EX_FLAG_B"), Some("( 1 << 1 )"));
+        assert_eq!(lookup("EX_FLAGS"), Some("( EX_FLAG_A | EX_FLAG_B )"));
+        assert_eq!(lookup("EX_NAME"), Some("\"example\""));
+        assert_eq!(lookup("EX_RATIO"), Some("1.5"));
+
+        // Function-like macros cannot be translated to a PHP const.
+        assert_eq!(lookup("EX_MAX"), None);
+        // Enum constants are emitted via the enum projection, not as macros.
+        assert_eq!(lookup("EX_RED"), None);
     }
 }

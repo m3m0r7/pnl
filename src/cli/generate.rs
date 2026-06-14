@@ -25,6 +25,7 @@ const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/ma
 const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
 const TYPE_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/types.php.tpl");
+const CONST_TEMPLATE: &str = include_str!("templates/package/src/generated/const.php.tpl");
 const AUTOLOAD_TEMPLATE: &str = include_str!("templates/workspace/autoload.php.tpl");
 const IDE_HELPER_TEMPLATE: &str = include_str!("templates/workspace/ide-helper.php.tpl");
 const INDEX_TEMPLATE: &str = include_str!("templates/package/src/generated/index.php.tpl");
@@ -113,6 +114,31 @@ pub fn generate_exception_php(out: &Path, options: &PhpPackageTemplateOptions<'_
 
 pub fn generate_index_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
     write_template(out, INDEX_TEMPLATE, options, false, false)
+}
+
+/// Generate `const.php`: the object-like `#define` constants from the header,
+/// emitted as namespaced PHP `const`s (referenceable as `\<Namespace>\<NAME>`).
+/// `constants` is `(name, php_value_expression)` pairs in source order.
+pub fn generate_const_php(
+    out: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    constants: &[(String, String)],
+) -> Result<()> {
+    let mut context = generated_template_context();
+    context.insert(
+        "NAMESPACE".to_owned(),
+        Value::String(options.namespace.to_owned()),
+    );
+    context.insert(
+        "constants".to_owned(),
+        Value::Array(
+            constants
+                .iter()
+                .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+                .collect(),
+        ),
+    );
+    write_generated(out, render_handlebars(CONST_TEMPLATE, context)?)
 }
 
 /// Generate the per-package pointer wrappers into `dir` (`src/generated/types/`),

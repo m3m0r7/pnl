@@ -23,6 +23,9 @@ require_once __DIR__ . '/{{CLASS}}Manifest.php';
 require_once __DIR__ . '/{{CLASS}}Context.php';
 require_once __DIR__ . '/{{CLASS}}Exception.php';
 
+// Object-like #define constants from the C header, as namespaced PHP consts.
+require_once __DIR__ . '/const.php';
+
 // The per-C-type pointer wrappers, one class per file under types/.
 foreach (glob(__DIR__ . '/types/*.php') ?: [] as $typeFile) {
     require_once $typeFile;

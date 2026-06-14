@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 use crate::commands::pnl::build_installed_bridges;
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_bridge_ffi_php, generate_bridge_rs,
-    generate_context_php, generate_entity_php, generate_exception_php, generate_functions_php,
-    generate_index_php, generate_manifest_php, generate_types_php, parse_function_signatures,
+    generate_const_php, generate_context_php, generate_entity_php, generate_exception_php,
+    generate_functions_php, generate_index_php, generate_manifest_php, generate_types_php,
+    parse_function_signatures,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
@@ -202,10 +203,10 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     let generated_dir = args.generated_dir;
     let class_name = args.class_name;
     let out = generated_dir.join(format!("{}.ffi.php", args.artifact_stem));
-    let cdef = if args.headers.is_empty() {
-        read_existing_ffi_cdef(&out)?
+    let (cdef, constants) = if args.headers.is_empty() {
+        (read_existing_ffi_cdef(&out)?, Vec::new())
     } else {
-        cdef_from_header(
+        let artifacts = cdef_from_header(
             &read_headers(args.headers)?,
             &HeaderAdapterOptions {
                 symbol_prefix: args
@@ -213,7 +214,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                     .clone()
                     .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
             },
-        )?
+        )?;
+        (artifacts.cdef, artifacts.constants)
     };
     let signatures = parse_function_signatures(&cdef);
     generate_bridge_ffi_php(&signatures, &out)?;
@@ -268,6 +270,11 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
             )?;
         }
     }
+    generate_const_php(
+        &generated_dir.join("const.php"),
+        &template_options,
+        &constants,
+    )?;
     generate_index_php(&generated_dir.join("index.php"), &template_options)?;
     generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
     generate_aliases_php(&generated_dir.join("function.aliases.php"), &signatures)?;
