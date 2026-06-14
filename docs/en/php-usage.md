@@ -70,39 +70,36 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// The extension builds its own runtime; metadata is reachable straight off it.
-$libusb = new Libusb();
-
-// Read package metadata and the compiled bridge path. The same values are also
-// available as method calls: $libusb->manifest->name(), ->version(), ->path().
-printf("extension: %s %s\n", $libusb->name, $libusb->version);
-printf("bridge: %s\n", $libusb->path);
-printf("error name for 0: %s\n", $libusb->libusb_error_name(0));
-printf("strerror for 0: %s\n", $libusb->libusbStrerror(0));
+// Metadata is published onto the entity's static properties when it boots
+// (the first static call below boots it).
+printf("extension: %s %s\n", Libusb::$name, Libusb::$version);
+printf("bridge: %s\n", Libusb::$path);
+printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
+printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 
 // Initialize libusb with the default context.
-$result = $libusb->libusbInit(null);
-printf("libusb_init: %d (%s)\n", $result, $libusb->libusbErrorName($result));
+$result = Libusb::libusbInit(null);
+printf("libusb_init: %d (%s)\n", $result, Libusb::libusbErrorName($result));
 
 if ($result === 0) {
     // Allocate void *[1] without exposing raw FFI::new() to user code.
     $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
 
     // libusb writes the device-list pointer into $deviceList[0].
-    $deviceCount = $libusb->libusbGetDeviceList(null, $deviceList);
+    $deviceCount = Libusb::libusbGetDeviceList(null, $deviceList);
 
     if ($deviceCount < 0) {
         // Negative values are libusb error codes.
-        printf("device count: failed (%s)\n", $libusb->libusbErrorName($deviceCount));
+        printf("device count: failed (%s)\n", Libusb::libusbErrorName($deviceCount));
     } else {
         printf("device count: %d\n", $deviceCount);
 
         // Release the device list returned by libusb_get_device_list().
-        $libusb->libusbFreeDeviceList($deviceList[0], 1);
+        Libusb::libusbFreeDeviceList($deviceList[0], 1);
     }
 
     // Shut down the default libusb context.
-    $libusb->libusbExit(null);
+    Libusb::libusbExit(null);
     echo "libusb_exit: ok\n";
 }
 ```
@@ -145,9 +142,8 @@ use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 // so it is not generated — define it by hand.
 const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
 
-// Just `new` the generated SDL object; it loads its own bridge.
-// Use methods like SDL_Init() and SDL_CreateWindow().
-$sdl = new Libsdl();
+// Call SDL statically, e.g. Libsdl::SDL_Init() / Libsdl::SDL_CreateWindow();
+// the first call boots the extension automatically.
 
 // A tiny 5x7 bitmap font for the characters in "Hello World!".
 // '1' marks a lit pixel; rows are top-to-bottom.
@@ -170,14 +166,14 @@ $initialized = false;
 
 try {
     // Start SDL's video subsystem.
-    $result = $sdl->SDL_Init(SDL_INIT_VIDEO);
+    $result = Libsdl::SDL_Init(SDL_INIT_VIDEO);
     if ($result !== 0) {
-        throw new RuntimeException('SDL_Init failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_Init failed: ' . Libsdl::SDL_GetError());
     }
     $initialized = true;
 
     // Create a window and a renderer to draw into it.
-    $window = $sdl->SDL_CreateWindow(
+    $window = Libsdl::SDL_CreateWindow(
         'Hello World!',
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
@@ -187,21 +183,21 @@ try {
     );
     if (is_null($window)) {
         // is_null() hides the raw FFI::isNull() check.
-        throw new RuntimeException('SDL_CreateWindow failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_CreateWindow failed: ' . Libsdl::SDL_GetError());
     }
 
-    $renderer = $sdl->SDL_CreateRenderer($window, -1, 0);
+    $renderer = Libsdl::SDL_CreateRenderer($window, -1, 0);
     if (is_null($renderer)) {
-        throw new RuntimeException('SDL_CreateRenderer failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_CreateRenderer failed: ' . Libsdl::SDL_GetError());
     }
 
     // Clear to a dark background.
-    $sdl->SDL_SetRenderDrawColor($renderer, 0x1E, 0x1E, 0x1E, 0xFF);
-    $sdl->SDL_RenderClear($renderer);
+    Libsdl::SDL_SetRenderDrawColor($renderer, 0x1E, 0x1E, 0x1E, 0xFF);
+    Libsdl::SDL_RenderClear($renderer);
 
     // Draw "Hello World!" in the window, scaling each font pixel into a block.
     // SDL_RenderDrawPoint takes only integers, so no FFI structs are needed.
-    $sdl->SDL_SetRenderDrawColor($renderer, 0xFF, 0xFF, 0xFF, 0xFF);
+    Libsdl::SDL_SetRenderDrawColor($renderer, 0xFF, 0xFF, 0xFF, 0xFF);
     $scale = 6;
     $x = 70;
     $y = 150;
@@ -214,7 +210,7 @@ try {
                 }
                 for ($dy = 0; $dy < $scale; $dy++) {
                     for ($dx = 0; $dx < $scale; $dx++) {
-                        $sdl->SDL_RenderDrawPoint($renderer, $x + $col * $scale + $dx, $y + $row * $scale + $dy);
+                        Libsdl::SDL_RenderDrawPoint($renderer, $x + $col * $scale + $dx, $y + $row * $scale + $dy);
                     }
                 }
             }
@@ -223,24 +219,24 @@ try {
     }
 
     // Present the frame and keep the window up briefly while pumping events.
-    $sdl->SDL_RenderPresent($renderer);
+    Libsdl::SDL_RenderPresent($renderer);
     $until = microtime(true) + 3.0;
     while (microtime(true) < $until) {
-        $sdl->SDL_PumpEvents();
-        $sdl->SDL_Delay(16);
+        Libsdl::SDL_PumpEvents();
+        Libsdl::SDL_Delay(16);
     }
 } finally {
     if (!is_null($renderer)) {
-        $sdl->SDL_DestroyRenderer($renderer);
+        Libsdl::SDL_DestroyRenderer($renderer);
     }
     // Destroy the window if creation succeeded.
     if (!is_null($window)) {
-        $sdl->SDL_DestroyWindow($window);
+        Libsdl::SDL_DestroyWindow($window);
     }
 
     // Quit SDL only if initialization succeeded.
     if ($initialized) {
-        $sdl->SDL_Quit();
+        Libsdl::SDL_Quit();
     }
 }
 ```
@@ -388,7 +384,6 @@ try {
     }
 }
 ```
-
 
 ## Generated Files
 

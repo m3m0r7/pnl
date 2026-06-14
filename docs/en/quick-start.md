@@ -29,11 +29,10 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libc\Libc;
 
-// The extension instantiates its own runtime — just `new`.
-$libc = new Libc();
-
-$libc->printf("Hello, World from libc!\n");
-$libc->puts("And this line is printed by libc puts.");
+// A C library is a bag of functions, so entities are called statically —
+// no instantiation. The first call boots the extension automatically.
+Libc::printf("Hello, World from libc!\n");
+Libc::puts("And this line is printed by libc puts.");
 ```
 
 ```sh

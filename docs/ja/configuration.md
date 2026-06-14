@@ -203,4 +203,4 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 }
 ```
 
-有効にすると、生成されたパッケージの入口が、同名の関数がまだ無いときに限り `\Pnlx\Func\Libusb\libusb_init()` のように `\Pnlx\Func\<Class>`（パッケージごとに1セグメント）配下へ関数を定義します。完全修飾で呼ぶか、`use function Pnlx\Func\Libusb\libusb_init;` で読み込んでから `libusb_init()` と呼びます。名前空間に置くことでグローバル名前空間を汚しません。無効の場合は、`new <Class>()` で生成したエンティティオブジェクトのメソッドとして呼び出します。
+有効にすると、生成されたパッケージの入口が、同名の関数がまだ無いときに限り `\Pnlx\Func\Libusb\libusb_init()` のように `\Pnlx\Func\<Class>`（パッケージごとに1セグメント）配下へ関数を定義します。完全修飾で呼ぶか、`use function Pnlx\Func\Libusb\libusb_init;` で読み込んでから `libusb_init()` と呼びます。名前空間に置くことでグローバル名前空間を汚しません。無効の場合は、エンティティクラスの static メソッドとして直接呼び出します（`<Class>::libusb_init()`）。

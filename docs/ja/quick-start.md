@@ -29,11 +29,10 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libc\Libc;
 
-// 拡張は自前の runtime を生成するので `new` するだけ。
-$libc = new Libc();
-
-$libc->printf("Hello, World from libc!\n");
-$libc->puts("And this line is printed by libc puts.");
+// C ライブラリは関数の集まりなので、エンティティは static に呼びます（インスタンス化なし）。
+// 最初の呼び出しで拡張が自動 boot します。
+Libc::printf("Hello, World from libc!\n");
+Libc::puts("And this line is printed by libc puts.");
 ```
 
 ```sh

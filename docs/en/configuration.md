@@ -203,4 +203,4 @@ Example of global-function mode:
 }
 ```
 
-When enabled, a generated package entrypoint defines namespaced functions under `\Pnlx\Func\<Class>` (one segment per package), such as `\Pnlx\Func\Libusb\libusb_init()` — but only when no function of that name already exists. Call them fully qualified, or import them with `use function Pnlx\Func\Libusb\libusb_init;` and then call `libusb_init()`. Keeping them under a namespace avoids clobbering the global namespace. When disabled, you call methods on the entity object you instantiated with `new <Class>()` instead.
+When enabled, a generated package entrypoint defines namespaced functions under `\Pnlx\Func\<Class>` (one segment per package), such as `\Pnlx\Func\Libusb\libusb_init()` — but only when no function of that name already exists. Call them fully qualified, or import them with `use function Pnlx\Func\Libusb\libusb_init;` and then call `libusb_init()`. Keeping them under a namespace avoids clobbering the global namespace. When disabled, you call the static methods on the entity class directly (`<Class>::libusb_init()`) instead.

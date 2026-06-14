@@ -64,39 +64,36 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// 拡張は自前の runtime を構築します。メタ情報はそのまま参照できます。
-$libusb = new Libusb();
-
-// パッケージのメタ情報と、コンパイル済み bridge のパスを取得します。同じ値は
-// メソッド呼び出しでも取れます: $libusb->manifest->name(), ->version(), ->path()。
-printf("extension: %s %s\n", $libusb->name, $libusb->version);
-printf("bridge: %s\n", $libusb->path);
-printf("error name for 0: %s\n", $libusb->libusb_error_name(0));
-printf("strerror for 0: %s\n", $libusb->libusbStrerror(0));
+// メタ情報は boot 時にエンティティの static プロパティへ格納されます
+// （下の最初の static 呼び出しで boot します）。
+printf("extension: %s %s\n", Libusb::$name, Libusb::$version);
+printf("bridge: %s\n", Libusb::$path);
+printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
+printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 
 // 既定のコンテキストで libusb を初期化します。
-$result = $libusb->libusbInit(null);
-printf("libusb_init: %d (%s)\n", $result, $libusb->libusbErrorName($result));
+$result = Libusb::libusbInit(null);
+printf("libusb_init: %d (%s)\n", $result, Libusb::libusbErrorName($result));
 
 if ($result === 0) {
     // 生の FFI::new() を使わずに void *[1] を確保します。
     $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
 
     // libusb がデバイス一覧のポインタを $deviceList[0] に書き込みます。
-    $deviceCount = $libusb->libusbGetDeviceList(null, $deviceList);
+    $deviceCount = Libusb::libusbGetDeviceList(null, $deviceList);
 
     if ($deviceCount < 0) {
         // 負の値は libusb のエラーコードです。
-        printf("device count: failed (%s)\n", $libusb->libusbErrorName($deviceCount));
+        printf("device count: failed (%s)\n", Libusb::libusbErrorName($deviceCount));
     } else {
         printf("device count: %d\n", $deviceCount);
 
         // libusb_get_device_list() が返したデバイス一覧を解放します。
-        $libusb->libusbFreeDeviceList($deviceList[0], 1);
+        Libusb::libusbFreeDeviceList($deviceList[0], 1);
     }
 
     // 既定の libusb コンテキストを終了します。
-    $libusb->libusbExit(null);
+    Libusb::libusbExit(null);
     echo "libusb_exit: ok\n";
 }
 ```
@@ -139,9 +136,8 @@ use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 // 生成されません。手書きで定義します。
 const SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
 
-// 生成済みの SDL オブジェクトを `new` するだけ。自前で bridge を読み込みます。
-// SDL_Init() や SDL_CreateWindow() などのメソッドを使います。
-$sdl = new Libsdl();
+// SDL は static に呼びます（例: Libsdl::SDL_Init() / Libsdl::SDL_CreateWindow()）。
+// 最初の呼び出しで拡張が自動 boot します。
 
 // "Hello World!" に使う文字用の小さな 5x7 ビットマップフォント。
 // '1' が点灯ピクセル、行は上から下です。
@@ -164,14 +160,14 @@ $initialized = false;
 
 try {
     // SDL のビデオサブシステムを起動します。
-    $result = $sdl->SDL_Init(SDL_INIT_VIDEO);
+    $result = Libsdl::SDL_Init(SDL_INIT_VIDEO);
     if ($result !== 0) {
-        throw new RuntimeException('SDL_Init failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_Init failed: ' . Libsdl::SDL_GetError());
     }
     $initialized = true;
 
     // ウィンドウと、それに描画するためのレンダラを作ります。
-    $window = $sdl->SDL_CreateWindow(
+    $window = Libsdl::SDL_CreateWindow(
         'Hello World!',
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
@@ -181,21 +177,21 @@ try {
     );
     if (is_null($window)) {
         // is_null() が生の FFI::isNull() チェックを隠してくれます。
-        throw new RuntimeException('SDL_CreateWindow failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_CreateWindow failed: ' . Libsdl::SDL_GetError());
     }
 
-    $renderer = $sdl->SDL_CreateRenderer($window, -1, 0);
+    $renderer = Libsdl::SDL_CreateRenderer($window, -1, 0);
     if (is_null($renderer)) {
-        throw new RuntimeException('SDL_CreateRenderer failed: ' . $sdl->SDL_GetError());
+        throw new RuntimeException('SDL_CreateRenderer failed: ' . Libsdl::SDL_GetError());
     }
 
     // 背景を暗い色でクリアします。
-    $sdl->SDL_SetRenderDrawColor($renderer, 0x1E, 0x1E, 0x1E, 0xFF);
-    $sdl->SDL_RenderClear($renderer);
+    Libsdl::SDL_SetRenderDrawColor($renderer, 0x1E, 0x1E, 0x1E, 0xFF);
+    Libsdl::SDL_RenderClear($renderer);
 
     // 各フォントピクセルをブロックに拡大して、ウィンドウ内に "Hello World!" を描きます。
     // SDL_RenderDrawPoint は整数のみを取るため、FFI 構造体は不要です。
-    $sdl->SDL_SetRenderDrawColor($renderer, 0xFF, 0xFF, 0xFF, 0xFF);
+    Libsdl::SDL_SetRenderDrawColor($renderer, 0xFF, 0xFF, 0xFF, 0xFF);
     $scale = 6;
     $x = 70;
     $y = 150;
@@ -208,7 +204,7 @@ try {
                 }
                 for ($dy = 0; $dy < $scale; $dy++) {
                     for ($dx = 0; $dx < $scale; $dx++) {
-                        $sdl->SDL_RenderDrawPoint($renderer, $x + $col * $scale + $dx, $y + $row * $scale + $dy);
+                        Libsdl::SDL_RenderDrawPoint($renderer, $x + $col * $scale + $dx, $y + $row * $scale + $dy);
                     }
                 }
             }
@@ -217,24 +213,24 @@ try {
     }
 
     // フレームを表示し、イベントを処理しながら少しの間ウィンドウを表示し続けます。
-    $sdl->SDL_RenderPresent($renderer);
+    Libsdl::SDL_RenderPresent($renderer);
     $until = microtime(true) + 3.0;
     while (microtime(true) < $until) {
-        $sdl->SDL_PumpEvents();
-        $sdl->SDL_Delay(16);
+        Libsdl::SDL_PumpEvents();
+        Libsdl::SDL_Delay(16);
     }
 } finally {
     if (!is_null($renderer)) {
-        $sdl->SDL_DestroyRenderer($renderer);
+        Libsdl::SDL_DestroyRenderer($renderer);
     }
     // ウィンドウの作成に成功していれば破棄します。
     if (!is_null($window)) {
-        $sdl->SDL_DestroyWindow($window);
+        Libsdl::SDL_DestroyWindow($window);
     }
 
     // 初期化に成功していた場合だけ SDL を終了します。
     if ($initialized) {
-        $sdl->SDL_Quit();
+        Libsdl::SDL_Quit();
     }
 }
 ```
@@ -382,7 +378,6 @@ try {
     }
 }
 ```
-
 
 ## 生成されるファイル
 
