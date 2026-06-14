@@ -29,18 +29,7 @@ pnl list 'lib*'      # インストール済みを確認
 - [PHP からの使い方](docs/ja/php-usage.md) — 拡張の読み込みと生成されるファイル。
 - [開発](docs/ja/development.md) — 検証・テスト・JSON スキーマ。
 
-既定のパッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl find` はクローンせずに一覧できます。リポジトリは短いエイリアス（例: `sdl` → `libsdl`）も公開でき、`pnl install sdl` は参照先のパッケージへ解決されます。
-
-既定のエンドポイント（上記のパッケージレジストリと、pnl 自身のリリース元リポジトリ）はビルド時に `config.toml` からバイナリへ埋め込まれます。プロジェクトごとに `pnl.json` で上書きできます。
-
-```json
-{
-  "config": {
-    "self_repository": "https://github.com/acme/pnl",
-    "packages_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
-  }
-}
-```
+既定のパッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl find` はクローンせずに一覧できます。リポジトリは短いエイリアス（例: `sdl` → `libsdl`）も公開でき、`pnl install sdl` は参照先のパッケージへ解決されます。組み込みのエンドポイントはプロジェクトごとに上書きできます — [設定](docs/ja/configuration.md) を参照してください。
 
 生成される PHP SDK は専用のオートローダ（`@pnlx/autoload.php`）で自分自身を読み込むため、実行時に Composer のオートローダを必要としません。
 

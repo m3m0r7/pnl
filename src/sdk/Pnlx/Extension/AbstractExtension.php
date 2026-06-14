@@ -96,6 +96,14 @@ abstract class AbstractExtension
     private static function boot(): void
     {
         $runtime = new Runtime();
+
+        // Resolve the scalar-args feature here, where the project root is known,
+        // and hand it to the (collision-safe, fully-qualified) marshaller.
+        \Pnlx\FFI\ArgumentMarshaller::rememberScalarsAllowed(
+            static::class,
+            Runtime::useScalarsInParams($runtime->projectRoot()),
+        );
+
         $manifest = $runtime->loadManifest(static::class);
         if (!is_file($manifest->path())) {
             throw new ExtensionLoadException('an extension cannot be loaded');

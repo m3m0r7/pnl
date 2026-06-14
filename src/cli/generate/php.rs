@@ -7,7 +7,16 @@ use super::names::method_names;
 use super::types::{HELPERS_NS, ValueKind, fits_php_scalar, value_kind};
 use super::{FunctionParam, FunctionSignature, PhpPackageTemplateOptions};
 
-/// A generated entity method, with everything the template needs to emit it.
+/// One native-dispatch argument: the template marshals it with `unwrap` (a
+/// pointer) or `scalarArg` (a scalar).
+#[derive(Debug, Serialize)]
+struct ArgView {
+    name: String,
+    is_pointer: bool,
+}
+
+/// A generated entity method. The template builds the body from these fields;
+/// exactly one of the `is_*` return-kind flags is set.
 #[derive(Debug, Serialize)]
 struct MethodView {
     /// The public method name (with `--function-prefix` applied).
@@ -19,8 +28,21 @@ struct MethodView {
     params: String,
     /// The method's PHP return type.
     return_type: String,
-    /// The full method body statement (already unwraps args and wraps the result).
-    body: String,
+    /// The C symbol dispatched through `static::__callStatic('...', [...])`.
+    call_name: String,
+    /// The marshalled arguments passed to the dispatch.
+    args: Vec<ArgView>,
+    /// `void`: no return, just dispatch.
+    is_void: bool,
+    /// A `string` return: the native cdef value is a C string.
+    is_string: bool,
+    /// Whether the value comes back wrapped (`String_`) or native (the `scalar/`
+    /// variant); only meaningful with `is_string`.
+    native_string: bool,
+    /// A native `(int)`/`(float)` cast return (the `scalar/` variant).
+    cast: Option<&'static str>,
+    /// A `return new <new_class>(...)` return (wrapped scalar or pointer wrapper).
+    new_class: Option<String>,
 }
 
 /// A generated global helper function.
@@ -141,45 +163,37 @@ fn method_view(
     native: bool,
 ) -> MethodView {
     // Arguments are marshalled by `\Pnlx\FFI\ArgumentMarshaller` (a static call, so
-    // a C function named `unwrap`/`scalarArg` can't shadow it): scalars enforce
-    // `use_php_scalars_in_params` at runtime, pointers just unwrap.
+    // a C function named `unwrap`/`scalarArg` can't shadow it): pointers `unwrap`,
+    // scalars `scalarArg` (which enforces `use_php_scalars_in_params`).
     let args = signature
         .params
         .iter()
-        .map(|param| match value_kind(&param.type_name) {
-            ValueKind::Pointer(_) | ValueKind::Void => {
-                format!("\\Pnlx\\FFI\\ArgumentMarshaller::unwrap(${})", param.name)
-            }
-            _ => format!(
-                "\\Pnlx\\FFI\\ArgumentMarshaller::scalarArg(${})",
-                param.name
+        .map(|param| ArgView {
+            name: param.name.clone(),
+            is_pointer: matches!(
+                value_kind(&param.type_name),
+                ValueKind::Pointer(_) | ValueKind::Void
             ),
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Native dispatch goes through the magic `__callStatic` (which a C function can
-    // never be named), so nothing on the entity can shadow it.
-    let call = format!("static::__callStatic('{name}', [{args}])");
+        .collect();
+
     let kind = value_kind(&signature.return_type);
-    let body = match &kind {
-        ValueKind::Void => format!("{call};"),
-        ValueKind::Str if native => format!("return \\Pnlx\\Util::cString({call});"),
-        ValueKind::Str => {
-            format!("return new {HELPERS_NS}\\String_(\\Pnlx\\Util::cString({call}));")
+    // The template builds `return new <new_class>(...)` for wrapped scalars and
+    // pointer wrappers; the other cases are flagged directly.
+    let new_class = match &kind {
+        ValueKind::Int(wrapper) | ValueKind::Float(wrapper)
+            if !(native && fits_php_scalar(wrapper)) =>
+        {
+            Some(format!("{HELPERS_NS}\\{}", wrapper.class))
         }
-        ValueKind::Int(wrapper) if native && fits_php_scalar(wrapper) => {
-            format!("return (int) {call};")
-        }
-        ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => {
-            format!("return (float) {call};")
-        }
-        ValueKind::Int(wrapper) | ValueKind::Float(wrapper) => {
-            format!("return new {HELPERS_NS}\\{}({call});", wrapper.class)
-        }
-        ValueKind::Pointer(Some(class)) => {
-            format!("return new {}\\{class}({call});", types_ns(options))
-        }
-        ValueKind::Pointer(None) => format!("return new {}({call});", base_context(options)),
+        ValueKind::Pointer(Some(class)) => Some(format!("{}\\{class}", types_ns(options))),
+        ValueKind::Pointer(None) => Some(base_context(options)),
+        _ => None,
+    };
+    let cast = match &kind {
+        ValueKind::Int(wrapper) if native && fits_php_scalar(wrapper) => Some("int"),
+        ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => Some("float"),
+        _ => None,
     };
 
     MethodView {
@@ -187,7 +201,13 @@ fn method_view(
         raw_name: signature.name.clone(),
         params: param_list(&signature.params, options, allow_cdata),
         return_type: return_php_type(&kind, options, native),
-        body,
+        call_name: name.to_owned(),
+        args,
+        is_void: matches!(kind, ValueKind::Void),
+        is_string: matches!(kind, ValueKind::Str),
+        native_string: native,
+        cast,
+        new_class,
     }
 }
 
