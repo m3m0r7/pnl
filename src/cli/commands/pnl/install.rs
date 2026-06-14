@@ -52,6 +52,9 @@ pub(crate) struct InstallOptions {
     pub enable_use_php_scalars_in_params: bool,
     /// Persist `features.use_php_scalars_in_return = true` into pnl.json.
     pub enable_use_php_scalars_in_return: bool,
+    /// Reinstall even when the resolved content differs from the lockfile digest,
+    /// overwriting the recorded sha256 instead of aborting.
+    pub force: bool,
 }
 
 #[derive(Debug, Default)]
@@ -734,7 +737,7 @@ fn install_local_extension(
             name = extension.name
         );
     }
-    verify_locked_integrity(root, &extension, &content_hash)?;
+    verify_locked_integrity(root, &extension, &content_hash, options.force)?;
     crate::install_script::verify_install_scripts(
         extension_root,
         &extension,
@@ -967,6 +970,7 @@ fn verify_locked_integrity(
     root: &Path,
     extension: &PnlxManifest,
     content_hash: &str,
+    force: bool,
 ) -> Result<()> {
     let lock = read_lock_for_current_platform(root)?;
     let Some(existing) = lock.extensions.get(&extension.name) else {
@@ -974,12 +978,25 @@ fn verify_locked_integrity(
     };
 
     if existing.version == extension.version && existing.dist.sha256 != content_hash {
+        if force {
+            // `--force`: trust the resolved content and let the caller overwrite
+            // the locked digest instead of aborting.
+            crate::ui::warn(&format!(
+                "{name}: content does not match the lockfile digest; overwriting it because --force was given\n  \
+                 was sha256: {expected}\n  \
+                 now sha256: {actual}",
+                name = extension.name,
+                expected = existing.dist.sha256,
+                actual = content_hash,
+            ));
+            return Ok(());
+        }
         bail!(
             "integrity check failed for {name}: the content does not match the signature recorded in the lockfile.\n  \
              expected sha256: {expected}\n  \
              actual sha256:   {actual}\n\
              The package content may have been modified or tampered with; aborting install.\n\
-             If this change is intentional, bump the version or remove the {name} entry from {lock} and reinstall.",
+             If this change is intentional, bump the version or remove the {name} entry from {lock} and reinstall (or pass --force).",
             name = extension.name,
             expected = existing.dist.sha256,
             actual = content_hash,
@@ -1098,12 +1115,14 @@ mod tests {
         };
 
         // Same version + matching digest is fine.
-        assert!(verify_locked_integrity(dir.path(), &extension, &locked_hash).is_ok());
+        assert!(verify_locked_integrity(dir.path(), &extension, &locked_hash, false).is_ok());
         // Same version + different digest is a tamper and must be rejected.
-        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64)).is_err());
+        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), false).is_err());
+        // ...unless --force is given, which trusts the resolved content.
+        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), true).is_ok());
         // A new version is a legitimate update and is allowed through.
         extension.version = "2.0.0".to_owned();
-        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64)).is_ok());
+        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), false).is_ok());
     }
 
     #[test]

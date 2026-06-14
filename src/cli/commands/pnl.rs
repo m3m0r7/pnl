@@ -94,6 +94,10 @@ enum Command {
         /// (generated methods return PHP native int/float/string for scalars that fit).
         #[arg(long)]
         enable_use_php_scalars_in_return: bool,
+        /// Reinstall even when the resolved content no longer matches the sha256
+        /// recorded in the lockfile; the locked digest is overwritten.
+        #[arg(long, short = 'f')]
+        force: bool,
     },
     /// Reinstall an extension (or all of them) from its recorded source.
     Update {
@@ -272,6 +276,7 @@ pub fn run() -> Result<()> {
             enable_allow_cdata,
             enable_use_php_scalars_in_params,
             enable_use_php_scalars_in_return,
+            force,
         } => install(
             Path::new("."),
             &targets,
@@ -285,6 +290,7 @@ pub fn run() -> Result<()> {
                 enable_allow_cdata,
                 enable_use_php_scalars_in_params,
                 enable_use_php_scalars_in_return,
+                force,
             },
         ),
         Command::Update { package } => update(Path::new("."), package.as_deref()),

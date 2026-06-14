@@ -143,6 +143,7 @@ Two flags adjust the generated PHP:
 - `--function-prefix <prefix>` prepends `<prefix>` to every generated function and method name (the unprefixed names are not kept).
 - `--allow-install-script-hash <sha256>` trusts the given install-script hash for this run. It can be repeated.
 - `--allow-unverified-install-scripts` allows missing or changed install-script hashes.
+- `-f` / `--force` reinstalls even when the resolved content no longer matches the sha256 recorded in the lockfile; instead of aborting, it warns and overwrites the locked digest with the new content.
 
 ```sh
 # Install libusb by bare name (resolved against the default repository).

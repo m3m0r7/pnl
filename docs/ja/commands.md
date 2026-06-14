@@ -143,6 +143,7 @@ initialized ./pnl.json
 - `--function-prefix <prefix>` … 生成されるすべての関数名・メソッド名に `<prefix>` を付けます（接頭辞なしの名前は残しません）。
 - `--allow-install-script-hash <sha256>` … 指定した install script hash をこの実行だけ信頼します。複数回指定できます。
 - `--allow-unverified-install-scripts` … install script hash の不一致／未記録を許可します。
+- `-f` / `--force` … 解決したコンテンツが lockfile に記録された sha256 と一致しなくても再インストールします。中断せず警告を出し、記録済みダイジェストを新しいコンテンツのもので上書きします。
 
 ```sh
 # パッケージ名だけで libusb を入れます（既定リポジトリから解決）。
