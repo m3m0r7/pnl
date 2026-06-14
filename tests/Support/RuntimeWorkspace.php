@@ -217,18 +217,19 @@ RS,
     private function writeGeneratedHooks(): void
     {
         $generatedRoot = $this->installedPackageRoot . '/src/generated';
+        // Hooks run inside index.php after the static entity has been required
+        // (and therefore booted), so they can observe its filled metadata.
         file_put_contents($generatedRoot . '/preload.php', <<<'PHP'
 <?php
 
-$GLOBALS['pnlx_test_preload_runtime_available'] = isset($runtime) && $runtime instanceof \Pnlx\Runtime;
-$GLOBALS['pnlx_test_preload_runtime_var_name'] = $runtimeVarName ?? null;
+$GLOBALS['pnlx_test_preload_ran'] = true;
+$GLOBALS['pnlx_test_preload_entity_booted'] = \Pnlx\Example\Example::$name === 'example/example';
 PHP);
         file_put_contents($generatedRoot . '/postload.php', <<<'PHP'
 <?php
 
-$GLOBALS['pnlx_test_postload_runtime_available'] = isset($runtime) && $runtime instanceof \Pnlx\Runtime;
-$GLOBALS['pnlx_test_postload_runtime_var_name'] = $runtimeVarName ?? null;
-$GLOBALS['pnlx_test_postload_entity_loaded'] = isset($runtimeVarName, $GLOBALS[$runtimeVarName]) && is_object($GLOBALS[$runtimeVarName]);
+$GLOBALS['pnlx_test_postload_ran'] = true;
+$GLOBALS['pnlx_test_postload_entity_booted'] = \Pnlx\Example\Example::$name === 'example/example';
 PHP);
     }
 

@@ -18,11 +18,12 @@ use Pnlx\FFI\NativeLibrary;
 interface RuntimeInterface
 {
     /**
-     * Load the extension class's entrypoint and return a new instance bound to this runtime.
+     * Load (and boot) the extension class's static entrypoint. Entities are pure
+     * static and are never instantiated.
      *
      * @throws \Pnlx\Exception\ExtensionLoadException When the class is not defined after loading its entrypoint.
      */
-    public function load(string $class): object;
+    public function loadEntrypoint(string $class): void;
 
     /**
      * Load the extension and return its generated `*Manifest` describing the native bridge.

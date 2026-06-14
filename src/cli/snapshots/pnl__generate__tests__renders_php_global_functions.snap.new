@@ -1,5 +1,6 @@
 ---
 source: src/cli/generate.rs
+assertion_line: 592
 expression: render_global_functions(&sample_options(&signatures))
 ---
 if (!function_exists('Pnlx\\Func\\Demo\\demo_name')) {

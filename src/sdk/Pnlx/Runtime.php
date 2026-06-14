@@ -128,23 +128,22 @@ class Runtime implements RuntimeInterface
     }
 
     /**
-     * Load the extension's entrypoint then instantiate the class.
+     * Load (and thereby boot) the extension's static entrypoint.
      *
-     * The generated entity takes no constructor argument: its own `new Runtime()`
-     * resolves this runtime's project root through the active scope (see
-     * {@see withProjectRootScope()}).
+     * Entities are pure static and never instantiated; requiring the entrypoint
+     * runs the class's one-time `initialize()` boot. Doing it inside the project
+     * root scope means the entity's own `new Runtime()` resolves this runtime's
+     * root even before `PNLX_PROJECT_MANIFEST` is defined.
      *
      * @throws ExtensionLoadException When the class is still undefined after loading.
      */
-    public function load(string $class): object
+    public function loadEntrypoint(string $class): void
     {
-        return $this->withProjectRootScope(function () use ($class) {
+        $this->withProjectRootScope(function () use ($class): void {
             $this->registry->loadEntrypoint($class);
             if (!class_exists($class)) {
                 throw new ExtensionLoadException(sprintf('Extension class %s was not loaded.', $class));
             }
-
-            return new $class();
         });
     }
 

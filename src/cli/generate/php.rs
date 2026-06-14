@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use super::names::method_names;
 use super::types::{HELPERS_NS, ValueKind, fits_php_scalar, value_kind};
@@ -110,7 +109,7 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
     super::render_inner_template(
         super::GLOBAL_FUNCTIONS_TEMPLATE,
         json!({
-            "runtime_var": runtime_variable_name(options),
+            "entity_fqcn": format!("\\{}\\{}", options.namespace, options.class_name),
             "functions": functions,
         }),
     )
@@ -152,13 +151,15 @@ fn method_view(
                 format!("\\Pnlx\\FFI\\ArgumentMarshaller::unwrap(${})", param.name)
             }
             _ => format!(
-                "\\Pnlx\\FFI\\ArgumentMarshaller::scalarArg(${}, $this->scalarParamsAllowed)",
+                "\\Pnlx\\FFI\\ArgumentMarshaller::scalarArg(${})",
                 param.name
             ),
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let call = format!("$this->__call('{name}', [{args}])");
+    // Native dispatch goes through the magic `__callStatic` (which a C function can
+    // never be named), so nothing on the entity can shadow it.
+    let call = format!("static::__callStatic('{name}', [{args}])");
     let kind = value_kind(&signature.return_type);
     let body = match &kind {
         ValueKind::Void => format!("{call};"),
@@ -268,15 +269,4 @@ fn param_php_type(
     } else {
         base
     }
-}
-
-pub(super) fn runtime_variable_name(options: &PhpPackageTemplateOptions<'_>) -> String {
-    let digest = Sha256::digest(
-        format!(
-            "{}\\{}:{}",
-            options.namespace, options.class_name, options.library_key
-        )
-        .as_bytes(),
-    );
-    format!("runtime_{digest:x}")
 }

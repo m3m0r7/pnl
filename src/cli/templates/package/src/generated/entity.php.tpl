@@ -24,17 +24,14 @@ namespace {{NAMESPACE}};
 /**
  * Generated entrypoint for the {{NATIVE_LIBRARY_NAME}} native library.
  *
- * All the wiring (constructor, `__get`, `__call`, fields) lives in the shared
- * {@see \Pnlx\Extension\AbstractExtension} base, so this class holds ONLY the
- * methods named after C functions and nothing here can be shadowed by one.
- * Metadata is reachable as `$ext->manifest->name()` and, via the base's
- * `__get()`, as read-only fields:
+ * A C library is a bag of functions, so call this entity statically and never
+ * instantiate it: `{{CLASS}}::some_c_function(...)`. All the wiring lives in the
+ * shared {@see \Pnlx\Extension\AbstractExtension} base behind the magic
+ * `__callStatic`, so this class holds ONLY the methods named after C functions
+ * (plus the metadata properties) and nothing here can be shadowed by one.
  *
- * @property-read string $name        The native library's package name.
- * @property-read string $version     The native library's package version.
- * @property-read string $hash        Content hash of the compiled native bridge.
- * @property-read string $description The package description from the manifest.
- * @property-read string $path        Absolute path of the compiled native bridge.
+ * Metadata is exposed as static properties: `{{CLASS}}::$name`, `$version`,
+ * `$hash`, `$description`, `$path` (filled on the one-time boot below).
  */
 #[\Pnlx\Attribute\NativeLibraryName('{{NATIVE_LIBRARY_NAME}}')]
 #[\Pnlx\Attribute\NativeLibraryVersion('{{NATIVE_LIBRARY_VERSION}}')]
@@ -43,5 +40,24 @@ class {{CLASS}} extends \Pnlx\Extension\AbstractExtension
 {
     protected const string FFI_FILE = '{{FFI_FILE}}';
 
+    // Re-declared so each generated class gets its own storage (static props are
+    // otherwise shared with the base). Filled by the boot below.
+    public static string $name;
+
+    public static string $version;
+
+    public static string $hash;
+
+    public static string $description;
+
+    public static string $path;
+
 {{METHODS}}
 }
+
+// One-time boot: the first static call boots and returns without dispatching, so
+// running it here (at load) means every later `{{CLASS}}::c_function(...)` call
+// dispatches straight to the native library. `initialize` is not a real method —
+// it is caught by the base `__callStatic`, so it can never clash with a C
+// function of the same name.
+{{CLASS}}::initialize();

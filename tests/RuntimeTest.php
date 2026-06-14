@@ -15,6 +15,24 @@ class RuntimeTest extends TestCase
 
     private static RuntimeWorkspace $workspace;
 
+    /**
+     * The generated example entity as a class-string (it only exists once the
+     * workspace has been installed, so phpstan cannot see it as a literal).
+     *
+     * @return class-string
+     */
+    private static function exampleClass(): string
+    {
+        // ltrim widens the literal-string constant to a general string, so the
+        // class_exists() check below narrows it to a verified class-string.
+        $class = ltrim(self::EXAMPLE_CLASS, '\\');
+        if (!class_exists($class)) {
+            self::fail("The example entity {$class} has not been generated yet.");
+        }
+
+        return $class;
+    }
+
     public static function setUpBeforeClass(): void
     {
         self::$workspace = RuntimeWorkspace::create();
@@ -224,29 +242,32 @@ class RuntimeTest extends TestCase
     public function testRuntimeLoadsExampleThroughCompiledBridge(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
-        $example = $runtime->load(self::EXAMPLE_CLASS);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
 
-        // Returns are wrapped value objects: String_ (Stringable) and an integer.
-        $version = $example->example_version();
+        // The entity is pure static; returns are wrapped value objects.
+        $version = $cls::example_version();
         self::assertInstanceOf(\Pnlx\Helpers\String_::class, $version);
         self::assertSame('1.2.3', (string) $version);
 
-        $dynamicVersion = $example->{'example_version'}();
+        // A dynamic (variable) method name dispatches identically.
+        $fn = 'example_version';
+        $dynamicVersion = $cls::$fn();
         self::assertInstanceOf(\Pnlx\Helpers\String_::class, $dynamicVersion);
         self::assertSame('1.2.3', (string) $dynamicVersion);
 
         // Parameters accept a plain PHP int; returns come back wrapped.
-        $sum = $example->example_add(2, 3);
+        $sum = $cls::example_add(2, 3);
         self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $sum);
         self::assertSame(5, $sum->toInt());
 
-        // Method names are case-insensitive (resolved through the alias map).
-        $aliased = $example->{'exampleAdd'}(2, 3);
+        // The generated camelCase alias is also a static method.
+        $aliased = $cls::exampleAdd(2, 3);
         self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $aliased);
         self::assertSame(5, $aliased->toInt());
 
         // A wrapped integer can be passed straight back in as an argument.
-        $wrapped = $example->example_add(new \Pnlx\Helpers\Int_(2), new \Pnlx\Helpers\Int_(3));
+        $wrapped = $cls::example_add(new \Pnlx\Helpers\Int_(2), new \Pnlx\Helpers\Int_(3));
         self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $wrapped);
         self::assertSame(5, $wrapped->toInt());
     }
@@ -254,7 +275,7 @@ class RuntimeTest extends TestCase
     public function testRuntimeCanExposeGeneratedGlobalFunctions(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
-        $runtime->load(self::EXAMPLE_CLASS);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
 
         self::assertTrue(Runtime::enableFunctions(self::$workspace->projectRoot));
         // Generated global functions live under the \Pnlx\Func\<Class> namespace.
@@ -276,16 +297,13 @@ class RuntimeTest extends TestCase
     public function testGeneratedEntrypointRunsPreloadAndPostloadHooks(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
-        $runtime->load(self::EXAMPLE_CLASS);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
 
-        self::assertTrue($GLOBALS['pnlx_test_preload_runtime_available'] ?? false);
-        self::assertTrue($GLOBALS['pnlx_test_postload_runtime_available'] ?? false);
-        self::assertIsString($GLOBALS['pnlx_test_preload_runtime_var_name'] ?? null);
-        self::assertSame(
-            $GLOBALS['pnlx_test_preload_runtime_var_name'],
-            $GLOBALS['pnlx_test_postload_runtime_var_name'] ?? null
-        );
-        self::assertTrue($GLOBALS['pnlx_test_postload_entity_loaded'] ?? false);
+        self::assertTrue($GLOBALS['pnlx_test_preload_ran'] ?? false);
+        self::assertTrue($GLOBALS['pnlx_test_postload_ran'] ?? false);
+        // The entity was already booted by the time both hooks ran.
+        self::assertTrue($GLOBALS['pnlx_test_preload_entity_booted'] ?? false);
+        self::assertTrue($GLOBALS['pnlx_test_postload_entity_booted'] ?? false);
     }
 
     public function testRuntimeReturnsBridgeInfoByClass(): void
@@ -298,32 +316,41 @@ class RuntimeTest extends TestCase
         self::assertSame(hash_file('sha256', self::$workspace->bridgeLibraryPath), $info->hash());
         self::assertSame(self::$workspace->bridgeLibraryPath, $info->path());
 
-        // The same metadata is readable as a field on the entity via __get
-        // (`$ext->name` ≡ `$ext->manifest->name()`).
-        $example = $runtime->load(self::EXAMPLE_CLASS);
-        $get = (new \ReflectionObject($example))->getMethod('__get');
-        self::assertSame('example/example', $get->invoke($example, 'name'));
-        self::assertSame('1.2.3', $get->invoke($example, 'version'));
-        self::assertSame(self::$workspace->bridgeLibraryPath, $get->invoke($example, 'path'));
+        // The same metadata is published onto the entity's static properties when
+        // it boots (filled directly, since there is no __getStatic).
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $entity = new \ReflectionClass(self::exampleClass());
+        self::assertSame('example/example', $entity->getStaticPropertyValue('name'));
+        self::assertSame('1.2.3', $entity->getStaticPropertyValue('version'));
+        self::assertSame(self::$workspace->bridgeLibraryPath, $entity->getStaticPropertyValue('path'));
+        self::assertSame(
+            hash_file('sha256', self::$workspace->bridgeLibraryPath),
+            $entity->getStaticPropertyValue('hash')
+        );
     }
 
     public function testGeneratedEntityShapeIsOverrideFriendly(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
-        $example = $runtime->load(self::EXAMPLE_CLASS);
-        $reflection = new \ReflectionObject($example);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $reflection = new \ReflectionClass(self::exampleClass());
 
         self::assertFalse($reflection->isFinal());
-        self::assertTrue($reflection->hasMethod('__get'));
-        self::assertFalse($reflection->hasMethod('cdefPath'));
-        self::assertFalse($reflection->hasMethod('aliasesPath'));
-        self::assertTrue($reflection->hasMethod('example_version'));
-        self::assertTrue($reflection->hasMethod('exampleAdd'));
+        // The only inherited named surface is the magic __callStatic (a C function
+        // can never be named that); there is no __get/__call to collide.
+        self::assertTrue($reflection->hasMethod('__callStatic'));
+        self::assertFalse($reflection->hasMethod('__get'));
+        self::assertFalse($reflection->hasMethod('__call'));
+        // Generated methods are static.
+        self::assertTrue($reflection->getMethod('example_version')->isStatic());
+        self::assertTrue($reflection->getMethod('exampleAdd')->isStatic());
 
-        // Metadata is exposed as a readonly field (`$example->manifest->name()`),
-        // so it never collides with a generated method named after a C function.
-        self::assertTrue($reflection->hasProperty('manifest'));
-        self::assertTrue($reflection->getProperty('manifest')->isReadOnly());
+        // Metadata is exposed as static properties redeclared on the class, so it
+        // never collides with a generated method named after a C function.
+        foreach (['name', 'version', 'hash', 'description', 'path'] as $field) {
+            self::assertTrue($reflection->hasProperty($field));
+            self::assertTrue($reflection->getProperty($field)->isStatic());
+        }
 
         // The class carries the native-library attributes …
         $libNameAttrs = $reflection->getAttributes(\Pnlx\Attribute\NativeLibraryName::class);

@@ -41,25 +41,20 @@ if (\Pnlx\Runtime::allowCData()) {
 if (\Pnlx\Runtime::useScalarsInReturn()) {
     $entityVariant .= 'scalar/';
 }
+// Requiring the entity boots it (its bottom-of-file `initialize()` runs once),
+// so the class is ready for static calls — no runtime instance is kept here.
 require_once __DIR__ . '/' . $entityVariant . '{{CLASS}}.php';
 unset($entityVariant);
 {{CLASS_ALIAS}}
-$runtimeVarName = '{{RUNTIME_VAR}}';
-$runtime = new \Pnlx\Runtime();
-
 if (is_file(__DIR__ . '/preload.php')) {
     require __DIR__ . '/preload.php';
 }
 
+// Global helper functions (when enabled) just delegate to the static entity.
 if (\Pnlx\Runtime::enableFunctions()) {
-    $GLOBALS[$runtimeVarName] = $runtime->load({{FQCN}}::class);
-
     require_once __DIR__ . '/functions.php';
 }
 
 if (is_file(__DIR__ . '/postload.php')) {
     require __DIR__ . '/postload.php';
 }
-
-unset($runtimeVarName);
-unset($runtime);

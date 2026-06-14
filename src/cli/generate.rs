@@ -16,7 +16,7 @@ mod types;
 
 use aliases::render_aliases;
 use bridge::{render_bridge_cdef, render_bridge_functions};
-use php::{render_global_functions, render_methods, runtime_variable_name};
+use php::{render_global_functions, render_methods};
 use types::sanitize_php_param_name;
 
 const FFI_TEMPLATE: &str = include_str!("templates/package/src/generated/ffi.php.tpl");
@@ -344,20 +344,12 @@ fn render_template(
         Value::String(options.class_name.to_owned()),
     );
     context.insert(
-        "FQCN".to_owned(),
-        Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
-    );
-    context.insert(
         "LIBRARY_KEY".to_owned(),
         Value::String(options.library_key.to_owned()),
     );
     context.insert(
         "FFI_FILE".to_owned(),
         Value::String(options.ffi_file.to_owned()),
-    );
-    context.insert(
-        "RUNTIME_VAR".to_owned(),
-        Value::String(runtime_variable_name(options)),
     );
     context.insert(
         "METHODS".to_owned(),
