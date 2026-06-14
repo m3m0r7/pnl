@@ -15,6 +15,20 @@ struct ArgView {
     is_pointer: bool,
 }
 
+/// One method/function parameter. The template builds the accepted type union
+/// from these flags (exactly one type flag set); `cdata` widens it with
+/// `\FFI\CData`, and `pointer_class` is the package-specific wrapper FQN.
+#[derive(Debug, Serialize)]
+struct ParamView {
+    name: String,
+    is_string: bool,
+    is_int: bool,
+    is_float: bool,
+    is_pointer: bool,
+    pointer_class: Option<String>,
+    cdata: bool,
+}
+
 /// A generated entity method. The template builds the body from these fields;
 /// exactly one of the `is_*` return-kind flags is set.
 #[derive(Debug, Serialize)]
@@ -24,10 +38,8 @@ struct MethodView {
     /// The original C-library symbol name (without `--function-prefix` or the
     /// alias-case variation) — emitted as the `#[RawNativeName(...)]` attribute.
     raw_name: String,
-    /// Pre-rendered parameter list, e.g. `int|\Pnlx\Helpers\AnySizeInteger $x`.
-    params: String,
-    /// The method's PHP return type.
-    return_type: String,
+    /// The parameters, whose accepted-type unions the template renders.
+    params: Vec<ParamView>,
     /// The C symbol dispatched through `static::__callStatic('...', [...])`.
     call_name: String,
     /// The marshalled arguments passed to the dispatch.
@@ -45,7 +57,9 @@ struct MethodView {
     new_class: Option<String>,
 }
 
-/// A generated global helper function.
+/// A generated global helper function. It dispatches to whichever entity variant
+/// is loaded, so a fits-native scalar return is declared as the union of the
+/// native type and the wrapper (`return_native` + `return_class`).
 #[derive(Debug, Serialize)]
 struct FunctionView {
     name: String,
@@ -53,9 +67,12 @@ struct FunctionView {
     /// backslashes must not sit next to a `{{ }}` placeholder (Handlebars treats
     /// `\{{` as an escape and would drop a backslash).
     fqn: String,
-    params: String,
-    return_type: String,
+    params: Vec<ParamView>,
     is_void: bool,
+    /// The native half of the return union (`int`/`float`/`string`), if any.
+    return_native: Option<&'static str>,
+    /// The non-native return type (wrapper or pointer FQN), if not void.
+    return_class: Option<String>,
 }
 
 /// FQ namespace of this package's per-type pointer wrapper classes.
@@ -118,13 +135,33 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
         // (cdata-allowing) parameter union so they work with either entity variant.
         let name = format!("{prefix}{}", signature.name);
         let kind = value_kind(&signature.return_type);
+        let (return_native, return_class) = match &kind {
+            ValueKind::Void => (None, None),
+            ValueKind::Str => (Some("string"), Some(format!("{HELPERS_NS}\\String_"))),
+            ValueKind::Int(wrapper) if fits_php_scalar(wrapper) => (
+                Some("int"),
+                Some(format!("{HELPERS_NS}\\{}", wrapper.class)),
+            ),
+            ValueKind::Float(wrapper) if fits_php_scalar(wrapper) => (
+                Some("float"),
+                Some(format!("{HELPERS_NS}\\{}", wrapper.class)),
+            ),
+            ValueKind::Int(wrapper) | ValueKind::Float(wrapper) => {
+                (None, Some(format!("{HELPERS_NS}\\{}", wrapper.class)))
+            }
+            ValueKind::Pointer(Some(class)) => {
+                (None, Some(format!("{}\\{class}", types_ns(options))))
+            }
+            ValueKind::Pointer(None) => (None, Some(base_context(options))),
+        };
         functions.push(FunctionView {
             // `\\` segments: a PHP single-quoted literal of `Pnlx\Func\<Class>\<name>`.
             fqn: format!("Pnlx\\\\Func\\\\{}\\\\{name}", options.class_name),
             name,
-            params: param_list(&signature.params, options, true),
-            return_type: return_php_type_union(&kind, options),
+            params: param_views(&signature.params, options, true),
             is_void: matches!(kind, ValueKind::Void),
+            return_native,
+            return_class,
         });
     }
 
@@ -199,8 +236,7 @@ fn method_view(
     MethodView {
         name: format!("{prefix}{name}"),
         raw_name: signature.name.clone(),
-        params: param_list(&signature.params, options, allow_cdata),
-        return_type: return_php_type(&kind, options, native),
+        params: param_views(&signature.params, options, allow_cdata),
         call_name: name.to_owned(),
         args,
         is_void: matches!(kind, ValueKind::Void),
@@ -211,82 +247,38 @@ fn method_view(
     }
 }
 
-fn param_list(
+/// Build the structured parameter views the template renders into accepted-type
+/// unions. Parameters always accept a PHP scalar alongside the generated wrapper;
+/// `allow_cdata` additionally admits a raw `\FFI\CData`.
+fn param_views(
     params: &[FunctionParam],
     options: &PhpPackageTemplateOptions<'_>,
     allow_cdata: bool,
-) -> String {
+) -> Vec<ParamView> {
     params
         .iter()
         .map(|param| {
-            format!(
-                "{} ${}",
-                param_php_type(&param.type_name, options, allow_cdata),
-                param.name
-            )
+            let mut view = ParamView {
+                name: param.name.clone(),
+                is_string: false,
+                is_int: false,
+                is_float: false,
+                is_pointer: false,
+                pointer_class: None,
+                cdata: allow_cdata,
+            };
+            match value_kind(&param.type_name) {
+                ValueKind::Str => view.is_string = true,
+                ValueKind::Int(_) => view.is_int = true,
+                ValueKind::Float(_) => view.is_float = true,
+                ValueKind::Pointer(Some(class)) => {
+                    view.is_pointer = true;
+                    view.pointer_class = Some(format!("{}\\{class}", types_ns(options)));
+                }
+                // A void parameter never occurs; treat it as an opaque pointer.
+                ValueKind::Pointer(None) | ValueKind::Void => view.is_pointer = true,
+            }
+            view
         })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn return_php_type(
-    kind: &ValueKind,
-    options: &PhpPackageTemplateOptions<'_>,
-    native: bool,
-) -> String {
-    match kind {
-        ValueKind::Void => "void".to_owned(),
-        ValueKind::Str if native => "string".to_owned(),
-        ValueKind::Str => format!("{HELPERS_NS}\\String_"),
-        ValueKind::Int(wrapper) if native && fits_php_scalar(wrapper) => "int".to_owned(),
-        ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => "float".to_owned(),
-        ValueKind::Int(wrapper) | ValueKind::Float(wrapper) => {
-            format!("{HELPERS_NS}\\{}", wrapper.class)
-        }
-        ValueKind::Pointer(Some(class)) => format!("{}\\{class}", types_ns(options)),
-        ValueKind::Pointer(None) => base_context(options),
-    }
-}
-
-/// The return type for a global function, which dispatches to whichever entity
-/// variant is loaded at runtime — so a fits-native scalar can come back either
-/// native or wrapped, and the declared type is the union of both.
-fn return_php_type_union(kind: &ValueKind, options: &PhpPackageTemplateOptions<'_>) -> String {
-    match kind {
-        ValueKind::Str => format!("string|{HELPERS_NS}\\String_"),
-        ValueKind::Int(wrapper) if fits_php_scalar(wrapper) => {
-            format!("int|{HELPERS_NS}\\{}", wrapper.class)
-        }
-        ValueKind::Float(wrapper) if fits_php_scalar(wrapper) => {
-            format!("float|{HELPERS_NS}\\{}", wrapper.class)
-        }
-        _ => return_php_type(kind, options, false),
-    }
-}
-
-fn param_php_type(
-    c_type: &str,
-    options: &PhpPackageTemplateOptions<'_>,
-    allow_cdata: bool,
-) -> String {
-    // Parameters always accept a PHP scalar alongside the generated wrapper, so
-    // callers can pass plain ints/floats/strings regardless of the feature flags.
-    // `allow_cdata` additionally admits a raw `\FFI\CData`.
-    let base = match value_kind(c_type) {
-        // A void parameter never occurs, but keep the layer total.
-        ValueKind::Void => "mixed".to_owned(),
-        ValueKind::Str => format!("string|{HELPERS_NS}\\String_|\\Stringable|null"),
-        ValueKind::Int(_) => format!("int|{HELPERS_NS}\\AnySizeInteger"),
-        ValueKind::Float(_) => format!("float|int|{HELPERS_NS}\\AnyFloat"),
-        ValueKind::Pointer(Some(class)) => format!(
-            "{}\\{class}|{HELPERS_NS}\\ContextInterface|null",
-            types_ns(options)
-        ),
-        ValueKind::Pointer(None) => format!("{HELPERS_NS}\\ContextInterface|null"),
-    };
-    if allow_cdata {
-        format!("{base}|\\FFI\\CData")
-    } else {
-        base
-    }
+        .collect()
 }
