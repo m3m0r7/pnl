@@ -6,7 +6,7 @@
 
 ```sh
 pnl init
-pnl find 'lib*'      # browse available packages (default repo + your own)
+pnl search 'lib*'    # browse available packages (default repo + your own)
 pnl install libc
 pnl list 'lib*'      # show what you have installed
 ```
@@ -29,7 +29,7 @@ See the [Quick Start](docs/en/quick-start.md) to call C `printf` from PHP in a m
 - [PHP Usage](docs/en/php-usage.md) — Loading extensions and the generated files.
 - [Development](docs/en/development.md) — Validation, testing, and the JSON schemas.
 
-The default package repository is **https://github.com/m3m0r7/pnl-packages**, which publishes a `repository-index.json` so `pnl find` can browse it without cloning. A repository may also expose short aliases (e.g. `sdl` → `libsdl`), so `pnl install sdl` resolves to the referenced package. The built-in endpoints can be overridden per project — see [Configuration](docs/en/configuration.md).
+The default package repository is **https://github.com/m3m0r7/pnl-packages**, which publishes a `repository-index.json` so `pnl search` can browse it without cloning. A repository may also expose short aliases (e.g. `sdl` → `libsdl`), so `pnl install sdl` resolves to the referenced package. The built-in endpoints can be overridden per project — see [Configuration](docs/en/configuration.md).
 
 The generated PHP SDK loads itself through its own autoloader (`@pnlx/autoload.php`), so it runs without a Composer autoloader at runtime.
 

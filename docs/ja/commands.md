@@ -14,7 +14,7 @@
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
   - [`pnl list [glob]`](#pnl-list-glob)
-  - [`pnl find [glob]`](#pnl-find-glob)
+  - [`pnl search [glob]`](#pnl-search-glob)
   - [`pnl list native`](#pnl-list-native)
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
@@ -239,7 +239,9 @@ libsdl/libsdl 2.32.10 2.32.10
 libusb/libusb 1.0.29 1.0.29
 ```
 
-### `pnl find [glob]`
+### `pnl search [glob]`
+
+> 別名 `pnl find` でも呼び出せます（同じコマンドです）。
 
 設定済みの `repositories` と組み込みの既定リポジトリから、**インストール可能な**パッケージを一覧表示します（任意で glob 絞り込み）。`pnl list` と同様、パターンはフル名または leaf にマッチします。
 
@@ -247,10 +249,10 @@ libusb/libusb 1.0.29 1.0.29
 
 ```sh
 # 既定リポジトリの全パッケージを一覧。
-pnl find
+pnl search
 
 # 名前が "lib" で始まるものだけ。
-pnl find 'lib*'
+pnl search 'lib*'
 ```
 
 出力例（名前・利用可能バージョン・取得元リポジトリ）です。
@@ -325,11 +327,11 @@ pnl repo add https https://example.com/pnl/index.json --key ed25519:<public-key>
 }
 ```
 
-設定したリポジトリは `pnl find` と、名前指定の `pnl install`（bare name 解決）から参照されます。`file` リポジトリは任意の**ローカルディレクトリ**を指せます。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。この種のリポジトリは pnl がディスクから直接読み取り、コミット済みの `repository-index.json` があれば優先し、なければツリーを走査してパッケージフォルダを探します。
+設定したリポジトリは `pnl search` と、名前指定の `pnl install`（bare name 解決）から参照されます。`file` リポジトリは任意の**ローカルディレクトリ**を指せます。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。この種のリポジトリは pnl がディスクから直接読み取り、コミット済みの `repository-index.json` があれば優先し、なければツリーを走査してパッケージフォルダを探します。
 
 ### `pnl repo index <dir> --base-url <url>`
 
-パッケージのディレクトリから `repository-index.json` を生成します。これにより、`pnl find` がクローンせずにそのリポジトリを一覧できます。`pnlx.json` を含む各パッケージディレクトリを、バージョン・マニフェストパス・コンテンツの `dist.sha256`・`<base-url>/<package-dir>` というインストール可能な `source` URL とともに記録します。
+パッケージのディレクトリから `repository-index.json` を生成します。これにより、`pnl search` がクローンせずにそのリポジトリを一覧できます。`pnlx.json` を含む各パッケージディレクトリを、バージョン・マニフェストパス・コンテンツの `dist.sha256`・`<base-url>/<package-dir>` というインストール可能な `source` URL とともに記録します。
 
 ```sh
 # リポジトリチェックアウトの packages/ ツリーをインデックス化。

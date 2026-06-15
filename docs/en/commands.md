@@ -14,7 +14,7 @@
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
   - [`pnl list [glob]`](#pnl-list-glob)
-  - [`pnl find [glob]`](#pnl-find-glob)
+  - [`pnl search [glob]`](#pnl-search-glob)
   - [`pnl list native`](#pnl-list-native)
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
@@ -239,7 +239,9 @@ libsdl/libsdl 2.32.10 2.32.10
 libusb/libusb 1.0.29 1.0.29
 ```
 
-### `pnl find [glob]`
+### `pnl search [glob]`
+
+> Aliased as `pnl find` — both invoke the same command.
 
 Lists the packages **available** from your configured `repositories` plus the built-in default repository, optionally filtered by a glob pattern. Like `pnl list`, the pattern matches the full `vendor/extension` name or its leaf.
 
@@ -247,10 +249,10 @@ Each repository is enumerated cheaply when it publishes a `repository-index.json
 
 ```sh
 # Browse everything the default repository offers.
-pnl find
+pnl search
 
 # Only packages whose name starts with "lib".
-pnl find 'lib*'
+pnl search 'lib*'
 ```
 
 Example output (name, available versions, source repository):
@@ -325,11 +327,11 @@ Result:
 }
 ```
 
-Configured repositories are consulted by `pnl find` and by bare-name `pnl install`. A `file` repository may point at any **local directory** — pass it as a `file://` URL or as a plain filesystem path (absolute, or relative to the project root). pnl reads such a repository straight from disk, preferring a committed `repository-index.json` and otherwise walking the tree for package folders.
+Configured repositories are consulted by `pnl search` and by bare-name `pnl install`. A `file` repository may point at any **local directory** — pass it as a `file://` URL or as a plain filesystem path (absolute, or relative to the project root). pnl reads such a repository straight from disk, preferring a committed `repository-index.json` and otherwise walking the tree for package folders.
 
 ### `pnl repo index <dir> --base-url <url>`
 
-Generates a `repository-index.json` for a directory of packages, so the repository can be browsed with `pnl find` without cloning. Each package directory containing a `pnlx.json` is recorded with its versions, the manifest path, a content `dist.sha256`, and an installable `source` URL of `<base-url>/<package-dir>`.
+Generates a `repository-index.json` for a directory of packages, so the repository can be browsed with `pnl search` without cloning. Each package directory containing a `pnlx.json` is recorded with its versions, the manifest path, a content `dist.sha256`, and an installable `source` URL of `<base-url>/<package-dir>`.
 
 ```sh
 # Index the packages/ tree of a repository checkout.

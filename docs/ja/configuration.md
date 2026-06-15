@@ -149,7 +149,7 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 { "type": "https", "url": "https://example.com/pnl/index.json", "key": "ed25519:<public-key>" }
 ```
 
-`type` には `file`・`git`・`https` を指定できます。`file` リポジトリは、パッケージを置いた**ローカルディレクトリ**を指します。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。`pnl find` とベース名指定の `pnl install` はこのディレクトリをディスクから列挙し、コミット済みの `repository-index.json`（[`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url) を参照）があれば優先し、なければディレクトリを走査します。`key` は任意で、将来の署名付きインデックス用に予約されています。なお、ローカルパス・`file://` URL・Git URL を `pnl install` に直接渡す場合は、`repositories` の指定は不要です。
+`type` には `file`・`git`・`https` を指定できます。`file` リポジトリは、パッケージを置いた**ローカルディレクトリ**を指します。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。`pnl search` とベース名指定の `pnl install` はこのディレクトリをディスクから列挙し、コミット済みの `repository-index.json`（[`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url) を参照）があれば優先し、なければディレクトリを走査します。`key` は任意で、将来の署名付きインデックス用に予約されています。なお、ローカルパス・`file://` URL・Git URL を `pnl install` に直接渡す場合は、`repositories` の指定は不要です。
 
 `load_paths` は「C ライブラリ本体（.so / .dylib など）」を探すフォルダで、ヘッダー（include）のフォルダではありません。ヘッダーの探索には `pkg-config`、C の include 用環境変数、パッケージ同梱の include、一般的なシステムの include フォルダを使います。
 

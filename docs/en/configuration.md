@@ -149,7 +149,7 @@ Examples of `repositories` entries:
 { "type": "https", "url": "https://example.com/pnl/index.json", "key": "ed25519:<public-key>" }
 ```
 
-`type` can be `file`, `git`, or `https`. A `file` repository points at a **local directory** that holds your packages — give it either a `file://` URL or a plain filesystem path (absolute or relative to the project root). `pnl find` and bare-name `pnl install` enumerate it from disk, preferring a committed `repository-index.json` (see [`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url)) and falling back to a directory walk. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
+`type` can be `file`, `git`, or `https`. A `file` repository points at a **local directory** that holds your packages — give it either a `file://` URL or a plain filesystem path (absolute or relative to the project root). `pnl search` and bare-name `pnl install` enumerate it from disk, preferring a committed `repository-index.json` (see [`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url)) and falling back to a directory walk. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
 
 `load_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses `pkg-config`, C include environment variables, package-local includes, and common system include directories.
 
