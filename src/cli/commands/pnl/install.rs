@@ -87,14 +87,15 @@ fn apply_feature_flags(manifest: &mut PnlManifest, options: &InstallOptions) -> 
 }
 
 pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
-    let mut manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+    let mut manifest =
+        read_or_default::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
 
     // Persist feature toggles up front so `pnl install --enable-…` works even with
     // no target (the manifest is rewritten again when an extension is added).
     if apply_feature_flags(&mut manifest, options) {
-        write_json(&root.join("pnl.json"), &manifest)?;
+        write_json(&root.join(crate::config::PNL_MANIFEST_FILE), &manifest)?;
     }
 
     if targets.is_empty() {
@@ -195,7 +196,7 @@ fn install_one(
     // against the configured repositories, e.g. `pnl install widget`.
     if is_bare_package_name(target)
         && !absolutize(root, Path::new(target))
-            .join("pnlx.json")
+            .join(crate::config::PNLX_MANIFEST_FILE)
             .is_file()
     {
         return install_bare_name(
@@ -616,7 +617,10 @@ fn install_git_extension(
 ) -> Result<()> {
     let installed = install_git_source(&source)?;
     let extension_root = installed.destination.join(&source.package_path);
-    if !extension_root.join("pnlx.json").is_file() {
+    if !extension_root
+        .join(crate::config::PNLX_MANIFEST_FILE)
+        .is_file()
+    {
         bail!(
             "git source {} does not contain pnlx.json at the requested package path",
             source.url
@@ -675,7 +679,10 @@ fn resolve_install_source(root: &Path, target: &str) -> Result<InstallSource> {
     }
 
     let local_target = absolutize(root, Path::new(target));
-    if local_target.join("pnlx.json").is_file() {
+    if local_target
+        .join(crate::config::PNLX_MANIFEST_FILE)
+        .is_file()
+    {
         return Ok(InstallSource::Local {
             source_url: file_url_for_path(&local_target),
             path: local_target,
@@ -694,7 +701,7 @@ fn path_from_file_url(value: &str) -> Option<PathBuf> {
 }
 
 fn ensure_extension_source_path(path: &Path, original: &str) -> Result<()> {
-    if path.join("pnlx.json").is_file() {
+    if path.join(crate::config::PNLX_MANIFEST_FILE).is_file() {
         Ok(())
     } else {
         bail!("{original} does not point to an extension root containing pnlx.json")
@@ -712,7 +719,8 @@ fn install_local_extension(
     state: &mut InstallState,
     expected_content_hash: Option<&str>,
 ) -> Result<()> {
-    let extension = read_json::<PnlxManifest>(&extension_root.join("pnlx.json"))?;
+    let extension =
+        read_json::<PnlxManifest>(&extension_root.join(crate::config::PNLX_MANIFEST_FILE))?;
     validate_schema_version(&extension.schema_version)?;
     validate_pnlx_manifest_values(&extension)?;
 
@@ -762,7 +770,7 @@ fn install_local_extension(
             version: format!("={}", extension.version),
             required: true,
         });
-    write_json(&root.join("pnl.json"), manifest)?;
+    write_json(&root.join(crate::config::PNL_MANIFEST_FILE), manifest)?;
 
     // Offer to install the package's native dependencies (e.g. `brew install …`)
     // before we try to resolve them from disk.
@@ -839,7 +847,7 @@ fn install_local_extension(
                 let bridge_path = std::fs::canonicalize(root.join(&bridge.library))
                     .unwrap_or_else(|_| root.join(&bridge.library));
                 crate::generate::stamp_entity_bridge(
-                    &installed_extension_root.join("src/generated"),
+                    &installed_extension_root.join(crate::config::GENERATED_DIR),
                     class_name,
                     &bridge_path.to_string_lossy(),
                     &bridge.sha256,
@@ -1009,13 +1017,14 @@ fn collect_dependency_functions(
         };
         let fqcn = format!("\\{}", class.trim_start_matches('\\'));
 
-        let generated = installed_extension_dir(root, &name, &locked.version).join("src/generated");
+        let generated = installed_extension_dir(root, &name, &locked.version)
+            .join(crate::config::GENERATED_DIR);
         if let Ok(entries) = std::fs::read_dir(&generated) {
             for path in entries.flatten().map(|entry| entry.path()) {
                 if !path
                     .file_name()
                     .and_then(|file| file.to_str())
-                    .is_some_and(|file| file.ends_with(".ffi.php"))
+                    .is_some_and(|file| file.ends_with(crate::config::FFI_FILE_SUFFIX))
                 {
                     continue;
                 }
@@ -1198,7 +1207,7 @@ mod tests {
     #[test]
     fn tree_hash_ignores_generated_and_git() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pnlx.json"), "{}").unwrap();
+        std::fs::write(dir.path().join(crate::config::PNLX_MANIFEST_FILE), "{}").unwrap();
         let baseline = tree_sha256(dir.path()).unwrap();
 
         std::fs::create_dir_all(dir.path().join("src").join("generated")).unwrap();
@@ -1218,7 +1227,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let package = temp.path().join("extension");
         std::fs::create_dir_all(&package).unwrap();
-        std::fs::write(package.join("pnlx.json"), "{}").unwrap();
+        std::fs::write(package.join(crate::config::PNLX_MANIFEST_FILE), "{}").unwrap();
 
         let source =
             resolve_install_source(temp.path(), &format!("file://{}", package.display())).unwrap();

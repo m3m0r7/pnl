@@ -9,6 +9,17 @@ pub const UPDATE_CHECK_CACHE_KEY: &str = "{{cache_key}}";
 pub const BINARIES: [&str; {{binaries_len}}] = [{{#each binaries}}"{{this}}"{{#unless @last}}, {{/unless}}{{/each}}];
 /// Install-source URL prefixes trusted to run install scripts without prompting.
 pub const AUTHORIZED_REPOSITORIES: [&str; {{authorized_repositories_len}}] = [{{#each authorized_repositories}}"{{this}}"{{#unless @last}}, {{/unless}}{{/each}}];
+// Fixed workspace filenames and path segments (from config.toml `[filenames]`).
+pub const PNL_MANIFEST_FILE: &str = "{{pnl_manifest}}";
+pub const PNLX_MANIFEST_FILE: &str = "{{pnlx_manifest}}";
+pub const LOCK_FILE: &str = "{{lockfile}}";
+pub const PATHMAP_FILE: &str = "{{pathmap}}";
+pub const AUTOLOAD_FILE: &str = "{{autoload}}";
+pub const GENERATED_DIR: &str = "{{generated_dir}}";
+pub const BRIDGE_DIR: &str = "{{bridge_dir}}";
+pub const ALIASES_FILE: &str = "{{aliases_file}}";
+pub const FFI_FILE_SUFFIX: &str = "{{ffi_suffix}}";
+pub const BRIDGE_FILE_SUFFIX: &str = "{{bridge_suffix}}";
 /// The target OS this binary was built for (`std::env::consts::OS` form).
 pub const BUILD_OS: &str = "{{build_os}}";
 /// The target architecture this binary was built for (`std::env::consts::ARCH` form).

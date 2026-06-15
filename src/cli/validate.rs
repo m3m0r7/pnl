@@ -9,12 +9,12 @@ use crate::manifest::{Platform, PnlLock, PnlManifest, PnlxManifest, PnlxPathmap}
 use crate::platform::current_platform;
 
 pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
-    let manifest = read_json::<PnlManifest>(&root.join("pnl.json"))?;
+    let manifest = read_json::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnl_manifest_values(&manifest)?;
 
     let workspace = crate::workspace::workspace_dir(root);
-    let lock_path = root.join("pnlx-lock.json");
+    let lock_path = root.join(crate::config::LOCK_FILE);
     let lock = if lock_path.exists() {
         let lock = read_json::<PnlLock>(&lock_path)?;
         validate_schema_version(&lock.schema_version)?;
@@ -25,7 +25,7 @@ pub fn validate_pnl_workspace(root: &Path) -> Result<()> {
         None
     };
 
-    let pathmap_path = workspace.join("pnlx-pathmap.json");
+    let pathmap_path = workspace.join(crate::config::PATHMAP_FILE);
     let pathmap = if pathmap_path.exists() {
         let pathmap = read_json::<PnlxPathmap>(&pathmap_path)?;
         validate_schema_version(&pathmap.schema_version)?;
@@ -94,7 +94,7 @@ fn validate_workspace_consistency(
 }
 
 pub fn validate_pnlx_workspace(root: &Path) -> Result<()> {
-    let manifest = read_json::<PnlxManifest>(&root.join("pnlx.json"))?;
+    let manifest = read_json::<PnlxManifest>(&root.join(crate::config::PNLX_MANIFEST_FILE))?;
     validate_schema_version(&manifest.schema_version)?;
     validate_pnlx_manifest_values(&manifest)?;
     for example in &manifest.examples {

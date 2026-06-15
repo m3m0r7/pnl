@@ -113,7 +113,7 @@ struct GenOptions {
 
 fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
     let target = options.target.as_str();
-    let manifest: PnlxManifest = read_json(&root.join("pnlx.json"))?;
+    let manifest: PnlxManifest = read_json(&root.join(crate::config::PNLX_MANIFEST_FILE))?;
     validate_pnlx_manifest_values(&manifest)?;
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(target);
@@ -136,7 +136,7 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         };
 
     generate_all(&GenerateArtifacts {
-        generated_dir: &root.join("src/generated"),
+        generated_dir: &root.join(crate::config::GENERATED_DIR),
         artifact_stem: &artifact_stem,
         namespace: &namespace,
         class_name: &class_name,
@@ -169,7 +169,7 @@ pub(crate) fn generate_installed_package_artifacts(
     let class_name = format!("{}{}", manifest.class_prefix, manifest_class);
 
     generate_all(&GenerateArtifacts {
-        generated_dir: &root.join("src/generated"),
+        generated_dir: &root.join(crate::config::GENERATED_DIR),
         artifact_stem: &artifact_stem,
         namespace: &namespace,
         class_name: &class_name,
@@ -211,7 +211,11 @@ struct GenerateArtifacts<'a> {
 fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     let generated_dir = args.generated_dir;
     let class_name = args.class_name;
-    let out = generated_dir.join(format!("{}.ffi.php", args.artifact_stem));
+    let out = generated_dir.join(format!(
+        "{}{}",
+        args.artifact_stem,
+        crate::config::FFI_FILE_SUFFIX
+    ));
     let (cdef, constants, macro_functions) = if args.headers.is_empty() {
         (read_existing_ffi_cdef(&out)?, Vec::new(), Vec::new())
     } else {
@@ -298,9 +302,16 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     )?;
     generate_index_php(&generated_dir.join("index.php"), &template_options)?;
     generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
-    generate_aliases_php(&generated_dir.join("function.aliases.php"), &signatures)?;
+    generate_aliases_php(
+        &generated_dir.join(crate::config::ALIASES_FILE),
+        &signatures,
+    )?;
     generate_bridge_rs(
-        &generated_dir.join(format!("{}.bridge.rs", args.artifact_stem)),
+        &generated_dir.join(format!(
+            "{}{}",
+            args.artifact_stem,
+            crate::config::BRIDGE_FILE_SUFFIX
+        )),
         &template_options,
         &signatures,
     )?;
@@ -343,14 +354,14 @@ fn read_headers(headers: &[PathBuf]) -> Result<String> {
 }
 
 fn init_pnlx(root: &Path) -> Result<()> {
-    let manifest_path = root.join("pnlx.json");
+    let manifest_path = root.join(crate::config::PNLX_MANIFEST_FILE);
     write_json_if_missing(&manifest_path, &PnlxManifest::default())?;
     crate::ui::success(&format!("initialized {}", manifest_path.display()));
     Ok(())
 }
 
 fn publish_pnlx(root: &Path) -> Result<()> {
-    let manifest_path = root.join("pnlx.json");
+    let manifest_path = root.join(crate::config::PNLX_MANIFEST_FILE);
     let mut manifest: PnlxManifest = read_json(&manifest_path)?;
     validate_pnlx_manifest_values(&manifest)?;
 

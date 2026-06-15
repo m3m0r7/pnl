@@ -19,7 +19,7 @@ pub fn workspace_dir(root: &Path) -> PathBuf {
 /// The configured workspace directory name for the project at `root`, falling
 /// back to the default when no (valid) `pnl.json` is present.
 pub fn output_dir_name(root: &Path) -> String {
-    read_json::<PnlManifest>(&root.join("pnl.json"))
+    read_json::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))
         .ok()
         .map(|manifest| manifest.output_dir)
         .filter(|dir| !dir.is_empty())
@@ -46,7 +46,11 @@ mod tests {
             output_dir: "build/workspace".to_owned(),
             ..PnlManifest::default()
         };
-        write_json(&dir.path().join("pnl.json"), &manifest).unwrap();
+        write_json(
+            &dir.path().join(crate::config::PNL_MANIFEST_FILE),
+            &manifest,
+        )
+        .unwrap();
 
         assert_eq!(output_dir_name(dir.path()), "build/workspace");
         assert_eq!(

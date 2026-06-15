@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn init_writes_pnlx_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pnlx.json");
+        let path = dir.path().join(crate::config::PNLX_MANIFEST_FILE);
         write_json_if_missing(&path, &PnlxManifest::default()).unwrap();
         let manifest = read_json::<PnlxManifest>(&path).unwrap();
         assert_eq!(manifest.schema_version, SCHEMA_VERSION);

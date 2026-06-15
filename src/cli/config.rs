@@ -14,7 +14,10 @@ use crate::manifest::PnlManifest;
 // Compile-time constants generated from `config.toml` by build.rs:
 //   SCHEMA_VERSION, SELF_REPOSITORY, PACKAGES_REPOSITORY, DEFAULT_OUTPUT_DIR,
 //   UPDATE_CHECK_TTL_SECONDS, UPDATE_CHECK_OPT_OUT_ENV, UPDATE_CHECK_CACHE_KEY,
-//   BINARIES, AUTHORIZED_REPOSITORIES.
+//   BINARIES, AUTHORIZED_REPOSITORIES, and the `[filenames]` path constants
+//   (PNL_MANIFEST_FILE, PNLX_MANIFEST_FILE, LOCK_FILE, PATHMAP_FILE,
+//   AUTOLOAD_FILE, GENERATED_DIR, BRIDGE_DIR, ALIASES_FILE, FFI_FILE_SUFFIX,
+//   BRIDGE_FILE_SUFFIX).
 include!(concat!(env!("OUT_DIR"), "/config_constants.rs"));
 
 /// Whether an install-source URL is covered by a built-in authorized-repository
@@ -53,7 +56,7 @@ fn resolve_self_repository(root: &Path) -> String {
 /// Best-effort read of `config.self_repository` from `<root>/pnl.json`. Any
 /// missing/unreadable/invalid manifest simply yields `None` (use the default).
 fn workspace_self_repository(root: &Path) -> Option<String> {
-    crate::io::read_json::<PnlManifest>(&root.join("pnl.json"))
+    crate::io::read_json::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))
         .ok()?
         .config
         .self_repository
@@ -103,7 +106,7 @@ mod tests {
     fn self_repository_honors_workspace_override() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("pnl.json"),
+            dir.path().join(crate::config::PNL_MANIFEST_FILE),
             r#"{
               "schema_version": "2026-07-01",
               "repositories": [],

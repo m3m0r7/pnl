@@ -21,10 +21,10 @@ pub enum SchemaKind {
 impl SchemaKind {
     pub fn from_path(path: &Path) -> Option<Self> {
         match path.file_name().and_then(|value| value.to_str()) {
-            Some("pnl.json") => Some(Self::Pnl),
-            Some("pnlx.json") => Some(Self::Pnlx),
-            Some("pnlx-lock.json") => Some(Self::PnlxLock),
-            Some("pnlx-pathmap.json") => Some(Self::PnlxPathmap),
+            Some(crate::config::PNL_MANIFEST_FILE) => Some(Self::Pnl),
+            Some(crate::config::PNLX_MANIFEST_FILE) => Some(Self::Pnlx),
+            Some(crate::config::LOCK_FILE) => Some(Self::PnlxLock),
+            Some(crate::config::PATHMAP_FILE) => Some(Self::PnlxPathmap),
             Some("repository-index.json") => Some(Self::RepositoryIndex),
             _ => None,
         }

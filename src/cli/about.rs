@@ -181,7 +181,7 @@ fn binary_location() -> String {
 /// Errors (no lockfile, invalid JSON) degrade to an empty list because the
 /// banner must work outside a pnl workspace too.
 fn installed_extensions(root: &Path) -> Vec<String> {
-    let Ok(lock) = read_json::<PnlLock>(&root.join("pnlx-lock.json")) else {
+    let Ok(lock) = read_json::<PnlLock>(&root.join(crate::config::LOCK_FILE)) else {
         return Vec::new();
     };
     let packages = workspace_dir(root).join("packages");

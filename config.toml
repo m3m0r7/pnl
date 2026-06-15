@@ -41,6 +41,20 @@ authorized_repositories = [
 # files — the lock, pathmap, installed packages, and autoload.
 output_dir = "@pnlx"
 
+[filenames]
+# Fixed workspace filenames and path segments (not user-configurable). Kept here
+# so the same string never has to be spelled out in many places across the code.
+pnl_manifest = "pnl.json"            # the project manifest
+pnlx_manifest = "pnlx.json"          # a package's manifest
+lockfile = "pnlx-lock.json"          # the resolved lockfile
+pathmap = "pnlx-pathmap.json"        # the per-machine pathmap
+autoload = "autoload.php"            # the workspace autoloader
+generated_dir = "src/generated"      # a package's generated sources
+bridge_dir = "bridge"                # a package's compiled bridges
+aliases_file = "function.aliases.php" # the PHP-name -> bridge-symbol map
+ffi_suffix = ".ffi.php"              # the generated FFI cdef artifact
+bridge_suffix = ".bridge.rs"         # the generated Rust bridge artifact
+
 [update_check]
 # How long a "latest release" lookup stays fresh before pnl re-checks remotely.
 ttl_seconds = 3600

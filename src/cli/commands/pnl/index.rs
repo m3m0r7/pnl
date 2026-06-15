@@ -78,7 +78,7 @@ fn collect(
         if !path.is_dir() {
             continue;
         }
-        let manifest_path = path.join("pnlx.json");
+        let manifest_path = path.join(crate::config::PNLX_MANIFEST_FILE);
         if manifest_path.is_file() {
             index_package(root, &path, &manifest_path, base_url, reference, index)?;
         } else if depth > 0 {

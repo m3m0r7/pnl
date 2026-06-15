@@ -95,7 +95,10 @@ fn extract_tar<R: io::Read>(mut archive: tar::Archive<R>, destination: &Path) ->
 /// Find the directory holding `pnlx.json`: the extraction root, or a single
 /// top-level subdirectory (archives commonly wrap their contents in one folder).
 fn locate_extension_root(destination: &Path) -> Result<PathBuf> {
-    if destination.join("pnlx.json").is_file() {
+    if destination
+        .join(crate::config::PNLX_MANIFEST_FILE)
+        .is_file()
+    {
         return Ok(destination.to_path_buf());
     }
 
@@ -103,7 +106,7 @@ fn locate_extension_root(destination: &Path) -> Result<PathBuf> {
         .with_context(|| format!("failed to read {}", destination.display()))?
     {
         let path = entry?.path();
-        if path.is_dir() && path.join("pnlx.json").is_file() {
+        if path.is_dir() && path.join(crate::config::PNLX_MANIFEST_FILE).is_file() {
             return Ok(path);
         }
     }

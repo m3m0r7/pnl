@@ -14,7 +14,7 @@ pub(super) fn resolve_headers_from_pathmap(
         return Ok(None);
     };
     let pathmap = read_json::<PnlxPathmap>(
-        &crate::workspace::workspace_dir(&project_root).join("pnlx-pathmap.json"),
+        &crate::workspace::workspace_dir(&project_root).join(crate::config::PATHMAP_FILE),
     )?;
     let Some(header) = pathmap.headers.get(library_key) else {
         return Ok(None);
@@ -143,7 +143,7 @@ fn find_project_root(root: &Path) -> Option<PathBuf> {
     let mut current = std::fs::canonicalize(root).ok()?;
     loop {
         if crate::workspace::workspace_dir(&current)
-            .join("pnlx-pathmap.json")
+            .join(crate::config::PATHMAP_FILE)
             .is_file()
         {
             return Some(current);

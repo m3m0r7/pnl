@@ -325,7 +325,7 @@ fn purge_cache() -> Result<()> {
 }
 
 fn init_pnl(root: &Path, interaction: Interaction) -> Result<()> {
-    let manifest_path = root.join("pnl.json");
+    let manifest_path = root.join(crate::config::PNL_MANIFEST_FILE);
     write_json_if_missing(&manifest_path, &PnlManifest::default())?;
 
     // Scaffold the @pnlx workspace up front (autoload + SDK runtime + ide-helper),
@@ -368,7 +368,7 @@ fn update(root: &Path, package: Option<&str>) -> Result<()> {
 }
 
 fn uninstall(root: &Path, package: &str, interaction: Interaction) -> Result<()> {
-    let mut manifest = read_json::<PnlManifest>(&root.join("pnl.json"))?;
+    let mut manifest = read_json::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     if !manifest.extensions.contains_key(package) {
         bail!("{package} is not installed");
     }
@@ -377,7 +377,7 @@ fn uninstall(root: &Path, package: &str, interaction: Interaction) -> Result<()>
         return Ok(());
     }
     manifest.extensions.remove(package);
-    write_json(&root.join("pnl.json"), &manifest)?;
+    write_json(&root.join(crate::config::PNL_MANIFEST_FILE), &manifest)?;
 
     let lock_path = pnl_lock_path(root);
     if lock_path.exists() {
@@ -414,7 +414,7 @@ fn list_repositories(root: &Path) -> Result<()> {
     // Show the same set bare-name resolution consults: the configured
     // repositories (highest priority first) plus the built-in default
     // (`pnl-packages`) appended as the lowest-priority fallback.
-    let manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+    let manifest = read_or_default::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     for repo in install::resolved_repositories(&manifest) {
         let priority = repo.priority.unwrap_or(0);
         println!(
@@ -461,7 +461,8 @@ fn list_native_libraries(root: &Path) -> Result<()> {
 }
 
 fn repo(root: &Path, command: RepoCommand) -> Result<()> {
-    let mut manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+    let mut manifest =
+        read_or_default::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     match command {
         RepoCommand::Add(add) => {
             let repo = Repository {
@@ -505,6 +506,6 @@ fn repo(root: &Path, command: RepoCommand) -> Result<()> {
             return Ok(());
         }
     }
-    write_json(&root.join("pnl.json"), &manifest)?;
+    write_json(&root.join(crate::config::PNL_MANIFEST_FILE), &manifest)?;
     Ok(())
 }

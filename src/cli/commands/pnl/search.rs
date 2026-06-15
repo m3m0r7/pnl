@@ -34,7 +34,7 @@ struct FoundPackage {
 }
 
 pub(super) fn search(root: &Path, pattern: Option<&str>) -> Result<()> {
-    let manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+    let manifest = read_or_default::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
     let repositories = resolved_repositories(&manifest);
 
     // The highest-priority repository that defines a package wins; lower-priority
@@ -148,7 +148,7 @@ fn collect_packages(dir: &Path, depth: usize, out: &mut Vec<(String, Vec<String>
         if !path.is_dir() {
             continue;
         }
-        let manifest = path.join("pnlx.json");
+        let manifest = path.join(crate::config::PNLX_MANIFEST_FILE);
         if manifest.is_file() {
             if let Some(head) = read_package_head(&manifest) {
                 out.push((head.name, vec![head.version]));

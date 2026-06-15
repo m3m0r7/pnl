@@ -36,7 +36,7 @@ pub(crate) fn build_installed_bridges(root: &Path, packages: &[String]) -> Resul
             .with_context(|| format!("{package} is not in the lockfile; run pnl install first"))?
             .version;
         let extension_root = installed_extension_dir(root, &package, version);
-        let manifest_path = extension_root.join("pnlx.json");
+        let manifest_path = extension_root.join(crate::config::PNLX_MANIFEST_FILE);
         if !manifest_path.is_file() {
             bail!(
                 "installed extension {} is missing {}; run pnl install {} again",
@@ -68,7 +68,7 @@ pub(crate) fn build_installed_bridges(root: &Path, packages: &[String]) -> Resul
                     let bridge_path = std::fs::canonicalize(root.join(&bridge.library))
                         .unwrap_or_else(|_| root.join(&bridge.library));
                     crate::generate::stamp_entity_bridge(
-                        &extension_root.join("src/generated"),
+                        &extension_root.join(crate::config::GENERATED_DIR),
                         class_name,
                         &bridge_path.to_string_lossy(),
                         &bridge.sha256,
@@ -99,7 +99,7 @@ pub(super) fn compile_bridge_for_library(
     // Bridge artifacts live inside the installed package version directory; a
     // fresh install wipes that directory first, so we never need to clear it
     // here (which would also break packages that build several bridges).
-    let bridge_dir = extension_root.join("bridge");
+    let bridge_dir = extension_root.join(crate::config::BRIDGE_DIR);
     fs::create_dir_all(&bridge_dir)
         .with_context(|| format!("failed to create {}", bridge_dir.display()))?;
 
@@ -219,14 +219,15 @@ fn resolve_installed_bridge_package(lock: &PnlLock, package: &str) -> Result<Str
 }
 
 fn resolve_bridge_source(extension_root: &Path, library_key: &str) -> Result<Option<PathBuf>> {
-    let generated_dir = extension_root.join("src/generated");
+    let generated_dir = extension_root.join(crate::config::GENERATED_DIR);
     if !generated_dir.is_dir() {
         return Ok(None);
     }
 
     let preferred = generated_dir.join(format!(
-        "{}.bridge.rs",
-        sanitize_artifact_stem(&key_without_version(library_key))
+        "{}{}",
+        sanitize_artifact_stem(&key_without_version(library_key)),
+        crate::config::BRIDGE_FILE_SUFFIX
     ));
     if preferred.is_file() {
         return Ok(Some(preferred));
@@ -242,7 +243,7 @@ fn resolve_bridge_source(extension_root: &Path, library_key: &str) -> Result<Opt
         if path
             .file_name()
             .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(".bridge.rs"))
+            .is_some_and(|name| name.ends_with(crate::config::BRIDGE_FILE_SUFFIX))
         {
             candidates.push(path);
         }

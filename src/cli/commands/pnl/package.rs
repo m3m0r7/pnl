@@ -17,11 +17,11 @@ pub(super) fn pnlx_workspace_dir(root: &Path) -> PathBuf {
 pub(super) fn pnl_lock_path(root: &Path) -> PathBuf {
     // The lockfile lives next to pnl.json (not inside the configurable output
     // dir) so it has a fixed, committable location independent of `output_dir`.
-    root.join("pnlx-lock.json")
+    root.join(crate::config::LOCK_FILE)
 }
 
 pub(super) fn pnlx_pathmap_path(root: &Path) -> PathBuf {
-    pnlx_workspace_dir(root).join("pnlx-pathmap.json")
+    pnlx_workspace_dir(root).join(crate::config::PATHMAP_FILE)
 }
 
 pub(super) fn install_extension_files(
@@ -101,13 +101,13 @@ pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
 
     // The absolute pnl.json path as it exists right now (install/init time),
     // baked into autoload.php so the runtime locates it without walking cwd.
-    let manifest_path = root.join("pnl.json");
+    let manifest_path = root.join(crate::config::PNL_MANIFEST_FILE);
     let manifest_path = fs::canonicalize(&manifest_path)
         .unwrap_or(manifest_path)
         .to_string_lossy()
         .into_owned();
     crate::generate::generate_autoload_php(
-        &workspace.join("autoload.php"),
+        &workspace.join(crate::config::AUTOLOAD_FILE),
         env!("CARGO_PKG_VERSION"),
         &packages,
         &manifest_path,
@@ -250,7 +250,7 @@ pub(super) fn write_pathmap(root: &Path, pathmap: &PnlxPathmap) -> Result<()> {
     pathmap.lock = lock_path_relative_to_workspace(root);
     // The absolute pnl.json path verified at install/init time (a record for
     // tooling; Runtime resolution uses the autoload's PNLX_PROJECT_MANIFEST).
-    let manifest_path = root.join("pnl.json");
+    let manifest_path = root.join(crate::config::PNL_MANIFEST_FILE);
     pathmap.manifest = fs::canonicalize(&manifest_path)
         .unwrap_or(manifest_path)
         .to_string_lossy()
@@ -390,7 +390,7 @@ fn copy_package_directory(source_root: &Path, source: &Path, destination: &Path)
 
 fn should_skip_package_copy(source_root: &Path, source_path: &Path) -> bool {
     let relative = source_path.strip_prefix(source_root).unwrap_or(source_path);
-    relative == Path::new("src/generated")
+    relative == Path::new(crate::config::GENERATED_DIR)
         || relative.starts_with(".git")
         || relative.starts_with(crate::workspace::output_dir_name(source_root).as_str())
 }
@@ -432,7 +432,7 @@ fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
             {
                 let version = version
                     .with_context(|| format!("failed to read {}", package.path().display()))?;
-                let manifest_path = version.path().join("pnlx.json");
+                let manifest_path = version.path().join(crate::config::PNLX_MANIFEST_FILE);
                 if !manifest_path.is_file() {
                     continue;
                 }

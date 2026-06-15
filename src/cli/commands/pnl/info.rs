@@ -28,7 +28,8 @@ pub(super) fn info(root: &Path, target: &str) -> Result<()> {
 /// is treated as a git source and cloned shallowly into a temporary directory.
 fn resolve_remote_manifest(root: &Path, target: &str) -> Result<(PnlxManifest, String)> {
     if is_bare_package_name(target) {
-        let manifest = read_or_default::<PnlManifest>(&root.join("pnl.json"))?;
+        let manifest =
+            read_or_default::<PnlManifest>(&root.join(crate::config::PNL_MANIFEST_FILE))?;
         let mut failures = Vec::new();
         for repository in resolved_repositories(&manifest) {
             let candidate = format!("{}/{target}", repository.url.trim_end_matches('/'));
@@ -56,7 +57,7 @@ fn fetch_git_manifest(source_url: &str) -> Result<PnlxManifest> {
     let manifest_path = installed
         .destination
         .join(&source.package_path)
-        .join("pnlx.json");
+        .join(crate::config::PNLX_MANIFEST_FILE);
     if !manifest_path.is_file() {
         bail!("{source_url} does not contain pnlx.json at the requested package path");
     }
