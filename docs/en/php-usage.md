@@ -70,10 +70,9 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// Metadata is published onto the entity's static properties when it boots
-// (the first static call below boots it).
-printf("extension: %s %s\n", Libusb::$name, Libusb::$version);
-printf("bridge: %s\n", Libusb::$path);
+// Metadata is build-time information baked into the entity as constants.
+printf("extension: %s %s\n", Libusb::NAME, Libusb::VERSION);
+printf("bridge: %s\n", Libusb::PATH);
 printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
 printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 

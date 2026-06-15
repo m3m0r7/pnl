@@ -146,6 +146,7 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         function_prefix: "",
         native_library_name: &manifest.name,
         native_library_version: &manifest.version,
+        description: &manifest.description,
         headers: &headers,
         dependency_functions: &std::collections::BTreeMap::new(),
     })
@@ -178,6 +179,7 @@ pub(crate) fn generate_installed_package_artifacts(
         function_prefix: function_prefix.unwrap_or(""),
         native_library_name: &manifest.name,
         native_library_version: &manifest.version,
+        description: &manifest.description,
         headers,
         dependency_functions,
     })
@@ -199,6 +201,7 @@ struct GenerateArtifacts<'a> {
     /// attributes.
     native_library_name: &'a str,
     native_library_version: &'a str,
+    description: &'a str,
     headers: &'a [PathBuf],
     /// `C function name -> dependency entity FQCN` for resolving cross-package
     /// calls inside function-like macros (empty for the local `pnlx gen` path).
@@ -245,6 +248,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         function_prefix: args.function_prefix,
         native_library_name: args.native_library_name,
         native_library_version: args.native_library_version,
+        description: args.description,
     };
     // Metadata, the CData wrapper, and the per-extension exception are shared by
     // every entity variant.

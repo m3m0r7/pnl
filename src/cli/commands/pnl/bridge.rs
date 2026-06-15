@@ -13,7 +13,7 @@ use crate::validate::{
 
 use super::native::key_without_version;
 use super::package::{
-    installed_extension_dir, json_string, pnl_lock_path, pnlx_pathmap_path,
+    entity_class_fqn, installed_extension_dir, json_string, pnl_lock_path, pnlx_pathmap_path,
     read_pathmap_for_current_platform, relative_to_root, sha256_file,
 };
 
@@ -62,6 +62,18 @@ pub(crate) fn build_installed_bridges(root: &Path, packages: &[String]) -> Resul
                 })?
                 .clone();
             if let Some(bridge) = compile_bridge_for_library(root, &extension_root, key, &native)? {
+                // Re-stamp the entity with the freshly built bridge's path + hash.
+                if let Some(fqcn) = entity_class_fqn(&extension) {
+                    let class_name = fqcn.rsplit('\\').next().unwrap_or(&fqcn);
+                    let bridge_path = std::fs::canonicalize(root.join(&bridge.library))
+                        .unwrap_or_else(|_| root.join(&bridge.library));
+                    crate::generate::stamp_entity_bridge(
+                        &extension_root.join("src/generated"),
+                        class_name,
+                        &bridge_path.to_string_lossy(),
+                        &bridge.sha256,
+                    )?;
+                }
                 pathmap.bridges.insert(key.clone(), bridge);
                 built += 1;
             }

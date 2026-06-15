@@ -832,6 +832,19 @@ fn install_local_extension(
             key,
             &pathmap.requires[key],
         )? {
+            // Bake the just-built bridge's absolute path + hash into the entity
+            // constants (left empty at generation time).
+            if let Some(fqcn) = entity_class_fqn(&extension) {
+                let class_name = fqcn.rsplit('\\').next().unwrap_or(&fqcn);
+                let bridge_path = std::fs::canonicalize(root.join(&bridge.library))
+                    .unwrap_or_else(|_| root.join(&bridge.library));
+                crate::generate::stamp_entity_bridge(
+                    &installed_extension_root.join("src/generated"),
+                    class_name,
+                    &bridge_path.to_string_lossy(),
+                    &bridge.sha256,
+                )?;
+            }
             pathmap.bridges.insert(key.clone(), bridge);
         }
     }

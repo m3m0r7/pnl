@@ -79,6 +79,8 @@ pub struct PhpPackageTemplateOptions<'a> {
     /// The native library's package version, emitted as the entity class's
     /// `#[NativeLibraryVersion(...)]` attribute (e.g. `2.32.10`).
     pub native_library_version: &'a str,
+    /// The package description, baked into the entity as the `DESCRIPTION` const.
+    pub description: &'a str,
 }
 
 /// Generate one entity variant. `allow_cdata` selects whether pointer parameters
@@ -414,6 +416,15 @@ fn render_template(
         "NATIVE_LIBRARY_VERSION".to_owned(),
         Value::String(options.native_library_version.to_owned()),
     );
+    // Build-time metadata baked into the entity as constants. The compiled
+    // bridge's PATH/HASH are unknown until it is built, so they are left empty
+    // here and stamped in afterwards (see `stamp_entity_bridge`).
+    context.insert(
+        "DESCRIPTION".to_owned(),
+        Value::String(php_single_quoted(options.description)),
+    );
+    context.insert("BRIDGE_PATH".to_owned(), Value::String(String::new()));
+    context.insert("BRIDGE_HASH".to_owned(), Value::String(String::new()));
     // `--alias-class` exposes the generated class under an additional name while
     // keeping the original. Emitted in index.php; empty for other templates.
     let class_alias = match options.alias_class {
@@ -433,6 +444,52 @@ fn render_template(
 fn php_class_literal(class: &str) -> String {
     let normalized = class.trim_start_matches('\\');
     format!("\\{normalized}::class")
+}
+
+/// Escape a value for a PHP single-quoted string literal.
+fn php_single_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Fill the entity variants' `PATH`/`HASH` constants (left empty at generation
+/// time) with the compiled bridge's path and content hash. Called after the
+/// bridge is built (by `pnl install` and `pnlx build`).
+pub fn stamp_entity_bridge(
+    generated_dir: &Path,
+    class_name: &str,
+    bridge_path: &str,
+    bridge_hash: &str,
+) -> Result<()> {
+    // The base entity and its three feature variants (cdata/, scalar/, cdata/scalar/).
+    for variant in ["", "cdata", "scalar", "cdata/scalar"] {
+        let file = generated_dir
+            .join(variant)
+            .join(format!("{class_name}.php"));
+        if !file.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        let content = set_string_const(&content, "PATH", &php_single_quoted(bridge_path));
+        let content = set_string_const(&content, "HASH", &php_single_quoted(bridge_hash));
+        fs::write(&file, content).with_context(|| format!("failed to write {}", file.display()))?;
+    }
+    Ok(())
+}
+
+/// Replace the value of `public const string <name> = '<old>';` with `<value>`
+/// (already escaped). No-op if the constant is not found.
+fn set_string_const(content: &str, name: &str, value: &str) -> String {
+    let prefix = format!("public const string {name} = '");
+    let Some(start) = content.find(&prefix) else {
+        return content.to_owned();
+    };
+    let value_start = start + prefix.len();
+    let Some(rel_end) = content[value_start..].find('\'') else {
+        return content.to_owned();
+    };
+    let end = value_start + rel_end;
+    format!("{}{value}{}", &content[..value_start], &content[end..])
 }
 
 fn generated_template_context() -> Map<String, Value> {
@@ -620,6 +677,7 @@ double demo_scale(double value, int factor);\n";
             function_prefix: "",
             native_library_name: "demo/demo",
             native_library_version: "1.0.0",
+            description: "Demo native library.",
         }
     }
 

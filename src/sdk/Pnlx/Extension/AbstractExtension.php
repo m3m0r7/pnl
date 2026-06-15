@@ -13,36 +13,40 @@ use Pnlx\Runtime;
  *
  * A C library is a bag of functions, not an object, so entities are never
  * instantiated: call them statically, `Libsdl::SDL_Init(...)`. The first static
- * call boots the extension once (loads the native bridge, fills the metadata
- * properties) and returns without dispatching; the generated file calls
- * `<Class>::initialize()` once at the very bottom of its definition to absorb
- * that bootstrap, so every later call goes straight to the native library.
+ * call boots the extension once (opens the native bridge) and returns without
+ * dispatching; the generated file calls `<Class>::initialize()` once at the very
+ * bottom of its definition to absorb that bootstrap, so every later call goes
+ * straight to the native library.
  *
  * Collision-safety is the whole point of this shape: the ONLY named surface the
  * generated subclass inherits is the magic {@see __callStatic()} (a C function
- * can never be named `__callStatic`). Everything else lives in `private`
- * methods reached through `self::` (not inherited, never overridden) or in
- * fully-qualified external helpers (`\Pnlx\FFI\ArgumentMarshaller::…`). So a C
- * function named `boot`, `dispatch`, `name`, … can never clash with the runtime.
+ * can never be named `__callStatic`). Everything else lives in `private` methods
+ * reached through `self::` (not inherited, never overridden) or in fully-qualified
+ * external helpers (`\Pnlx\FFI\ArgumentMarshaller::…`). So a C function named
+ * `boot`, `dispatch`, `name`, … can never clash with the runtime.
  *
- * Metadata is exposed as static properties the generated subclass redeclares
- * (so each class gets its own storage): `Libsdl::$name`, `$version`, `$hash`,
- * `$description`, `$path`.
+ * Metadata is *build-time* information, baked into the generated subclass as
+ * constants (`Libsdl::NAME`, `VERSION`, `HASH`, `DESCRIPTION`, `PATH`) when the
+ * package is installed — not read back from the manifest/pathmap at runtime. The
+ * `HASH`/`PATH` of the compiled bridge are stamped in after it is built.
  */
 abstract class AbstractExtension
 {
-    /** The package's generated FFI cdef file; each subclass overrides it. */
+    /** The package's generated FFI cdef file; the subclass overrides it. */
     protected const string FFI_FILE = '';
 
-    public static string $name;
+    /** The generated alias-map file (PHP name -> bridge symbol), a cdef sibling. */
+    protected const string ALIASES_FILE = 'function.aliases.php';
 
-    public static string $version;
+    public const string NAME = '';
 
-    public static string $hash;
+    public const string VERSION = '';
 
-    public static string $description;
+    public const string HASH = '';
 
-    public static string $path;
+    public const string DESCRIPTION = '';
+
+    public const string PATH = '';
 
     /**
      * Compiled native library per concrete class.
@@ -86,12 +90,12 @@ abstract class AbstractExtension
     }
 
     /**
-     * One-time per-class setup: resolve the runtime, load the manifest and native
-     * bridge, and publish the metadata into the static properties.
+     * One-time per-class setup: verify the baked bridge against its constant hash
+     * and open it. The cdef and alias map are siblings of the generated entity, so
+     * we locate them from this class's own file — no manifest or pathmap lookup.
      *
      * Private and reached only via `self::boot()`, so it is never inherited and a
-     * C function named `boot` cannot interfere. `self::` keeps late static binding
-     * pointed at the concrete class, so `static::$name` targets its own property.
+     * C function named `boot` cannot interfere.
      */
     private static function boot(): void
     {
@@ -104,18 +108,26 @@ abstract class AbstractExtension
             Runtime::useScalarsInParams($runtime->projectRoot()),
         );
 
-        $manifest = $runtime->loadManifest(static::class);
-        if (!is_file($manifest->path())) {
+        if (!is_file(static::PATH)) {
             throw new ExtensionLoadException('an extension cannot be loaded');
         }
+        $actual = hash_file('sha256', static::PATH);
+        if ($actual === false || !hash_equals(static::HASH, $actual)) {
+            throw new ExtensionLoadException('Native bridge hash does not match the generated constant.');
+        }
 
-        self::$natives[static::class] = $runtime->native(static::class, static::FFI_FILE);
+        // Entity variants live in cdata/scalar subdirs; the cdef/alias map sit in
+        // the base generated dir, so walk up from this file until the cdef appears.
+        $directory = dirname((string) (new \ReflectionClass(static::class))->getFileName());
+        while (!is_file($directory . '/' . static::FFI_FILE) && dirname($directory) !== $directory) {
+            $directory = dirname($directory);
+        }
 
-        static::$name = $manifest->name();
-        static::$version = $manifest->version();
-        static::$hash = $manifest->hash();
-        static::$description = $manifest->description();
-        static::$path = $manifest->path();
+        self::$natives[static::class] = NativeLibrary::load(
+            $directory . '/' . static::FFI_FILE,
+            static::PATH,
+            $directory . '/' . static::ALIASES_FILE,
+        );
 
         self::$initialized[static::class] = true;
     }

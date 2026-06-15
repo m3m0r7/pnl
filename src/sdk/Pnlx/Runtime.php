@@ -6,7 +6,6 @@ namespace Pnlx;
 
 use Pnlx\Exception\ExtensionLoadException;
 use Pnlx\FFI\Allocator;
-use Pnlx\FFI\NativeLibrary;
 
 /**
  * Central entry point that wires together the SDK and loads extensions.
@@ -15,9 +14,8 @@ use Pnlx\FFI\NativeLibrary;
  * collaborators: a {@see RuntimeConfig} (path/output-dir resolution), a
  * {@see WorkspaceRepository} (JSON manifests/lock/pathmap), and an
  * {@see ExtensionRegistry} (locating installed packages). It then loads generated
- * extension entrypoints, instantiates their classes and manifests, and exposes the
- * compiled native bridge via {@see NativeLibrary}. Each of the collaborators can
- * be injected for testing.
+ * extension entrypoints and builds their `*Manifest` metadata. Each of the
+ * collaborators can be injected for testing.
  */
 class Runtime implements RuntimeInterface
 {
@@ -174,12 +172,6 @@ class Runtime implements RuntimeInterface
         return $manifest;
     }
 
-    /** Absolute directory of the installed extension declaring the given class. */
-    public function extensionRoot(string $class): string
-    {
-        return $this->registry->definition($class)->extensionRoot();
-    }
-
     public function projectRoot(): string
     {
         return $this->config->projectRoot();
@@ -201,39 +193,6 @@ class Runtime implements RuntimeInterface
         return $this->repository->pathmap();
     }
 
-    /** Build an absolute path to a file under the extension's generated-sources directory. */
-    public function generatedPath(string $class, string $file): string
-    {
-        return $this->extensionRoot($class) . '/' . $this->config->generatedDir() . '/' . $file;
-    }
-
-    public function aliasesFile(): string
-    {
-        return $this->config->aliasesFile();
-    }
-
-    /**
-     * Open the compiled native bridge for an extension via its context and generated CDEF.
-     *
-     * @throws ExtensionLoadException When the bridge library reported by the context is missing.
-     */
-    public function native(string $class, string $ffiFile): NativeLibrary
-    {
-        $manifest = $this->loadManifest($class);
-        if (!is_file($manifest->path())) {
-            throw new ExtensionLoadException('an extension cannot be loaded');
-        }
-        $actualHash = hash_file('sha256', $manifest->path());
-        if ($actualHash === false || !hash_equals($manifest->hash(), $actualHash)) {
-            throw new ExtensionLoadException('Native bridge hash does not match the pathmap.');
-        }
-
-        return NativeLibrary::load(
-            $this->generatedPath($class, $ffiFile),
-            $manifest->path(),
-            $this->generatedPath($class, $this->aliasesFile())
-        );
-    }
 
     /** Lazily create and reuse a single {@see Allocator} for this runtime. */
     public function allocator(): Allocator

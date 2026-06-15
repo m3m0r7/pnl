@@ -223,13 +223,13 @@ RS,
 <?php
 
 $GLOBALS['pnlx_test_preload_ran'] = true;
-$GLOBALS['pnlx_test_preload_entity_booted'] = \Pnlx\Example\Example::$name === 'example/example';
+$GLOBALS['pnlx_test_preload_entity_booted'] = \Pnlx\Example\Example::NAME === 'example/example';
 PHP);
         file_put_contents($generatedRoot . '/postload.php', <<<'PHP'
 <?php
 
 $GLOBALS['pnlx_test_postload_ran'] = true;
-$GLOBALS['pnlx_test_postload_entity_booted'] = \Pnlx\Example\Example::$name === 'example/example';
+$GLOBALS['pnlx_test_postload_entity_booted'] = \Pnlx\Example\Example::NAME === 'example/example';
 PHP);
     }
 

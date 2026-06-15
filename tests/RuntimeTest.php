@@ -238,6 +238,14 @@ class RuntimeTest extends TestCase
             $content
         );
 
+        // The bridge PATH (absolute, in a random temp workspace) and HASH (content
+        // hash) are machine/run-specific, so blank their baked constant values.
+        $normalized = preg_replace(
+            "/(public const string (?:PATH|HASH) = ')[^']*(';)/",
+            '${1}<normalized>${2}',
+            $normalized ?? $content
+        );
+
         return $normalized ?? $content;
     }
 
@@ -336,16 +344,16 @@ class RuntimeTest extends TestCase
         self::assertSame(hash_file('sha256', self::$workspace->bridgeLibraryPath), $info->hash());
         self::assertSame(self::$workspace->bridgeLibraryPath, $info->path());
 
-        // The same metadata is published onto the entity's static properties when
-        // it boots (filled directly, since there is no __getStatic).
+        // The same metadata is baked into the entity as build-time constants
+        // (HASH/PATH stamped in after the bridge was compiled).
         $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
         $entity = new \ReflectionClass(self::exampleClass());
-        self::assertSame('example/example', $entity->getStaticPropertyValue('name'));
-        self::assertSame('1.2.3', $entity->getStaticPropertyValue('version'));
-        self::assertSame(self::$workspace->bridgeLibraryPath, $entity->getStaticPropertyValue('path'));
+        self::assertSame('example/example', $entity->getConstant('NAME'));
+        self::assertSame('1.2.3', $entity->getConstant('VERSION'));
+        self::assertSame(self::$workspace->bridgeLibraryPath, $entity->getConstant('PATH'));
         self::assertSame(
             hash_file('sha256', self::$workspace->bridgeLibraryPath),
-            $entity->getStaticPropertyValue('hash')
+            $entity->getConstant('HASH')
         );
     }
 
@@ -365,11 +373,10 @@ class RuntimeTest extends TestCase
         self::assertTrue($reflection->getMethod('example_version')->isStatic());
         self::assertTrue($reflection->getMethod('exampleAdd')->isStatic());
 
-        // Metadata is exposed as static properties redeclared on the class, so it
-        // never collides with a generated method named after a C function.
-        foreach (['name', 'version', 'hash', 'description', 'path'] as $field) {
-            self::assertTrue($reflection->hasProperty($field));
-            self::assertTrue($reflection->getProperty($field)->isStatic());
+        // Metadata is baked in as build-time constants, so it never collides with
+        // a generated method named after a C function.
+        foreach (['NAME', 'VERSION', 'HASH', 'DESCRIPTION', 'PATH'] as $field) {
+            self::assertTrue($reflection->hasConstant($field));
         }
 
         // The class carries the native-library attributes …

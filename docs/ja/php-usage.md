@@ -64,10 +64,9 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// メタ情報は boot 時にエンティティの static プロパティへ格納されます
-// （下の最初の static 呼び出しで boot します）。
-printf("extension: %s %s\n", Libusb::$name, Libusb::$version);
-printf("bridge: %s\n", Libusb::$path);
+// メタ情報はビルド時の情報としてエンティティに定数で焼き込まれています。
+printf("extension: %s %s\n", Libusb::NAME, Libusb::VERSION);
+printf("bridge: %s\n", Libusb::PATH);
 printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
 printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 

@@ -28,10 +28,11 @@ namespace {{NAMESPACE}};
  * instantiate it: `{{CLASS}}::some_c_function(...)`. All the wiring lives in the
  * shared {@see \Pnlx\Extension\AbstractExtension} base behind the magic
  * `__callStatic`, so this class holds ONLY the methods named after C functions
- * (plus the metadata properties) and nothing here can be shadowed by one.
+ * (plus the metadata constants) and nothing here can be shadowed by one.
  *
- * Metadata is exposed as static properties: `{{CLASS}}::$name`, `$version`,
- * `$hash`, `$description`, `$path` (filled on the one-time boot below).
+ * Metadata is build-time information baked in as constants: `{{CLASS}}::NAME`,
+ * `VERSION`, `HASH`, `DESCRIPTION`, `PATH`. `HASH`/`PATH` describe the compiled
+ * bridge and are stamped in once it has been built.
  */
 #[\Pnlx\Attribute\NativeLibraryName('{{NATIVE_LIBRARY_NAME}}')]
 #[\Pnlx\Attribute\NativeLibraryVersion('{{NATIVE_LIBRARY_VERSION}}')]
@@ -40,17 +41,16 @@ class {{CLASS}} extends \Pnlx\Extension\AbstractExtension
 {
     protected const string FFI_FILE = '{{FFI_FILE}}';
 
-    // Re-declared so each generated class gets its own storage (static props are
-    // otherwise shared with the base). Filled by the boot below.
-    public static string $name;
+    public const string NAME = '{{NATIVE_LIBRARY_NAME}}';
 
-    public static string $version;
+    public const string VERSION = '{{NATIVE_LIBRARY_VERSION}}';
 
-    public static string $hash;
+    public const string DESCRIPTION = '{{DESCRIPTION}}';
 
-    public static string $description;
+    // The compiled bridge's path and content hash, stamped in after it is built.
+    public const string PATH = '{{BRIDGE_PATH}}';
 
-    public static string $path;
+    public const string HASH = '{{BRIDGE_HASH}}';
 
 {{METHODS}}
 }
