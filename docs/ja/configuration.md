@@ -148,11 +148,11 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 
 `type` には `file`・`git`・`https` を指定できます。`file` リポジトリは、パッケージを置いた**ローカルディレクトリ**を指します。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。`pnl search` とベース名指定の `pnl install` はこのディレクトリをディスクから列挙し、コミット済みの `repository-index.json`（[`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url) を参照）があれば優先し、なければディレクトリを走査します。`key` は任意で、将来の署名付きインデックス用に予約されています。なお、ローカルパス・`file://` URL・Git URL を `pnl install` に直接渡す場合は、`repositories` の指定は不要です。
 
-`load_paths` は「C ライブラリ本体（.so / .dylib など）」を探すフォルダで、ヘッダー（include）のフォルダではありません。ヘッダーの探索には `pkg-config`、C の include 用環境変数、パッケージ同梱の include、一般的なシステムの include フォルダを使います。
+`load_paths` は「C ライブラリ本体（.so / .dylib など）」を探すフォルダで、ヘッダー（include）のフォルダではありません。ヘッダーの探索にはライブラリの `.pc` ファイル（直接パースします。`pkg-config` バイナリは不要）、C の include 用環境変数、パッケージ同梱の include、一般的なシステムの include フォルダを使います。
 
 ### ネイティブライブラリの探索
 
-既定では `pnl install` は各 C ライブラリをローカル（`load_paths`、`DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`、`PATH`、一般的なシステムフォルダ）から、ヘッダーを `pkg-config`/include パスから探します。`pnlx.json` の各要件はリモート取得元を指定でき、その場合アセットは一度だけダウンロードしてキャッシュされます。
+既定では `pnl install` は各 C ライブラリをローカル（`load_paths`、`DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`、`PATH`、一般的なシステムフォルダ）から、ヘッダーをライブラリの `.pc` ファイルや include パスから探します。`pnlx.json` の各要件はリモート取得元を指定でき、その場合アセットは一度だけダウンロードしてキャッシュされます。
 
 ```jsonc
 "requires": {

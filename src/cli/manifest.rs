@@ -432,6 +432,11 @@ pub struct ResolvedNativeLibrary {
 pub struct ResolvedHeader {
     pub path: String,
     pub sha256: String,
+    /// `pkg-config --cflags` include directories on this machine, passed to the
+    /// libclang parse so libdir devel headers (GLib's `glibconfig.h`,
+    /// `pango-features.h`) resolve. Per-machine, like `path`; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

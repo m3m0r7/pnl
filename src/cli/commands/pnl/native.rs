@@ -294,6 +294,7 @@ pub(super) fn resolve_header_for_native(
         return Ok(ResolvedHeader {
             sha256: sha256_file(&path)?,
             path: path.display().to_string(),
+            include_dirs: Vec::new(),
         });
     }
 
@@ -303,13 +304,17 @@ pub(super) fn resolve_header_for_native(
         return Ok(ResolvedHeader {
             sha256: sha256_file(&path)?,
             path: path.display().to_string(),
+            include_dirs: Vec::new(),
         });
     }
 
     let header_names = &requirement.header_names;
     let native_path = Path::new(native_path);
+    // The compiler's own include flags for this library — recorded so the cdef parse
+    // sees libdir devel headers (GLib's `glibconfig.h`/`pango-features.h`).
+    let pkg_config_dirs = pkg_config_include_dirs(key);
     let mut include_roots = Vec::new();
-    include_roots.extend(pkg_config_include_dirs(key));
+    include_roots.extend(pkg_config_dirs.iter().cloned());
     include_roots.extend(env_path_dirs("CPATH"));
     include_roots.extend(env_path_dirs("C_INCLUDE_PATH"));
     include_roots.extend(env_path_dirs("PATH"));
@@ -339,6 +344,10 @@ pub(super) fn resolve_header_for_native(
                 return Ok(ResolvedHeader {
                     path: path.display().to_string(),
                     sha256: sha256_file(&path)?,
+                    include_dirs: pkg_config_dirs
+                        .iter()
+                        .filter_map(|dir| dir.to_str().map(str::to_owned))
+                        .collect(),
                 });
             }
         }
@@ -461,58 +470,21 @@ fn pkg_config_modules(key: &str) -> Vec<String> {
 }
 
 fn pkg_config_version(key: &str) -> Option<String> {
-    for module in pkg_config_modules(key) {
-        let Ok(output) = ProcessCommand::new("pkg-config")
-            .arg("--modversion")
-            .arg(&module)
-            .output()
-        else {
-            continue;
-        };
-        if output.status.success() {
-            return Some(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-        }
-    }
-    None
+    crate::pkg_config::modversion(&pkg_config_modules(key))
 }
 
+/// The `-I` include directories pkg-config would report for this library (with
+/// `Requires:` merged), parsed from the `.pc` files directly so pnl needs no
+/// external pkg-config binary.
 fn pkg_config_include_dirs(key: &str) -> Vec<PathBuf> {
-    pkg_config_flag_dirs(key, "--cflags-only-I", "-I")
+    crate::pkg_config::include_dirs(&pkg_config_modules(key))
 }
 
-/// Run `pkg-config <flag>` for every candidate module and collect the directory
-/// arguments (those carrying `prefix`, e.g. `-I` or `-L`) across all of them.
-fn pkg_config_flag_dirs(key: &str, flag: &str, prefix: &str) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    for module in pkg_config_modules(key) {
-        let Ok(output) = ProcessCommand::new("pkg-config")
-            .arg(flag)
-            .arg(&module)
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        for dir in String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .filter_map(|flag| flag.strip_prefix(prefix))
-            .map(PathBuf::from)
-        {
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
-        }
-    }
-    dirs
-}
-
-/// Library directories reported by pkg-config (the `-L` flags). On many systems
-/// the only non-default `-L` is the architecture-specific libdir, which is
+/// Library directories declared by the library's `.pc` (the `-L` flags). On many
+/// systems the only non-default `-L` is the architecture-specific libdir, which is
 /// exactly the directory the plain `/usr/lib` fallback misses.
 fn pkg_config_lib_dirs(key: &str) -> Vec<PathBuf> {
-    pkg_config_flag_dirs(key, "--libs-only-L", "-L")
+    crate::pkg_config::lib_dirs(&pkg_config_modules(key))
 }
 
 /// The compiler's multiarch tuple(s) (e.g. `x86_64-linux-gnu`), used to build

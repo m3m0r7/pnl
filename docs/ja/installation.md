@@ -19,8 +19,11 @@
 | Composer | 2.x | PHPUnit、PHPStan、php-cs-fixer、`cebe/php-openapi` を導入します。 |
 | Git | 2.x | Git からインストールする場合に必要です。 |
 | Make | POSIX 互換の make | 同梱の `Makefile` で使います。 |
-| pkg-config | 任意（あると便利） | C ライブラリのバージョンや include パスの探索に使います。 |
-| C ライブラリ本体 | ライブラリごと | libusb / libnfc / SDL の例には、対応するライブラリとヘッダーが必要です。 |
+| libclang | パッケージのインストールに必須 | C ヘッダーを読んで FFI cdef を生成します。macOS では Xcode Command Line Tools に同梱されています（`xcode-select --install`）。Linux ではディストリの clang/llvm 開発パッケージ（例: `apt install libclang-dev`）を入れてください。pnl は実行時に読み込むので、非標準の場所にある場合は `LIBCLANG_PATH` を設定します。 |
+| C コンパイラ | 任意 | `cc`/`gcc`/`clang` があると multiarch 環境でのライブラリパス探索がより正確になりますが、必須ではありません。 |
+| C ライブラリ本体 | ライブラリごと | libusb / libnfc / SDL の例には、対応するライブラリとヘッダー（`.pc` ファイルも同梱する `-dev`/`-devel` パッケージ）が必要です。 |
+
+pnl は各ライブラリの `.pc` ファイルを直接読むため、外部の `pkg-config`/`pkgconf` **バイナリは不要**です。`pnl -i` でツールチェーンの状態（`libclang`・`cc`）を確認できます。
 
 Rust が必要なのは、`pnl` / `pnlx` バイナリをソースからビルドする場合、またはこのリポジトリ自体を開発・テストする場合だけです。パッケージのインストールと利用では、パッケージごとの Rust コードはコンパイルしません。
 
@@ -32,7 +35,7 @@ cargo 1.92.0
 PHP 8.5.2 CLI NTS
 Composer 2.8.8
 git 2.52.0
-pkg-config 2.5.1
+libclang（Xcode Command Line Tools）
 macOS/aarch64（Homebrew で libusb, libnfc, SDL2 を導入）
 ```
 

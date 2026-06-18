@@ -143,6 +143,7 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         native_library_version: &manifest.version,
         description: &manifest.description,
         headers: &headers,
+        extra_include_dirs: &[],
         dependency_functions: &std::collections::BTreeMap::new(),
         exported_symbols: None,
     })
@@ -155,6 +156,7 @@ pub(crate) fn generate_installed_package_artifacts(
     target: &str,
     library_key: &str,
     headers: &[PathBuf],
+    extra_include_dirs: &[PathBuf],
     alias_class: Option<&str>,
     function_prefix: Option<&str>,
     dependency_functions: &std::collections::BTreeMap<String, String>,
@@ -178,6 +180,7 @@ pub(crate) fn generate_installed_package_artifacts(
         native_library_version: &manifest.version,
         description: &manifest.description,
         headers,
+        extra_include_dirs,
         dependency_functions,
         exported_symbols,
     })
@@ -201,6 +204,9 @@ struct GenerateArtifacts<'a> {
     native_library_version: &'a str,
     description: &'a str,
     headers: &'a [PathBuf],
+    /// Extra `-I` parse dirs from the library's `pkg-config --cflags` (libdir
+    /// configs like GLib's `glibconfig.h`/`pango-features.h`).
+    extra_include_dirs: &'a [PathBuf],
     /// `C function name -> dependency entity FQCN` for resolving cross-package
     /// calls inside function-like macros (empty for the local `pnlx gen` path).
     dependency_functions: &'a std::collections::BTreeMap<String, String>,
@@ -217,9 +223,10 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         args.artifact_stem,
         crate::config::FFI_FILE_SUFFIX
     ));
-    let (cdef, constants, macro_functions, symbols) = if args.headers.is_empty() {
+    let (cdef, constants, macro_functions, symbols, symbol_aliases) = if args.headers.is_empty() {
         (
             read_existing_ffi_cdef(&out)?,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -236,6 +243,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                 dependency_functions: args.dependency_functions.clone(),
                 exported_symbols: args.exported_symbols.cloned(),
                 package_header_paths: args.headers.to_vec(),
+                extra_include_dirs: args.extra_include_dirs.to_vec(),
             },
         )?;
         (
@@ -243,9 +251,11 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
             artifacts.constants,
             artifacts.macro_functions,
             artifacts.symbols,
+            artifacts.symbol_aliases,
         )
     };
-    let signatures = parse_function_signatures(&cdef);
+    let mut signatures = parse_function_signatures(&cdef);
+    crate::generate::apply_symbol_aliases(&mut signatures, &symbol_aliases);
     generate_ffi_php_from_cdef(&cdef, &out)?;
     let ffi_file = out
         .file_name()

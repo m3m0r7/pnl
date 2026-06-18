@@ -42,6 +42,12 @@ pub struct HeaderAdapterOptions {
     /// so functions split across the package's own sub-headers are collected
     /// while system / other-library headers are not.
     pub package_header_paths: Vec<PathBuf>,
+    /// Extra `-I` include directories for the libclang parse, from the library's
+    /// `pkg-config --cflags`. These cover devel headers that live outside a header's
+    /// own ancestry — notably libdir configs like GLib's `glibconfig.h` and
+    /// `pango-features.h` — so their types and version-gate macros resolve (instead
+    /// of being undefined, which drops `*_AVAILABLE_IN_*`-decorated functions).
+    pub extra_include_dirs: Vec<PathBuf>,
 }
 
 /// A function-like macro turned into a PHP function (in `\Pnlx\Func\<Class>`).
@@ -65,6 +71,12 @@ pub struct HeaderArtifacts {
     pub macro_functions: Vec<MacroFunction>,
     /// Exported data symbols (C globals), for generating per-symbol marker classes.
     pub symbols: Vec<DataSymbol>,
+    /// `(public_name, native_symbol)` for object-like macros that rename an export
+    /// back to its unversioned public name. ICU ships `#define u_errorName
+    /// U_ICU_ENTRY_POINT_RENAME(u_errorName)`, which the preprocessor expands to the
+    /// versioned symbol `u_errorName_74`; the generated method keeps the public name
+    /// while dispatching to the versioned symbol the library actually exports.
+    pub symbol_aliases: Vec<(String, String)>,
 }
 
 /// One exported data symbol (a C global variable). `pointer` is true when the
@@ -83,6 +95,47 @@ pub struct DataSymbol {
 ///
 /// Parsing is delegated to libclang; only declaration discovery and the
 /// FFI-specific re-emission are performed here.
+/// Whether libclang can be loaded right now — used by `pnl -i` to report toolchain
+/// readiness without attempting a full header parse.
+pub fn libclang_available() -> bool {
+    let _guard = CLANG_GUARD
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    Clang::new().is_ok()
+}
+
+/// An actionable, platform-specific error for when libclang cannot be loaded.
+/// libclang is the one hard external requirement for generating an extension from
+/// C headers (pnl loads it at runtime rather than linking it), so the message tells
+/// the user exactly what to install.
+pub fn libclang_unavailable_message(err: &impl std::fmt::Display) -> String {
+    let mut message =
+        format!("could not load libclang, which pnl needs to read C headers: {err}\n\n");
+    if cfg!(target_os = "macos") {
+        message.push_str(
+            "Install the Xcode Command Line Tools (they bundle libclang):\n\
+             \n\
+             \txcode-select --install\n\
+             \n\
+             If they are already installed, point pnl at libclang with LIBCLANG_PATH,\n\
+             e.g. export LIBCLANG_PATH=\"$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib\".",
+        );
+    } else {
+        message.push_str(
+            "Install your platform's libclang (it ships with the LLVM/Clang toolchain):\n\
+             \n\
+             \tDebian/Ubuntu : apt install libclang-dev\n\
+             \tFedora/RHEL   : dnf install clang-devel\n\
+             \tAlpine        : apk add clang-dev\n\
+             \tArch          : pacman -S clang\n\
+             \n\
+             A C compiler (cc/gcc/clang) is also recommended so library search paths\n\
+             resolve fully. If libclang is installed elsewhere, set LIBCLANG_PATH to its directory.",
+        );
+    }
+    message
+}
+
 pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<HeaderArtifacts> {
     let prefix = options.symbol_prefix.trim();
     if prefix.is_empty() {
@@ -95,13 +148,19 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let _guard = CLANG_GUARD
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let clang = Clang::new().map_err(|err| anyhow!("failed to initialise libclang: {err}"))?;
+    let clang = Clang::new().map_err(|err| anyhow!("{}", libclang_unavailable_message(&err)))?;
     let index = Index::new(&clang, false, false);
     let workspace = Workspace::new()?;
     let prelude_path = workspace.write("prelude.h", PRELUDE)?;
 
     let owned_dirs = owned_package_dirs(&options.package_header_paths);
-    let include_dirs = include_search_dirs(&options.package_header_paths);
+    let mut include_dirs = include_search_dirs(&options.package_header_paths);
+    // The pkg-config `--cflags` dirs (libdir configs etc.) the compiler would see.
+    for dir in &options.extra_include_dirs {
+        if !include_dirs.contains(dir) {
+            include_dirs.push(dir.clone());
+        }
+    }
     let collected = parse_with_neutralized_macros(
         &index,
         &workspace,
@@ -116,6 +175,7 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
         cdef: render(&collected, options.exported_symbols.as_ref()),
         macro_functions: macro_functions(&collected, prefix, &constant_names, options),
         symbols: data_symbols(&collected, options.exported_symbols.as_ref()),
+        symbol_aliases: macro_symbol_aliases(&collected),
         constants,
     })
 }
@@ -1651,6 +1711,196 @@ fn substitute_params(body: &[Token], params: &[String], args: &[Vec<Token>]) -> 
         }
     }
     out
+}
+
+/// Object-like macros that rename an export to a versioned symbol, e.g. ICU's
+/// `#define u_errorName U_ICU_ENTRY_POINT_RENAME(u_errorName)` whose full
+/// preprocessor expansion is the real symbol `u_errorName_74`. For each such
+/// macro whose expansion is a single identifier naming a kept function, returns
+/// `(public_name, native_symbol)` so the generated method can keep the friendly
+/// name while dispatching to the versioned symbol. Fully generic: any
+/// rename-via-macro scheme that token-pastes a version suffix is recovered, with
+/// no hard-coded macro names.
+fn macro_symbol_aliases(collected: &Collected) -> Vec<(String, String)> {
+    let object_macros: BTreeMap<String, &[Token]> = collected
+        .macros
+        .iter()
+        .map(|macro_def| (macro_def.name.clone(), macro_def.tokens.as_slice()))
+        .collect();
+    let mut aliases = Vec::new();
+    for macro_def in &collected.macros {
+        // Seed the hide set with the macro's own name so a self-referential body
+        // (`u_errorName` paste-base inside its own expansion) is left literal,
+        // matching the C preprocessor's "painted blue" rule.
+        let mut hide = BTreeSet::new();
+        hide.insert(macro_def.name.clone());
+        let Some(expanded) = expand_macro_seq(
+            &macro_def.tokens,
+            &object_macros,
+            &collected.fn_macros,
+            &hide,
+            0,
+        ) else {
+            continue;
+        };
+        if let [(TokenKind::Identifier, symbol)] = expanded.as_slice()
+            && symbol != &macro_def.name
+            && collected.function_names.contains(symbol)
+        {
+            aliases.push((macro_def.name.clone(), symbol.clone()));
+        }
+    }
+    aliases
+}
+
+/// Macro-expand a token sequence following object-like and function-like macros,
+/// honouring `##` token paste, argument prescan, and a `hide` set that prevents a
+/// macro from re-expanding inside its own replacement. A simplified Prosser
+/// expansion: enough to recover symbol-version renames, not a full C preprocessor.
+fn expand_macro_seq(
+    tokens: &[Token],
+    object_macros: &BTreeMap<String, &[Token]>,
+    fn_macros: &BTreeMap<String, RawFnMacro>,
+    hide: &BTreeSet<String>,
+    depth: usize,
+) -> Option<Vec<Token>> {
+    if depth > MAX_MACRO_EXPANSION_DEPTH {
+        return None;
+    }
+    let mut out: Vec<Token> = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let (kind, spelling) = &tokens[index];
+        if *kind == TokenKind::Identifier && !hide.contains(spelling) {
+            if let Some(macro_def) = fn_macros.get(spelling)
+                && tokens.get(index + 1).is_some_and(|(_, next)| next == "(")
+            {
+                let (args, after) = parse_call_args(tokens, index + 1)?;
+                if args.len() != macro_def.params.len() {
+                    return None;
+                }
+                // Prescan: each argument is fully expanded before substitution,
+                // except where it is a `##` operand (handled token-by-token below).
+                let expanded_args = args
+                    .iter()
+                    .map(|arg| expand_macro_seq(arg, object_macros, fn_macros, hide, depth + 1))
+                    .collect::<Option<Vec<_>>>()?;
+                let substituted = substitute_with_paste(
+                    &macro_def.body,
+                    &macro_def.params,
+                    &args,
+                    &expanded_args,
+                );
+                let mut inner_hide = hide.clone();
+                inner_hide.insert(spelling.clone());
+                let rescanned = expand_macro_seq(
+                    &substituted,
+                    object_macros,
+                    fn_macros,
+                    &inner_hide,
+                    depth + 1,
+                )?;
+                out.extend(rescanned);
+                index = after;
+                continue;
+            }
+            if let Some(body) = object_macros.get(spelling) {
+                let mut inner_hide = hide.clone();
+                inner_hide.insert(spelling.clone());
+                let pasted = apply_token_paste(body);
+                let rescanned =
+                    expand_macro_seq(&pasted, object_macros, fn_macros, &inner_hide, depth + 1)?;
+                out.extend(rescanned);
+                index += 1;
+                continue;
+            }
+        }
+        out.push(tokens[index].clone());
+        index += 1;
+    }
+    Some(out)
+}
+
+/// Substitute a function-like macro's arguments into its body, applying the `##`
+/// token-paste operator. Paste operands use the *raw* (unexpanded) argument, every
+/// other parameter use its prescan-expanded form, matching the preprocessor.
+fn substitute_with_paste(
+    body: &[Token],
+    params: &[String],
+    raw_args: &[Vec<Token>],
+    expanded_args: &[Vec<Token>],
+) -> Vec<Token> {
+    // Resolve a body token to the tokens it stands for, using `raw` argument
+    // tokens for paste operands and expanded ones elsewhere.
+    let resolve = |token: &Token, raw: bool| -> Vec<Token> {
+        if token.0 == TokenKind::Identifier
+            && let Some(position) = params.iter().position(|param| param == &token.1)
+        {
+            let source = if raw { raw_args } else { expanded_args };
+            return source[position].clone();
+        }
+        vec![token.clone()]
+    };
+
+    let mut out: Vec<Token> = Vec::new();
+    let mut index = 0;
+    while index < body.len() {
+        let is_paste = body.get(index + 1).is_some_and(|(_, next)| next == "##");
+        if is_paste {
+            // Collect a `a ## b ## c` run, pasting each raw operand's spelling.
+            let mut pasted = token_spellings(&resolve(&body[index], true));
+            index += 1;
+            while body
+                .get(index)
+                .is_some_and(|(_, spelling)| spelling == "##")
+            {
+                let operand = body.get(index + 1).cloned();
+                index += 2;
+                if let Some(operand) = operand {
+                    pasted.push_str(&token_spellings(&resolve(&operand, true)));
+                }
+            }
+            out.push((TokenKind::Identifier, pasted));
+        } else {
+            out.extend(resolve(&body[index], false));
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Apply `##` token paste within an object-like macro body (no parameters).
+fn apply_token_paste(body: &[Token]) -> Vec<Token> {
+    let mut out: Vec<Token> = Vec::new();
+    let mut index = 0;
+    while index < body.len() {
+        if body.get(index + 1).is_some_and(|(_, next)| next == "##") {
+            let mut pasted = body[index].1.clone();
+            index += 1;
+            while body
+                .get(index)
+                .is_some_and(|(_, spelling)| spelling == "##")
+            {
+                if let Some(operand) = body.get(index + 1) {
+                    pasted.push_str(&operand.1);
+                }
+                index += 2;
+            }
+            out.push((TokenKind::Identifier, pasted));
+        } else {
+            out.push(body[index].clone());
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Concatenate the spellings of a token run into one identifier fragment.
+fn token_spellings(tokens: &[Token]) -> String {
+    tokens
+        .iter()
+        .map(|(_, spelling)| spelling.as_str())
+        .collect()
 }
 
 /// PHP-compatible rendering of a single C literal token (`0x20`, `1u`, `1.5f`,
@@ -3253,6 +3503,33 @@ mod tests {
 
     fn cdef(header: &str) -> String {
         artifacts(header).cdef
+    }
+
+    #[test]
+    fn recovers_symbol_version_rename_alias() {
+        // The ICU shape: a public name is `#define`d to a multi-level rename macro
+        // that token-pastes a version suffix. The preprocessor renames the export to
+        // `ex_hello_9`; the alias recovers the public `ex_hello -> ex_hello_9` map.
+        let artifacts = artifacts(
+            "#define EX_VERSION_SUFFIX _9\n\
+             #define EX_PASTE2(x, y) x ## y\n\
+             #define EX_PASTE(x, y) EX_PASTE2(x, y)\n\
+             #define EX_RENAME(x) EX_PASTE(x, EX_VERSION_SUFFIX)\n\
+             #define ex_hello EX_RENAME(ex_hello)\n\
+             int ex_hello(int code);\n",
+        );
+        assert!(
+            artifacts.cdef.contains("int ex_hello_9(int code);"),
+            "the cdef should declare the versioned export: {}",
+            artifacts.cdef
+        );
+        assert!(
+            artifacts
+                .symbol_aliases
+                .contains(&("ex_hello".to_owned(), "ex_hello_9".to_owned())),
+            "expected ex_hello -> ex_hello_9, got {:?}",
+            artifacts.symbol_aliases
+        );
     }
 
     const HEADER: &str = r#"

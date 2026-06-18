@@ -148,11 +148,11 @@ Examples of `repositories` entries:
 
 `type` can be `file`, `git`, or `https`. A `file` repository points at a **local directory** that holds your packages — give it either a `file://` URL or a plain filesystem path (absolute or relative to the project root). `pnl search` and bare-name `pnl install` enumerate it from disk, preferring a committed `repository-index.json` (see [`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url)) and falling back to a directory walk. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
 
-`load_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses `pkg-config`, C include environment variables, package-local includes, and common system include directories.
+`load_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses libraries' `.pc` files (parsed directly — the `pkg-config` binary is not needed), C include environment variables, package-local includes, and common system include directories.
 
 ### Native library discovery
 
-By default `pnl install` looks for each required C library on the local machine (`load_paths`, `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`, `PATH`, and common system folders) and for headers via `pkg-config`/include paths. A package's `pnlx.json` can instead point a requirement at a remote source, in which case the asset is downloaded once and cached:
+By default `pnl install` looks for each required C library on the local machine (`load_paths`, `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`, `PATH`, and common system folders) and for headers via libraries' `.pc` files and include paths. A package's `pnlx.json` can instead point a requirement at a remote source, in which case the asset is downloaded once and cached:
 
 ```jsonc
 "requires": {

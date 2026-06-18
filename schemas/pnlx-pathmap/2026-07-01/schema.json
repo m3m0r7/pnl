@@ -150,6 +150,13 @@
           },
           "sha256": {
             "$ref": "#/components/schemas/sha256"
+          },
+          "include_dirs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }

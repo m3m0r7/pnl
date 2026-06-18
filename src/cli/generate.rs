@@ -551,6 +551,46 @@ pub struct FunctionSignature {
     pub(super) return_type: String,
     pub(super) params: Vec<FunctionParam>,
     pub variadic: bool,
+    /// The C symbol FFI dispatches to, when it differs from the public `name`.
+    /// Set for symbol-version renames (ICU's `u_errorName` method dispatches to the
+    /// versioned export `u_errorName_74`); `None` when the name *is* the symbol.
+    pub(super) native_symbol: Option<String>,
+}
+
+impl FunctionSignature {
+    /// The C symbol the library exports — the rename target when one is set,
+    /// otherwise the public name itself.
+    pub(super) fn native_symbol(&self) -> &str {
+        self.native_symbol.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Expose a public method name for an export reached through a symbol-version
+/// alias. For each `(public_name, native_symbol)` pair, a fully-marshalled clone of
+/// the export's signature is added under the public name (`mpz_init` alongside
+/// `__gmpz_init`, `u_errorName` alongside `u_errorName_74`), keeping the original
+/// raw-name method so existing callers of either name keep working. The clone's
+/// `native_symbol` makes dispatch and the alias map target the real export. A pair
+/// is skipped when the public name already names a real export or another alias.
+pub fn apply_symbol_aliases(signatures: &mut Vec<FunctionSignature>, aliases: &[(String, String)]) {
+    if aliases.is_empty() {
+        return;
+    }
+    let mut taken: BTreeSet<String> = signatures.iter().map(|sig| sig.name.clone()).collect();
+    let mut additions = Vec::new();
+    for (public, native) in aliases {
+        if taken.contains(public) {
+            continue;
+        }
+        if let Some(base) = signatures.iter().find(|sig| &sig.name == native) {
+            let mut clone = base.clone();
+            clone.name = public.clone();
+            clone.native_symbol = Some(native.clone());
+            additions.push(clone);
+            taken.insert(public.clone());
+        }
+    }
+    signatures.extend(additions);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -847,6 +887,7 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         return_type,
         params,
         variadic,
+        native_symbol: None,
     })
 }
 
@@ -1176,5 +1217,42 @@ int pcre2_compile(PCRE2_SPTR8 pattern);\n";
         assert_eq!(signatures[0].params[0].type_name, "const unsigned char *");
         // `PCRE2_SPTR8` (a pointer typedef) → rewritten to `const char *`.
         assert_eq!(signatures[1].params[0].type_name, "const char *");
+    }
+
+    #[test]
+    fn symbol_alias_adds_public_name_targeting_versioned_symbol() {
+        // The cdef declares the versioned export; the alias adds a public-name method
+        // (dispatch + alias map target the export) while keeping the raw-name method.
+        let mut signatures = parse_function_signatures("const char *u_errorName_74(int code);\n");
+        apply_symbol_aliases(
+            &mut signatures,
+            &[("u_errorName".to_owned(), "u_errorName_74".to_owned())],
+        );
+        // Both the raw export and the public alias are present.
+        assert_eq!(signatures.len(), 2);
+        assert_eq!(signatures[0].name, "u_errorName_74");
+        assert_eq!(signatures[0].native_symbol(), "u_errorName_74");
+        assert_eq!(signatures[1].name, "u_errorName");
+        assert_eq!(signatures[1].native_symbol(), "u_errorName_74");
+
+        // The alias map keys both names to the exported symbol.
+        let aliases = super::aliases::render_aliases(&signatures);
+        assert!(
+            aliases.contains("'u_errorName' => 'u_errorName_74'"),
+            "{aliases}"
+        );
+    }
+
+    #[test]
+    fn symbol_alias_skips_when_public_name_already_exists() {
+        // An alias must never shadow a real export of the public name.
+        let mut signatures =
+            parse_function_signatures("void u_foo(int code);\nvoid u_foo_74(int code);\n");
+        apply_symbol_aliases(
+            &mut signatures,
+            &[("u_foo".to_owned(), "u_foo_74".to_owned())],
+        );
+        assert_eq!(signatures.len(), 2);
+        assert!(signatures.iter().all(|sig| sig.native_symbol.is_none()));
     }
 }

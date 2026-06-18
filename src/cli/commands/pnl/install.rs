@@ -868,6 +868,11 @@ fn install_local_extension(
         )?;
         let generation_headers =
             generation_headers_from_resolved_header(&header, &requirement.header_names);
+        let header_include_dirs: Vec<std::path::PathBuf> = header
+            .include_dirs
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
         locked_requires.insert(
             key.clone(),
             LockedNativeLibrary {
@@ -890,6 +895,7 @@ fn install_local_extension(
             extension.name.rsplit('/').next().unwrap_or(key),
             key,
             &generation_headers,
+            &header_include_dirs,
             options.alias_class.as_deref(),
             options.function_prefix.as_deref(),
             &dependency_functions,

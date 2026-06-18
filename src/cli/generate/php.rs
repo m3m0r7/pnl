@@ -207,7 +207,7 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             // `\\` segments: a PHP single-quoted literal of `Pnlx\Func\<Class>\<name>`.
             fqn: format!("Pnlx\\\\Func\\\\{}\\\\{name}", options.class_name),
             name,
-            raw_name: signature.name.clone(),
+            raw_name: signature.native_symbol().to_owned(),
             has_out_params: params.iter().any(|param| param.native_pointer),
             nullable_return: matches!(kind, ValueKind::Pointer(_)),
             params,
@@ -369,7 +369,7 @@ fn method_view(
 
     MethodView {
         name: format!("{prefix}{name}"),
-        raw_name: signature.name.clone(),
+        raw_name: signature.native_symbol().to_owned(),
         params: param_views(&signature.params, options, allow_cdata),
         call_name: name.to_owned(),
         args,

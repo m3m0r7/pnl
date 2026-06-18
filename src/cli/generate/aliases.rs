@@ -16,9 +16,12 @@ struct AliasView {
 pub(super) fn render_aliases(signatures: &[FunctionSignature]) -> String {
     let mut aliases = BTreeMap::new();
     for signature in signatures {
+        // The map resolves a public/ergonomic name to the exported C symbol, which
+        // differs from the public name for symbol-version renames (ICU).
+        let native = signature.native_symbol();
         for alias in alias_names(&signature.name) {
-            aliases.insert(alias.clone(), signature.name.clone());
-            aliases.insert(alias.to_ascii_lowercase(), signature.name.clone());
+            aliases.insert(alias.clone(), native.to_owned());
+            aliases.insert(alias.to_ascii_lowercase(), native.to_owned());
         }
     }
 

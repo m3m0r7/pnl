@@ -19,8 +19,11 @@ At a minimum, you need the following:
 | Composer | 2.x | Installs PHPUnit, PHPStan, php-cs-fixer, and `cebe/php-openapi`. |
 | Git | 2.x | Needed for Git install sources. |
 | Make | any POSIX make | Used by the included `Makefile`. |
-| pkg-config | optional but recommended | Used to discover C library versions and include paths. |
-| C libraries | per package | The libusb/libnfc/SDL examples need the matching libraries and headers. |
+| libclang | required to install packages | Reads C headers to generate the FFI cdef. On macOS it ships with the Xcode Command Line Tools (`xcode-select --install`); on Linux install your distro's clang/llvm dev package (e.g. `apt install libclang-dev`). pnl loads it at runtime — set `LIBCLANG_PATH` if it lives in a non-standard location. |
+| C compiler | optional | A `cc`/`gcc`/`clang` sharpens library-path discovery on multiarch systems, but is not required. |
+| C libraries | per package | The libusb/libnfc/SDL examples need the matching libraries and headers (the `-dev`/`-devel` package, which also ships the `.pc` file pnl reads). |
+
+pnl reads libraries' `.pc` files directly, so the external `pkg-config`/`pkgconf` **binary is not required**. `pnl -i` reports toolchain readiness (`libclang`, `cc`).
 
 Rust is only needed when you build the `pnl`/`pnlx` binaries from source or work on this repository. Installing and using packages does not compile per-package Rust code.
 
@@ -32,7 +35,7 @@ cargo 1.92.0
 PHP 8.5.2 CLI NTS
 Composer 2.8.8
 git 2.52.0
-pkg-config 2.5.1
+libclang (Xcode Command Line Tools)
 macOS/aarch64 with Homebrew libusb, libnfc, SDL2
 ```
 

@@ -138,6 +138,7 @@ fn information_lines(tool: Tool) -> Vec<String> {
             &format!("MIT (run `{} --license` for details)", tool.name()),
         ),
         entry("Copyright", copyright_line(LICENSE_TEXT)),
+        entry("Toolchain", &toolchain_status()),
     ];
 
     let extensions = installed_extensions(Path::new("."));
@@ -150,6 +151,40 @@ fn information_lines(tool: Tool) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Readiness of the only external requirement for `pnl install` (libclang), plus
+/// whether a C compiler — used opportunistically for fuller library discovery — is
+/// present. `.pc` parsing is built in, so pkg-config is intentionally not listed.
+fn toolchain_status() -> String {
+    let libclang = if crate::header_adapter::libclang_available() {
+        ui::green("libclang ✓")
+    } else if cfg!(target_os = "macos") {
+        ui::yellow("libclang ✗ (run `xcode-select --install`)")
+    } else {
+        ui::yellow("libclang ✗ (install your clang/llvm dev package)")
+    };
+    let compiler = match c_compiler() {
+        Some(cc) => ui::green(&format!("{cc} ✓")),
+        None => ui::dim("C compiler – (optional)"),
+    };
+    format!("{libclang}, {compiler}")
+}
+
+/// The first available C compiler on `PATH`, if any (optional — only sharpens
+/// multiarch library-path discovery).
+fn c_compiler() -> Option<&'static str> {
+    for cc in ["cc", "clang", "gcc"] {
+        let ran = std::process::Command::new(cc)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if ran {
+            return Some(cc);
+        }
+    }
+    None
 }
 
 fn entry(label: &str, value: &str) -> String {

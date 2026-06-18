@@ -20,6 +20,7 @@ pub mod install_script;
 pub mod interaction;
 pub mod io;
 pub mod manifest;
+pub mod pkg_config;
 pub mod platform;
 pub mod release;
 pub mod repository_index;
