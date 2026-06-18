@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-**pnl は、PHP から「C 言語で書かれた既存のライブラリ」を簡単に使えるようにするツールです。** ライブラリの「パッケージ」をインストールし、マシン上の C ライブラリ本体とヘッダーを探し、PHP のラッパーと小さな Rust の bridge を生成・コンパイルし、`Pnlx` PHP SDK 経由で呼べるようにします。Composer の C ライブラリ版だと考えてください。
+**pnl は、PHP から「C 言語で書かれた既存のライブラリ」を簡単に使えるようにするツールです。** ライブラリの「パッケージ」をインストールし、マシン上の C ライブラリ本体とヘッダーを探し、PHP のラッパーを生成して、`Pnlx` PHP SDK 経由で呼べるようにします。Composer の C ライブラリ版だと考えてください。
 
 ```sh
 pnl init
@@ -29,7 +29,7 @@ pnl list 'lib*'      # インストール済みを確認
 - [PHP からの使い方](docs/ja/php-usage.md) — 拡張の読み込みと生成されるファイル。
 - [開発](docs/ja/development.md) — 検証・テスト・JSON スキーマ。
 
-既定のパッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl search` はクローンせずに一覧できます。リポジトリは短いエイリアス（例: `sdl` → `libsdl`）も公開でき、`pnl install sdl` は参照先のパッケージへ解決されます。組み込みのエンドポイントはプロジェクトごとに上書きできます — [設定](docs/ja/configuration.md) を参照してください。
+公式の既定パッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl search` はクローンせずに一覧できます。リポジトリは短いエイリアス（例: `sdl` → `libsdl`）も公開でき、`pnl install sdl` は参照先のパッケージへ解決されます。組み込みのエンドポイントはプロジェクトごとに上書きできます — [設定](docs/ja/configuration.md) を参照してください。
 
 生成される PHP SDK は専用のオートローダ（`@pnlx/autoload.php`）で自分自身を読み込むため、実行時に Composer のオートローダを必要としません。
 

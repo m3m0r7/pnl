@@ -26,16 +26,13 @@ project-root/
           <version>/            ← one directory per installed version
             pnlx.json
             src/generated/
-            bridge/             ← the compiled native bridge for this version
-              <package>.bridge.rs
-              lib<package>_bridge.dylib
 ```
 
 Files worth remembering:
 
 - `pnl.json`: the project config file you edit.
 - `pnlx-lock.json`: the lockfile that pins installed versions and content hashes. It sits next to `pnl.json` (not inside `@pnlx/`, whose location is configurable) so it has a fixed, committable path.
-- `@pnlx/pnlx-pathmap.json`: a generated "map" of where the C libraries, headers, and bridges live for your current environment.
+- `@pnlx/pnlx-pathmap.json`: a generated "map" of where the C libraries and headers live for your current environment.
 - `@pnlx/autoload.php`: the generated PHP entrypoint that loads every installed package at once.
 
 
@@ -113,8 +110,8 @@ What each field means:
 | `output_dir` | string | no | Directory (relative to the project root) for generated workspace files — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`. |
 | `features.use_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. Required whenever a `features` object is present (the object itself is optional). |
 | `features.allow_cdata` | boolean | no | When `true`, generated method/function parameters also accept a raw `\FFI\CData` alongside the wrapper types — useful when interoperating with hand-written FFI code. |
-| `features.use_php_scalars_in_params` | boolean | no | When `true`, methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false` (the default), a scalar must be passed wrapped in its `\Pnlx\Helpers\*` value type. |
-| `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Helpers\*` wrapper. |
+| `features.use_php_scalars_in_params` | boolean | no | When `true`, methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false` (the default), a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
+| `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Types\*` wrapper. |
 | `config` | object | no | Per-project overrides for the endpoints baked into the binary (see below). Omit it to use the built-in defaults. |
 | `extensions` | object | yes | The extensions you want, keyed by `vendor/package`. `pnl install` adds entries here automatically. |
 

@@ -6,11 +6,11 @@ namespace Pnlx\FFI;
 
 use FFI\CData;
 use Pnlx\Exception\PHPNativeLibraryException;
-use Pnlx\Helpers\CStaticTypeInterface;
+use Pnlx\Types\ValueInterface;
 
 /**
  * Converts generated-method arguments into the values handed to the native
- * bridge. Kept off the entity (called as `ArgumentMarshaller::scalarArg(...)`)
+ * library. Kept off the entity (called as `ArgumentMarshaller::scalarArg(...)`)
  * so a C function named `unwrap`/`scalarArg` can't shadow it.
  */
 final class ArgumentMarshaller
@@ -22,6 +22,17 @@ final class ArgumentMarshaller
      * @var array<class-string, bool>
      */
     private static array $scalarsAllowed = [];
+
+    /**
+     * Resolved exported-data-symbol `\FFI\CData`s, keyed by marker class. A symbol is
+     * resolved once and then held for the request: C may keep the pointer after the
+     * call returns (e.g. an encoding handed to a regex), so the CData must not be
+     * garbage-collected. This is the internal replacement for the old GlobalMemory
+     * store — callers never see it; they just pass the marker class-string.
+     *
+     * @var array<class-string, mixed>
+     */
+    private static array $symbols = [];
 
     /**
      * Record whether a class may take raw PHP scalars. Called from the extension's
@@ -36,12 +47,39 @@ final class ArgumentMarshaller
     }
 
     /**
-     * Unwrap a pointer argument: a generated wrapper yields its inner value;
-     * a raw \FFI\CData or null passes through untouched.
+     * Unwrap a pointer argument: a generated wrapper yields its inner value; an
+     * exported-data-symbol marker class-string (e.g. `\Pnlx\Liboniguruma\OnigEncodingUTF8::class`)
+     * is resolved to its `\FFI\CData` and held for the request; a raw \FFI\CData,
+     * null, or plain string (a `void *`/`char *` buffer) passes through untouched.
      */
     public static function unwrap(mixed $value): mixed
     {
-        return $value instanceof CStaticTypeInterface ? $value->toValue() : $value;
+        if ($value instanceof ValueInterface) {
+            return $value->toValue();
+        }
+
+        if (is_string($value) && is_a($value, SymbolInterface::class, true)) {
+            return self::$symbols[$value] ??= self::resolveSymbol($value);
+        }
+
+        return $value;
+    }
+
+    /**
+     * Resolve an exported-data-symbol marker to its `\FFI\CData` in the owning
+     * extension's FFI scope: a pointer symbol yields its value, a data symbol yields
+     * its address.
+     *
+     * @param class-string<SymbolInterface> $symbolClass
+     */
+    private static function resolveSymbol(string $symbolClass): mixed
+    {
+        $library = $symbolClass::extension()::pnlxNativeLibrary();
+
+        return match ($symbolClass::mode()) {
+            SymbolMode::Value => $library->global($symbolClass::name()),
+            SymbolMode::Address => $library->addressOf($symbolClass::name()),
+        };
     }
 
     /**
@@ -53,7 +91,7 @@ final class ArgumentMarshaller
      */
     public static function scalarArg(string $class, mixed $value): mixed
     {
-        if ($value instanceof CStaticTypeInterface) {
+        if ($value instanceof ValueInterface) {
             return $value->toValue();
         }
 
@@ -64,7 +102,7 @@ final class ArgumentMarshaller
         if (!(self::$scalarsAllowed[$class] ?? false)) {
             throw new PHPNativeLibraryException(
                 'Passing a raw PHP scalar requires features.use_php_scalars_in_params; '
-                . 'wrap it instead (e.g. new \Pnlx\Helpers\Int_($value)).'
+                . 'wrap it instead (e.g. new \Pnlx\Types\Int_($value)).'
             );
         }
 

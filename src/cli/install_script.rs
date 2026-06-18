@@ -134,13 +134,8 @@ fn confirm_unverified(
 
     // Packages from a built-in authorized repository (see config.toml
     // `repositories.authorized`) are trusted to run their install scripts, so
-    // they install without the interactive confirmation.
+    // they install without an interactive confirmation or warning.
     if trusted_source {
-        crate::ui::warn(message);
-        crate::ui::warn(&format!(
-            "continuing because {name} comes from an authorized repository",
-            name = manifest.name
-        ));
         return Ok(());
     }
 

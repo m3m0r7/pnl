@@ -9,13 +9,11 @@ use serde_json::{Map, Value};
 use crate::platform::GeneratedMetadata;
 
 mod aliases;
-mod bridge;
 mod names;
 mod php;
 mod types;
 
 use aliases::render_aliases;
-use bridge::{render_bridge_cdef, render_bridge_functions};
 use php::{render_global_functions, render_methods};
 use types::sanitize_php_param_name;
 
@@ -25,6 +23,7 @@ const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/ma
 const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
 const TYPE_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/types.php.tpl");
+const SYMBOL_TEMPLATE: &str = include_str!("templates/package/src/generated/symbol.php.tpl");
 const CONST_TEMPLATE: &str = include_str!("templates/package/src/generated/const.php.tpl");
 const MACRO_FUNCTIONS_TEMPLATE: &str =
     include_str!("templates/package/src/generated/macro.functions.php.tpl");
@@ -34,7 +33,6 @@ const INDEX_TEMPLATE: &str = include_str!("templates/package/src/generated/index
 const ALIASES_TEMPLATE: &str =
     include_str!("templates/package/src/generated/function.aliases.php.tpl");
 const FUNCTIONS_TEMPLATE: &str = include_str!("templates/package/src/generated/functions.php.tpl");
-const BRIDGE_TEMPLATE: &str = include_str!("templates/package/src/generated/bridge.rs.tpl");
 
 // Inner templates: the repeated, per-symbol bodies that used to be assembled
 // with `format!`/`push_str` in Rust now live here as Handlebars `{{#each}}`
@@ -42,8 +40,6 @@ const BRIDGE_TEMPLATE: &str = include_str!("templates/package/src/generated/brid
 const METHODS_TEMPLATE: &str = include_str!("templates/partials/methods.php.tpl");
 const GLOBAL_FUNCTIONS_TEMPLATE: &str = include_str!("templates/partials/global_functions.php.tpl");
 const ALIASES_ENTRIES_TEMPLATE: &str = include_str!("templates/partials/aliases_entries.php.tpl");
-const BRIDGE_CDEF_TEMPLATE: &str = include_str!("templates/partials/bridge_cdef.c.tpl");
-const BRIDGE_FUNCTIONS_TEMPLATE: &str = include_str!("templates/partials/bridge_functions.rs.tpl");
 
 pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
     let mut context = generated_template_context();
@@ -56,10 +52,6 @@ pub fn generate_ffi_php_from_cdef(cdef: &str, out: &Path) -> Result<()> {
     fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
     crate::ui::created("generated", out);
     Ok(())
-}
-
-pub fn generate_bridge_ffi_php(signatures: &[FunctionSignature], out: &Path) -> Result<()> {
-    generate_ffi_php_from_cdef(&render_bridge_cdef(signatures), out)
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +73,9 @@ pub struct PhpPackageTemplateOptions<'a> {
     pub native_library_version: &'a str,
     /// The package description, baked into the entity as the `DESCRIPTION` const.
     pub description: &'a str,
+    /// Exported data symbols (C globals), surfaced as entity const markers plus
+    /// per-symbol marker classes under `symbol/`.
+    pub symbols: &'a [crate::header_adapter::DataSymbol],
 }
 
 /// Generate one entity variant. `allow_cdata` selects whether pointer parameters
@@ -101,7 +96,7 @@ pub fn generate_entity_php(
     )
 }
 
-/// Generate the `<Class>Manifest` metadata class (manifest/bridge accessors).
+/// Generate the `<Class>Manifest` metadata class.
 pub fn generate_manifest_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -> Result<()> {
     write_template(out, MANIFEST_TEMPLATE, options, false, false)
 }
@@ -145,6 +140,39 @@ pub fn generate_const_php(
     write_generated(out, render_handlebars(CONST_TEMPLATE, context)?)
 }
 
+/// Generate the per-symbol marker classes into `dir` (`src/generated/symbol/`), one
+/// per exported data symbol. Each is a flat `\<Ns>\<name>` class implementing
+/// `\Pnlx\FFI\SymbolInterface`, passed straight to a function and resolved by the
+/// argument marshaller. Returns the written class names.
+pub fn generate_symbols_php(
+    dir: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for symbol in options.symbols {
+        let mut context = generated_template_context();
+        context.insert(
+            "NAMESPACE".to_owned(),
+            Value::String(options.namespace.to_owned()),
+        );
+        context.insert("SYMBOL".to_owned(), Value::String(symbol.name.clone()));
+        context.insert(
+            "ENTITY".to_owned(),
+            Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
+        );
+        context.insert(
+            "MODE".to_owned(),
+            Value::String(if symbol.pointer { "Value" } else { "Address" }.to_owned()),
+        );
+        write_generated(
+            &dir.join(format!("{}.php", symbol.name)),
+            render_handlebars(SYMBOL_TEMPLATE, context)?,
+        )?;
+        names.push(symbol.name.clone());
+    }
+    Ok(names)
+}
+
 /// Generate the per-package pointer wrappers into `dir` (`src/generated/types/`),
 /// one class per file. Returns the type class names that were written (so the
 /// package's `index.php` can require each one).
@@ -161,6 +189,10 @@ pub fn generate_types_php(
             Value::String(options.namespace.to_owned()),
         );
         context.insert("BASE".to_owned(), Value::String(base.clone()));
+        context.insert(
+            "ENTITY".to_owned(),
+            Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
+        );
         context.insert("TYPE".to_owned(), Value::String(type_name.clone()));
         write_generated(
             &dir.join(format!("{type_name}.php")),
@@ -333,35 +365,11 @@ fn render_macro_functions(
             ),
         };
         out.push_str(&format!(
-            "if (!function_exists('{fqn}')) {{\n    function {}({params})\n    {{\n{body}\n    }}\n}}\n\n",
-            function.name
+            "if (!function_exists('{fqn}')) {{\n    #[\\Pnlx\\Attribute\\AutoGeneratedByPnlx]\n    #[\\Pnlx\\Attribute\\RawNativeName('{}')]\n    function {}({params})\n    {{\n{body}\n    }}\n}}\n\n",
+            function.name, function.name
         ));
     }
     out
-}
-
-pub fn generate_bridge_rs(
-    out: &Path,
-    options: &PhpPackageTemplateOptions<'_>,
-    signatures: &[FunctionSignature],
-) -> Result<()> {
-    let mut context = generated_template_context();
-    context.insert(
-        "CLASS".to_owned(),
-        Value::String(options.class_name.to_owned()),
-    );
-    context.insert(
-        "FUNCTIONS".to_owned(),
-        Value::String(render_bridge_functions(signatures)),
-    );
-    let generated = render_handlebars(BRIDGE_TEMPLATE, context)?;
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(out, generated).with_context(|| format!("failed to write {}", out.display()))?;
-    crate::ui::created("generated", out);
-    Ok(())
 }
 
 fn write_template(
@@ -406,8 +414,11 @@ fn render_template(
     );
     context.insert(
         "METHODS".to_owned(),
-        Value::String(render_methods(options, allow_cdata, scalars_in_return)),
+        Value::String(render_methods(options, allow_cdata, scalars_in_return, "")),
     );
+    // The boot token is derived from the same native-library hash as the HASH
+    // constant and is filled in beside PATH/HASH once the library is resolved.
+    context.insert("BOOT_TOKEN".to_owned(), Value::String(String::new()));
     context.insert(
         "NATIVE_LIBRARY_NAME".to_owned(),
         Value::String(options.native_library_name.to_owned()),
@@ -416,15 +427,14 @@ fn render_template(
         "NATIVE_LIBRARY_VERSION".to_owned(),
         Value::String(options.native_library_version.to_owned()),
     );
-    // Build-time metadata baked into the entity as constants. The compiled
-    // bridge's PATH/HASH are unknown until it is built, so they are left empty
-    // here and stamped in afterwards (see `stamp_entity_bridge`).
+    // Build-time metadata baked into the entity as constants. The resolved
+    // native library PATH/HASH are stamped in after generation.
     context.insert(
         "DESCRIPTION".to_owned(),
         Value::String(php_single_quoted(options.description)),
     );
-    context.insert("BRIDGE_PATH".to_owned(), Value::String(String::new()));
-    context.insert("BRIDGE_HASH".to_owned(), Value::String(String::new()));
+    context.insert("NATIVE_PATH".to_owned(), Value::String(String::new()));
+    context.insert("NATIVE_HASH".to_owned(), Value::String(String::new()));
     // `--alias-class` exposes the generated class under an additional name while
     // keeping the original. Emitted in index.php; empty for other templates.
     let class_alias = match options.alias_class {
@@ -451,14 +461,13 @@ fn php_single_quoted(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Fill the entity variants' `PATH`/`HASH` constants (left empty at generation
-/// time) with the compiled bridge's path and content hash. Called after the
-/// bridge is built (by `pnl install` and `pnlx build`).
-pub fn stamp_entity_bridge(
+/// Fill the entity variants' `PATH`/`HASH` constants with the resolved native
+/// library path and content hash.
+pub fn stamp_entity_native_library(
     generated_dir: &Path,
     class_name: &str,
-    bridge_path: &str,
-    bridge_hash: &str,
+    native_path: &str,
+    native_hash: &str,
 ) -> Result<()> {
     // The base entity and its three feature variants (cdata/, scalar/, cdata/scalar/).
     for variant in ["", "cdata", "scalar", "cdata/scalar"] {
@@ -470,26 +479,34 @@ pub fn stamp_entity_bridge(
         }
         let content = fs::read_to_string(&file)
             .with_context(|| format!("failed to read {}", file.display()))?;
-        let content = set_string_const(&content, "PATH", &php_single_quoted(bridge_path));
-        let content = set_string_const(&content, "HASH", &php_single_quoted(bridge_hash));
+        let content = set_string_const(&content, "PATH", &php_single_quoted(native_path));
+        let content = set_string_const(&content, "HASH", &php_single_quoted(native_hash));
+        let content = set_string_const(
+            &content,
+            "PNLX_BOOT_TOKEN",
+            &php_single_quoted(&format!("__pnlx_boot_{native_hash}")),
+        );
         fs::write(&file, content).with_context(|| format!("failed to write {}", file.display()))?;
     }
     Ok(())
 }
 
-/// Replace the value of `public const string <name> = '<old>';` with `<value>`
-/// (already escaped). No-op if the constant is not found.
+/// Replace the value of `<visibility> const string <name> = '<old>';` with
+/// `<value>` (already escaped). No-op if the constant is not found.
 fn set_string_const(content: &str, name: &str, value: &str) -> String {
-    let prefix = format!("public const string {name} = '");
-    let Some(start) = content.find(&prefix) else {
-        return content.to_owned();
-    };
-    let value_start = start + prefix.len();
-    let Some(rel_end) = content[value_start..].find('\'') else {
-        return content.to_owned();
-    };
-    let end = value_start + rel_end;
-    format!("{}{value}{}", &content[..value_start], &content[end..])
+    for visibility in ["public", "protected"] {
+        let prefix = format!("{visibility} const string {name} = '");
+        let Some(start) = content.find(&prefix) else {
+            continue;
+        };
+        let value_start = start + prefix.len();
+        let Some(rel_end) = content[value_start..].find('\'') else {
+            return content.to_owned();
+        };
+        let end = value_start + rel_end;
+        return format!("{}{value}{}", &content[..value_start], &content[end..]);
+    }
+    content.to_owned()
 }
 
 fn generated_template_context() -> Map<String, Value> {
@@ -517,7 +534,7 @@ fn render_handlebars(template: &str, context: Map<String, Value>) -> Result<Stri
 }
 
 /// Render one of the static inner templates (methods, functions, aliases,
-/// bridge) from a serializable context. These templates ship with the binary
+/// snippets) from a serializable context. These templates ship with the binary
 /// and have fixed shapes, so a render failure is a build-time bug, not a runtime
 /// condition — hence the panic rather than a propagated error.
 fn render_inner_template(template: &str, context: Value) -> String {
@@ -533,6 +550,7 @@ pub struct FunctionSignature {
     pub name: String,
     pub(super) return_type: String,
     pub(super) params: Vec<FunctionParam>,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,18 +560,263 @@ pub(super) struct FunctionParam {
 }
 
 pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
+    let raw_typedefs = raw_typedef_map(cdef);
+    let scalar_typedefs = scalar_typedef_map(&raw_typedefs);
+    let char_pointer_typedefs = char_pointer_typedef_set(&raw_typedefs);
     let mut seen = BTreeSet::new();
     cdef.lines()
         .filter_map(parse_function_signature)
+        .map(|mut signature| {
+            signature.return_type =
+                resolve_scalar_typedef(&signature.return_type, &scalar_typedefs);
+            signature.return_type =
+                resolve_char_pointer_typedef(&signature.return_type, &char_pointer_typedefs);
+            signature.return_type = resolve_pointer_typedef(&signature.return_type, &raw_typedefs);
+            for param in &mut signature.params {
+                param.type_name = resolve_scalar_typedef(&param.type_name, &scalar_typedefs);
+                param.type_name =
+                    resolve_char_pointer_typedef(&param.type_name, &char_pointer_typedefs);
+                param.type_name = resolve_pointer_typedef(&param.type_name, &raw_typedefs);
+            }
+            signature
+        })
         .filter(|signature| seen.insert(signature.name.clone()))
         .collect()
+}
+
+/// All `typedef <underlying> <name>;` pairs in the cdef (excluding
+/// function-pointer typedefs), as raw `name -> underlying` strings.
+fn raw_typedef_map(cdef: &str) -> BTreeMap<String, String> {
+    let mut raw = BTreeMap::new();
+    for line in cdef.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("typedef ") else {
+            continue;
+        };
+        let Some(rest) = rest.strip_suffix(';') else {
+            continue;
+        };
+        // Skip function-pointer typedefs (`typedef ret (*name)(...)`).
+        if rest.contains('(') {
+            continue;
+        }
+        if let Some((underlying, name)) = split_c_declaration_name(rest) {
+            raw.insert(name, underlying);
+        }
+    }
+    raw
+}
+
+/// Map of typedef name -> underlying builtin scalar, for the cdef's simple
+/// scalar typedefs (e.g. zlib's `uLong` -> `unsigned long`). Used so a parameter
+/// typed as an integer/float typedef is recognised as a PHP scalar under
+/// `use_php_scalars_in_params`, instead of demanding a wrapper object.
+fn scalar_typedef_map(raw: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut resolved = BTreeMap::new();
+    for name in raw.keys() {
+        if let Some(scalar) = resolve_typedef_to_scalar(name, raw, 0) {
+            resolved.insert(name.clone(), scalar);
+        }
+    }
+    resolved
+}
+
+/// Byte-pointer base types whose single-level pointer is passed as a PHP string
+/// (kept in sync with [`types::is_char_pointer`]).
+const CHAR_POINTER_BASES: &[&str] = &["char", "unsigned char", "signed char", "uint8_t", "int8_t"];
+
+/// Typedef names that resolve to a single-level pointer to a byte type
+/// (e.g. libtidy's `ctmbstr` -> `const tmbchar *` -> `char *`, libpng's
+/// `png_const_charp` -> `const char *`). A parameter/return typed as one of these
+/// is rewritten to `const char *` so the PHP layer accepts a string, matching how
+/// the C API and the examples treat them.
+fn char_pointer_typedef_set(raw: &BTreeMap<String, String>) -> BTreeSet<String> {
+    raw.keys()
+        .filter(|name| resolves_to_char_pointer(name, raw, 0))
+        .cloned()
+        .collect()
+}
+
+fn resolves_to_char_pointer(name: &str, raw: &BTreeMap<String, String>, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    let Some(underlying) = raw.get(name) else {
+        return false;
+    };
+    match underlying.matches('*').count() {
+        // A single-level pointer: its element type must be a byte type, either a
+        // builtin or another typedef that resolves to one (`tmbchar` -> `char`).
+        1 => {
+            let base = normalize_underlying(&underlying.replace('*', " "));
+            if CHAR_POINTER_BASES.contains(&base.as_str()) {
+                return true;
+            }
+            base.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && resolve_typedef_to_scalar(&base, raw, depth + 1)
+                    .is_some_and(|scalar| CHAR_POINTER_BASES.contains(&scalar.as_str()))
+        }
+        // A plain alias to another typedef (`ctmbstr2` -> `ctmbstr`): follow it.
+        0 if underlying
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_') =>
+        {
+            resolves_to_char_pointer(underlying, raw, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// Strip `const`/`volatile`/`restrict` qualifiers and collapse whitespace.
+fn normalize_underlying(underlying: &str) -> String {
+    underlying
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Replace a char-pointer typedef used directly (not as a pointer-to-pointer)
+/// with `const char *`, so the PHP type layer treats it as a string.
+fn resolve_char_pointer_typedef(type_name: &str, set: &BTreeSet<String>) -> String {
+    if set.contains(type_name.trim()) {
+        "const char *".to_owned()
+    } else {
+        type_name.to_owned()
+    }
+}
+
+fn resolve_typedef_to_scalar(
+    name: &str,
+    raw: &BTreeMap<String, String>,
+    depth: usize,
+) -> Option<String> {
+    if depth > 16 {
+        return None;
+    }
+    let underlying = raw.get(name)?;
+    // A pointer/array typedef is not a value scalar.
+    if underlying.contains('*') || underlying.contains('[') {
+        return None;
+    }
+    if types::scalar_wrapper(underlying).is_some() {
+        return Some(underlying.clone());
+    }
+    // The underlying may itself be another simple typedef (e.g. `Bytef` -> `Byte`
+    // -> `unsigned char`); follow single-identifier chains.
+    let core = underlying.trim();
+    if core
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return resolve_typedef_to_scalar(core, raw, depth + 1);
+    }
+    None
+}
+
+/// Replace a scalar typedef name with its builtin underlying, so the PHP type
+/// layer sees the real type. A by-value typedef becomes a scalar; a single-level
+/// pointer's element is resolved too (`const OnigUChar *` → `const unsigned char *`,
+/// `PCRE2_SPTR` → `const uint8_t *`) so a pointer to a byte typedef is recognised
+/// as a string by [`types::is_char_pointer`]. Arrays and pointer-to-pointer are
+/// left untouched (they stay real pointers).
+fn resolve_scalar_typedef(type_name: &str, map: &BTreeMap<String, String>) -> String {
+    if type_name.contains('[') || type_name.matches('*').count() > 1 {
+        return type_name.to_owned();
+    }
+    type_name
+        .split_whitespace()
+        .map(|token| map.get(token).map(String::as_str).unwrap_or(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Resolve a *pointer* typedef to its underlying base type plus the number of `*`
+/// levels it hides — but only when the typedef actually denotes a pointer.
+/// `FT_Library` (= `FT_LibraryRec_ *`) yields `("struct FT_LibraryRec_", 1)`;
+/// `mpz_ptr` (= `__mpz_struct *`) yields `("__mpz_struct", 1)`. A struct/scalar
+/// alias (`config_t` -> `struct config_t`) is not a pointer, so returns `None` and
+/// is left untouched. Plain aliases to another pointer typedef are followed.
+fn resolve_pointer_typedef_base(
+    name: &str,
+    raw: &BTreeMap<String, String>,
+    depth: usize,
+) -> Option<(String, usize)> {
+    if depth > 16 {
+        return None;
+    }
+    let underlying = raw.get(name)?;
+    if underlying.contains('[') {
+        return None;
+    }
+    let stars = underlying.matches('*').count();
+    let base = normalize_underlying(&underlying.replace('*', " "))
+        .trim()
+        .to_owned();
+    if stars == 0 {
+        // A plain alias to another typedef — follow it only if THAT is a pointer.
+        if base
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return resolve_pointer_typedef_base(&base, raw, depth + 1);
+        }
+        return None;
+    }
+    // The base may itself be a pointer typedef (`typedef Inner* Mid; typedef Mid* X;`).
+    if let Some((inner, inner_stars)) = resolve_pointer_typedef_base(&base, raw, depth + 1) {
+        return Some((inner, stars + inner_stars));
+    }
+    Some((base, stars))
+}
+
+/// Expand a pointer typedef in a parameter/return type so its real pointer depth
+/// shows: `FT_Library *` becomes `struct FT_LibraryRec_ **` (a handle out-param),
+/// `mpz_ptr` becomes `__mpz_struct *` (so the pointee struct gets a wrapper). Types
+/// that are not a single named (possibly-pointed) typedef are left untouched, as are
+/// struct/scalar aliases.
+fn resolve_pointer_typedef(type_name: &str, raw: &BTreeMap<String, String>) -> String {
+    let outer_stars = type_name.matches('*').count();
+    let base_part = type_name.replace('*', " ");
+    let names: Vec<&str> = base_part
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+        .collect();
+    if names.len() != 1 {
+        return type_name.to_owned();
+    }
+    let Some((base, extra_stars)) = resolve_pointer_typedef_base(names[0], raw, 0) else {
+        return type_name.to_owned();
+    };
+    // Only reveal the depth of a pointer to an *aggregate* (struct/opaque). A pointer
+    // typedef whose base is a byte/scalar (`png_charpp` = `char **`) stays opaque so
+    // the existing string/array handling isn't disturbed.
+    let core = base
+        .strip_prefix("struct ")
+        .or_else(|| base.strip_prefix("union "))
+        .or_else(|| base.strip_prefix("enum "))
+        .unwrap_or(&base);
+    if core == "void" || types::scalar_wrapper(core).is_some() {
+        return type_name.to_owned();
+    }
+    let mut out = String::new();
+    if type_name.split_whitespace().any(|token| token == "const") {
+        out.push_str("const ");
+    }
+    out.push_str(&base);
+    let stars = outer_stars + extra_stars;
+    if stars > 0 {
+        out.push(' ');
+        out.extend(std::iter::repeat_n('*', stars));
+    }
+    out
 }
 
 fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
     let line = line.trim();
     if !line.ends_with(';')
         || !line.contains('(')
-        || line.contains("(*")
         || line.starts_with("typedef ")
         // Struct/enum/union definitions and aggregates carry braces; never a
         // plain function prototype.
@@ -577,10 +840,13 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         return None;
     }
 
+    let (params, variadic) = parse_params(line[open + 1..close].trim());
+
     Some(FunctionSignature {
         name,
         return_type,
-        params: parse_params(line[open + 1..close].trim()),
+        params,
+        variadic,
     })
 }
 
@@ -612,17 +878,46 @@ fn split_c_declaration_name(declaration: &str) -> Option<(String, String)> {
     }
 }
 
-fn parse_params(params: &str) -> Vec<FunctionParam> {
+fn parse_params(params: &str) -> (Vec<FunctionParam>, bool) {
     if params.trim().is_empty() || params.trim() == "void" {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
     let mut seen = BTreeMap::new();
-    params
-        .split(',')
+    let mut variadic = false;
+    let params = split_params(params)
+        .into_iter()
         .enumerate()
-        .map(|(index, param)| unique_param_name(parse_param(param, index), &mut seen))
-        .collect()
+        .filter_map(|(index, param)| {
+            if param.trim() == "..." {
+                variadic = true;
+                None
+            } else {
+                Some(unique_param_name(parse_param(param, index), &mut seen))
+            }
+        })
+        .collect();
+
+    (params, variadic)
+}
+
+fn split_params(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    for (index, ch) in params.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(params[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(params[start..].trim());
+    parts
 }
 
 fn unique_param_name(
@@ -640,6 +935,9 @@ fn unique_param_name(
 
 fn parse_param(param: &str, index: usize) -> FunctionParam {
     let param = param.trim();
+    if let Some(pointer) = parse_function_pointer_param(param, index) {
+        return pointer;
+    }
     if let Some((type_name, name)) = split_c_declaration_name(param) {
         return FunctionParam {
             name: sanitize_php_param_name(&name, index),
@@ -651,6 +949,17 @@ fn parse_param(param: &str, index: usize) -> FunctionParam {
         name: format!("arg{index}"),
         type_name: param.to_owned(),
     }
+}
+
+fn parse_function_pointer_param(param: &str, index: usize) -> Option<FunctionParam> {
+    let start = param.find("(*")? + 2;
+    let rest = &param[start..];
+    let end = rest.find(')')?;
+    let name = rest[..end].trim();
+    Some(FunctionParam {
+        name: sanitize_php_param_name(name, index),
+        type_name: "void *".to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -678,6 +987,7 @@ double demo_scale(double value, int factor);\n";
             native_library_name: "demo/demo",
             native_library_version: "1.0.0",
             description: "Demo native library.",
+            symbols: &[],
         }
     }
 
@@ -685,14 +995,54 @@ double demo_scale(double value, int factor);\n";
     fn renders_php_methods() {
         let signatures = sample_signatures();
         // Default variant: wrapper returns (scalars_in_return = false).
-        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, false));
+        insta::assert_snapshot!(render_methods(
+            &sample_options(&signatures),
+            false,
+            false,
+            "__pnlx_boot_test_20260615T000000Z"
+        ));
+    }
+
+    #[test]
+    fn out_parameter_param_accepts_wrappers_and_gates_cdata() {
+        let signatures = parse_function_signatures("void demo_version(int *major, int *minor);\n");
+        let options = sample_options(&signatures);
+        let without_cdata = render_methods(&options, false, false, "");
+        let with_cdata = render_methods(&options, true, false, "");
+
+        // The scalar-pointer out-param is a by-reference NativePointer that also
+        // accepts the integer helper wrapper, in both variants.
+        assert!(
+            without_cdata.contains("#[\\Pnlx\\Attribute\\NativePointer('int')]"),
+            "{without_cdata}"
+        );
+        assert!(
+            without_cdata.contains("int|\\Pnlx\\Types\\AnySizeInteger|array|null &$major"),
+            "{without_cdata}"
+        );
+        // `\FFI\CData` is only offered when allow_cdata is set — never leaked into
+        // the scalar (non-cdata) variant.
+        assert!(
+            !without_cdata.contains("\\FFI\\CData"),
+            "CData leaked into the non-cdata variant: {without_cdata}"
+        );
+        assert!(
+            with_cdata
+                .contains("int|\\Pnlx\\Types\\AnySizeInteger|array|\\FFI\\CData|null &$major"),
+            "{with_cdata}"
+        );
     }
 
     #[test]
     fn renders_php_methods_using_php_scalars() {
         let signatures = sample_signatures();
         // The `scalar/` variant: methods return PHP-native scalars.
-        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, true));
+        insta::assert_snapshot!(render_methods(
+            &sample_options(&signatures),
+            false,
+            true,
+            "__pnlx_boot_test_20260615T000000Z"
+        ));
     }
 
     #[test]
@@ -702,33 +1052,34 @@ double demo_scale(double value, int factor);\n";
     }
 
     #[test]
+    fn stamps_boot_token_from_native_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = dir.path();
+        let entity = generated.join("Demo.php");
+        fs::write(
+            &entity,
+            "<?php\nclass Demo {\n    protected const string PNLX_BOOT_TOKEN = '';\n    public const string PATH = '';\n    public const string HASH = '';\n}\n",
+        )
+        .unwrap();
+
+        stamp_entity_native_library(generated, "Demo", "/usr/lib/libdemo.dylib", "abc123").unwrap();
+
+        let stamped = fs::read_to_string(entity).unwrap();
+        assert!(stamped.contains("protected const string PNLX_BOOT_TOKEN = '__pnlx_boot_abc123';"));
+        assert!(stamped.contains("public const string HASH = 'abc123';"));
+    }
+
+    #[test]
+    fn skips_reserved_php_global_function_names() {
+        let signatures = parse_function_signatures("void exit(int status);\nint demo_ok(void);\n");
+        let rendered = render_global_functions(&sample_options(&signatures));
+        assert!(!rendered.contains("function exit("), "{rendered}");
+        assert!(rendered.contains("function demo_ok("), "{rendered}");
+    }
+
+    #[test]
     fn renders_php_aliases() {
         insta::assert_snapshot!(render_aliases(&sample_signatures()));
-    }
-
-    #[test]
-    fn renders_bridge_cdef() {
-        insta::assert_snapshot!(render_bridge_cdef(&sample_signatures()));
-    }
-
-    #[test]
-    fn renders_bridge_functions() {
-        insta::assert_snapshot!(render_bridge_functions(&sample_signatures()));
-    }
-
-    #[test]
-    fn bridge_escapes_rust_keyword_parameters() {
-        // `fn` is a Rust keyword; the bridge must rename it (SDL_CreateThread has
-        // a parameter literally named `fn`).
-        let signatures = parse_function_signatures("void demo_thread(int fn, void *data);\n");
-        let bridge = render_bridge_functions(&signatures);
-
-        assert!(bridge.contains("fn_: c_int"), "{bridge}");
-        assert!(!bridge.contains("(fn:"), "{bridge}");
-        assert!(
-            bridge.contains("native::demo_thread(fn_, data)"),
-            "{bridge}"
-        );
     }
 
     #[test]
@@ -740,5 +1091,90 @@ int ex_real(int x);\n";
         let signatures = parse_function_signatures(cdef);
         let names: Vec<&str> = signatures.iter().map(|sig| sig.name.as_str()).collect();
         assert_eq!(names, vec!["ex_real"]);
+    }
+
+    #[test]
+    fn parses_variadic_and_function_pointer_parameters() {
+        let cdef = "int printf(const char *format, ...);\n\
+void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));\n";
+        let signatures = parse_function_signatures(cdef);
+
+        assert_eq!(signatures[0].name, "printf");
+        assert!(signatures[0].variadic);
+        assert_eq!(
+            signatures[0].params,
+            vec![FunctionParam {
+                name: "format".to_owned(),
+                type_name: "const char *".to_owned()
+            }]
+        );
+        assert_eq!(signatures[1].name, "qsort");
+        assert!(!signatures[1].variadic);
+        assert_eq!(
+            signatures[1].params[3],
+            FunctionParam {
+                name: "compar".to_owned(),
+                type_name: "void *".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn resolves_char_pointer_typedefs_to_const_char_pointer() {
+        // libtidy's `ctmbstr` -> `const tmbchar *` -> `char *`, and libpng's
+        // `png_const_charp` -> `const char *`. Both should be rewritten to
+        // `const char *` so the PHP layer accepts a string; a pointer-to-pointer
+        // typedef must NOT be rewritten.
+        let cdef = "typedef char tmbchar;\n\
+typedef const tmbchar *ctmbstr;\n\
+typedef const char *png_const_charp;\n\
+typedef char **png_charpp;\n\
+int tidyParseString(int doc, ctmbstr content);\n\
+int png_write(png_const_charp name, png_charpp rows);\n";
+        let signatures = parse_function_signatures(cdef);
+
+        let parse = &signatures[0];
+        assert_eq!(parse.params[1].type_name, "const char *");
+
+        let write = &signatures[1];
+        assert_eq!(write.params[0].type_name, "const char *");
+        // `png_charpp` is `char **`; it stays a real pointer-to-pointer.
+        assert_eq!(write.params[1].type_name, "png_charpp");
+    }
+
+    #[test]
+    fn resolves_pointer_typedef_depth_for_handles_and_struct_pointers() {
+        // A typedef to a struct pointer hides one `*`: revealing it makes
+        // `FT_Library *` a handle out-param (`**`) and gives `mpz_ptr`'s pointee a
+        // wrapper. A pointer-to-byte typedef (`char **`) must stay opaque.
+        let cdef = "typedef struct FT_LibraryRec_ *FT_Library;\n\
+typedef struct __mpz_struct __mpz_struct;\n\
+typedef __mpz_struct *mpz_ptr;\n\
+typedef char **png_charpp;\n\
+int FT_Init_FreeType(FT_Library *alibrary);\n\
+void FT_Done_FreeType(FT_Library library);\n\
+void mpz_init(mpz_ptr x);\n\
+void png_rows(png_charpp rows);\n";
+        let sigs = parse_function_signatures(cdef);
+        assert_eq!(sigs[0].params[0].type_name, "struct FT_LibraryRec_ **");
+        assert_eq!(sigs[1].params[0].type_name, "struct FT_LibraryRec_ *");
+        assert_eq!(sigs[2].params[0].type_name, "__mpz_struct *");
+        // `png_charpp` (= `char **`) is a byte pointer-to-pointer: left untouched.
+        assert_eq!(sigs[3].params[0].type_name, "png_charpp");
+    }
+
+    #[test]
+    fn resolves_byte_typedef_inside_a_pointer_to_a_string() {
+        // A pointer to a scalar byte typedef (oniguruma `const OnigUChar *`,
+        // pcre2 `PCRE2_SPTR8`) resolves its element so is_char_pointer sees it.
+        let cdef = "typedef unsigned char OnigUChar;\n\
+typedef const unsigned char *PCRE2_SPTR8;\n\
+int onig_new(const OnigUChar *pattern);\n\
+int pcre2_compile(PCRE2_SPTR8 pattern);\n";
+        let signatures = parse_function_signatures(cdef);
+        // `const OnigUChar *` → element resolved to `unsigned char`.
+        assert_eq!(signatures[0].params[0].type_name, "const unsigned char *");
+        // `PCRE2_SPTR8` (a pointer typedef) → rewritten to `const char *`.
+        assert_eq!(signatures[1].params[0].type_name, "const char *");
     }
 }

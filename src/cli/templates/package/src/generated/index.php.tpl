@@ -34,6 +34,12 @@ foreach (glob(__DIR__ . '/types/*.php') ?: [] as $typeFile) {
     require_once $typeFile;
 }
 
+// The exported-data-symbol markers, one flat class per file under symbol/ (resolved
+// by \Pnlx\FFI\ArgumentMarshaller; cheap class definitions, no FFI loaded here).
+foreach (glob(__DIR__ . '/symbol/*.php') ?: [] as $symbolFile) {
+    require_once $symbolFile;
+}
+
 // Two feature flags select one of the four generated entity variants at runtime:
 // `allow_cdata` (the cdata/ subdir, params also accept raw \FFI\CData) and
 // `use_php_scalars_in_return` (the scalar/ subdir, methods return native scalars).

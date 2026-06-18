@@ -26,7 +26,19 @@ declare(strict_types=1);
 
 namespace {{NAMESPACE}}\Types;
 
-/** Typed wrapper for a C `{{TYPE}}` pointer value. */
+/** Typed wrapper for a C `{{TYPE}}` value. */
 class {{TYPE}} extends {{BASE}}
 {
+    /**
+     * Wrap an existing `{{TYPE}}` the extension returned, or — when no `\FFI\CData`
+     * is given — allocate a fresh `{{TYPE}}[$size]` in the extension's own FFI scope
+     * (so a complete struct can be created with `new {{TYPE}}()` and passed where the
+     * C API wants a pointer to it).
+     */
+    public function __construct(?\FFI\CData $cdata = null, int $size = 1)
+    {
+        parent::__construct(
+            $cdata ?? {{ENTITY}}::pnlxNativeLibrary()->allocate(sprintf('{{TYPE}}[%d]', $size))
+        );
+    }
 }

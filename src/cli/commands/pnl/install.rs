@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -21,7 +22,6 @@ use crate::validate::{
     validate_pnl_manifest_values, validate_pnlx_manifest_values, validate_schema_version,
 };
 
-use super::bridge::compile_bridge_for_library;
 use super::native::{
     generation_headers_from_resolved_header, resolve_header_for_native, resolve_native_library,
 };
@@ -61,6 +61,7 @@ pub(crate) struct InstallOptions {
 #[derive(Debug, Default)]
 struct InstallState {
     stack: Vec<String>,
+    dependency_constraints: BTreeMap<String, Vec<String>>,
 }
 
 /// Apply `--enable-use-functions` / `--enable-allow-cdata` to the manifest,
@@ -604,6 +605,35 @@ impl ExtensionSource {
     }
 }
 
+fn is_trusted_extension_source(source: &ExtensionSource, extension_root: &Path) -> bool {
+    if crate::config::is_authorized_repository(source.source_url()) {
+        return true;
+    }
+
+    if matches!(source, ExtensionSource::File { .. })
+        && let Some(remote_url) = local_git_origin_url(extension_root)
+    {
+        return crate::config::is_authorized_repository(&remote_url);
+    }
+
+    false
+}
+
+fn local_git_origin_url(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(output.stdout).ok()?;
+    let url = url.trim();
+    (!url.is_empty()).then(|| url.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_git_extension(
     root: &Path,
@@ -719,14 +749,39 @@ fn install_local_extension(
     state: &mut InstallState,
     expected_content_hash: Option<&str>,
 ) -> Result<()> {
-    let extension =
+    let mut extension =
         read_json::<PnlxManifest>(&extension_root.join(crate::config::PNLX_MANIFEST_FILE))?;
     validate_schema_version(&extension.schema_version)?;
     validate_pnlx_manifest_values(&extension)?;
+    // Canonicalize a two-part upstream version (e.g. pcre2 `10.43`) so the path it
+    // installs to, the lockfile, and the `=<version>` pin in `pnl.json` are all valid
+    // three-part semver.
+    extension.version = crate::version::to_canonical_semver(&extension.version);
+
+    // Refuse early (before running any install scripts) when the package does
+    // not declare support for this platform — e.g. a library that is not
+    // packaged for Alpine/musl.
+    let current = crate::platform::current_platform_requirement();
+    if !crate::platform::platform_supported(&extension.platforms, &current) {
+        let supported = extension
+            .platforms
+            .iter()
+            .map(crate::platform::describe_platform)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "{} {} does not support this platform ({}); supported platforms: {}",
+            extension.name,
+            extension.version,
+            crate::platform::describe_platform(&current),
+            supported
+        );
+    }
 
     // Enforce an `@<version>` pin or a lockfile restore against the resolved version.
+    // Both sides are canonicalized so a two-part pin (`@10.43`) matches `10.43.0`.
     if let Some(expected) = expected_version
-        && extension.version != expected
+        && extension.version != crate::version::to_canonical_semver(expected)
     {
         bail!(
             "expected {} version {expected}, but the resolved package is version {}",
@@ -753,7 +808,7 @@ fn install_local_extension(
         &options.interaction,
         options.allow_unverified_install_scripts,
         &options.allowed_install_script_hashes,
-        crate::config::is_authorized_repository(source.source_url()),
+        is_trusted_extension_source(&source, extension_root),
     )?;
 
     ensure_not_cyclic(state, &extension.name)?;
@@ -790,7 +845,6 @@ fn install_local_extension(
     // function-like macro that calls one resolves to that class instead of
     // becoming a thrower. The dependencies were installed (and locked) above.
     let dependency_functions = collect_dependency_functions(root, &extension.dependencies, &lock);
-
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
         // Stamp the first-install time, preserving it across reinstalls so the
@@ -822,6 +876,12 @@ fn install_local_extension(
                 sha256: native.sha256.clone(),
             },
         );
+        let native_path = native.path.clone();
+        let native_sha256 = native.sha256.clone();
+        // Limit the generated cdef to symbols the installed library actually
+        // exports, so version/build skew (a declared-but-absent function) does
+        // not fail the whole FFI load.
+        let exported = crate::commands::pnl::native::exported_symbols(&native_path);
         pathmap.requires.insert(key.clone(), native);
         pathmap.headers.insert(key.clone(), header);
         generate_installed_package_artifacts(
@@ -833,27 +893,17 @@ fn install_local_extension(
             options.alias_class.as_deref(),
             options.function_prefix.as_deref(),
             &dependency_functions,
+            exported.as_ref(),
         )?;
-        if let Some(bridge) = compile_bridge_for_library(
-            root,
-            &installed_extension_root,
-            key,
-            &pathmap.requires[key],
-        )? {
-            // Bake the just-built bridge's absolute path + hash into the entity
-            // constants (left empty at generation time).
-            if let Some(fqcn) = entity_class_fqn(&extension) {
-                let class_name = fqcn.rsplit('\\').next().unwrap_or(&fqcn);
-                let bridge_path = std::fs::canonicalize(root.join(&bridge.library))
-                    .unwrap_or_else(|_| root.join(&bridge.library));
-                crate::generate::stamp_entity_bridge(
-                    &installed_extension_root.join(crate::config::GENERATED_DIR),
-                    class_name,
-                    &bridge_path.to_string_lossy(),
-                    &bridge.sha256,
-                )?;
-            }
-            pathmap.bridges.insert(key.clone(), bridge);
+        if let Some(fqcn) = entity_class_fqn(&extension) {
+            // Bake the resolved native library path + hash into the entity constants.
+            let class_name = fqcn.rsplit('\\').next().unwrap_or(&fqcn);
+            crate::generate::stamp_entity_native_library(
+                &installed_extension_root.join(crate::config::GENERATED_DIR),
+                class_name,
+                &native_path,
+                &native_sha256,
+            )?;
         }
     }
 
@@ -918,36 +968,49 @@ fn install_extension_dependencies(
     state: &mut InstallState,
 ) -> Result<()> {
     for (dependency, requirement) in &extension.dependencies {
-        if installed_dependency_satisfies(root, dependency, &requirement.version)? {
+        let constraints = state
+            .dependency_constraints
+            .entry(dependency.clone())
+            .or_default();
+        if !constraints.contains(&requirement.version) {
+            constraints.push(requirement.version.clone());
+        }
+        let constraint = combined_constraint(constraints);
+
+        if installed_dependency_satisfies(root, dependency, &constraint)? {
             crate::ui::info(&format!(
-                "dependency {dependency} already satisfies {}",
-                requirement.version
+                "dependency {dependency} already satisfies {constraint}"
             ));
             continue;
         }
         crate::ui::step(&format!(
             "installing dependency {dependency} {}",
-            requirement.version
+            constraint
         ));
         install_bare_name(
             root,
             manifest,
             dependency,
-            Some(&requirement.version),
+            Some(&constraint),
             None,
             None,
             options,
             state,
         )?;
-        if !installed_dependency_satisfies(root, dependency, &requirement.version)? {
-            bail!(
-                "installed dependency {dependency} does not satisfy {}",
-                requirement.version
-            );
+        if !installed_dependency_satisfies(root, dependency, &constraint)? {
+            bail!("installed dependency {dependency} does not satisfy {constraint}");
         }
     }
     let _ = state.stack.pop();
     Ok(())
+}
+
+fn combined_constraint(constraints: &[String]) -> String {
+    constraints
+        .iter()
+        .map(|constraint| format!("({constraint})"))
+        .collect::<Vec<_>>()
+        .join(" & ")
 }
 
 fn installed_dependency_satisfies(root: &Path, package: &str, constraint: &str) -> Result<bool> {
@@ -1090,7 +1153,10 @@ fn verify_locked_integrity(
 #[cfg(test)]
 mod tests {
     use super::super::package::tree_sha256;
-    use super::{InstallSource, path_from_file_url, resolve_install_source, split_version_pin};
+    use super::{
+        ExtensionSource, InstallSource, is_trusted_extension_source, path_from_file_url,
+        resolve_install_source, split_version_pin,
+    };
 
     #[test]
     fn resolves_linux_installation_keys_from_os_release() {
@@ -1240,6 +1306,37 @@ mod tests {
             }
             InstallSource::Git(_) => panic!("expected local install source"),
         }
+    }
+
+    #[test]
+    fn trusts_local_packages_from_authorized_git_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("packages").join("libsdl");
+        std::fs::create_dir_all(&package).unwrap();
+
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg(temp.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let config = std::process::Command::new("git")
+            .arg("-C")
+            .arg(temp.path())
+            .args([
+                "config",
+                "remote.origin.url",
+                "git@github.com:m3m0r7/pnl-packages.git",
+            ])
+            .output()
+            .unwrap();
+        assert!(config.status.success());
+
+        let source = ExtensionSource::File {
+            source_url: format!("file://{}", package.display()),
+        };
+
+        assert!(is_trusted_extension_source(&source, &package));
     }
 
     #[test]

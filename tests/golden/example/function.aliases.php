@@ -20,12 +20,12 @@ declare(strict_types=1);
  */
 
 return [
-    'ExampleAdd' => 'pnlx_bridge_example_add',
-    'ExampleVersion' => 'pnlx_bridge_example_version',
-    'exampleAdd' => 'pnlx_bridge_example_add',
-    'exampleVersion' => 'pnlx_bridge_example_version',
-    'example_add' => 'pnlx_bridge_example_add',
-    'example_version' => 'pnlx_bridge_example_version',
-    'exampleadd' => 'pnlx_bridge_example_add',
-    'exampleversion' => 'pnlx_bridge_example_version',
+    'ExampleAdd' => 'example_add',
+    'ExampleVersion' => 'example_version',
+    'exampleAdd' => 'example_add',
+    'exampleVersion' => 'example_version',
+    'example_add' => 'example_add',
+    'example_version' => 'example_version',
+    'exampleadd' => 'example_add',
+    'exampleversion' => 'example_version',
 ];

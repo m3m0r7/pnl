@@ -30,9 +30,9 @@ namespace {{NAMESPACE}};
  * `__callStatic`, so this class holds ONLY the methods named after C functions
  * (plus the metadata constants) and nothing here can be shadowed by one.
  *
- * Metadata is build-time information baked in as constants: `{{CLASS}}::NAME`,
- * `VERSION`, `HASH`, `DESCRIPTION`, `PATH`. `HASH`/`PATH` describe the compiled
- * bridge and are stamped in once it has been built.
+ * Metadata is install-time information baked in as constants: `{{CLASS}}::NAME`,
+ * `VERSION`, `HASH`, `DESCRIPTION`, `PATH`. `HASH`/`PATH` describe the resolved
+ * native library.
  */
 #[\Pnlx\Attribute\NativeLibraryName('{{NATIVE_LIBRARY_NAME}}')]
 #[\Pnlx\Attribute\NativeLibraryVersion('{{NATIVE_LIBRARY_VERSION}}')]
@@ -41,23 +41,18 @@ class {{CLASS}} extends \Pnlx\Extension\AbstractExtension
 {
     protected const string FFI_FILE = '{{FFI_FILE}}';
 
+    protected const string PNLX_BOOT_TOKEN = '{{BOOT_TOKEN}}';
+
     public const string NAME = '{{NATIVE_LIBRARY_NAME}}';
 
     public const string VERSION = '{{NATIVE_LIBRARY_VERSION}}';
 
     public const string DESCRIPTION = '{{DESCRIPTION}}';
 
-    // The compiled bridge's path and content hash, stamped in after it is built.
-    public const string PATH = '{{BRIDGE_PATH}}';
+    // The resolved native library path and content hash, stamped in at install time.
+    public const string PATH = '{{NATIVE_PATH}}';
 
-    public const string HASH = '{{BRIDGE_HASH}}';
+    public const string HASH = '{{NATIVE_HASH}}';
 
 {{METHODS}}
 }
-
-// One-time boot: the first static call boots and returns without dispatching, so
-// running it here (at load) means every later `{{CLASS}}::c_function(...)` call
-// dispatches straight to the native library. `initialize` is not a real method —
-// it is caught by the base `__callStatic`, so it can never clash with a C
-// function of the same name.
-{{CLASS}}::initialize();

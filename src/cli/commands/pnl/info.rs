@@ -98,8 +98,8 @@ fn print_install_steps() {
     section("What `pnl install` does");
     crate::ui::step("install the native libraries/headers (commands below, if any)");
     crate::ui::step("resolve each native library and header from your library paths");
-    crate::ui::step("generate PHP FFI bindings and a Rust bridge for the headers");
-    crate::ui::step("compile the bridge and record everything in the lockfile/pathmap");
+    crate::ui::step("generate PHP FFI bindings for the headers");
+    crate::ui::step("record everything in the lockfile/pathmap");
 }
 
 /// The per-platform native-dependency install recipes.

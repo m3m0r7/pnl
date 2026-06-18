@@ -30,7 +30,7 @@ spl_autoload_register(static function (string $class): void {
 
 // Function definitions are not autoloadable; require them once (idempotent so the
 // loader is safe to include more than once or alongside another SDK copy). The
-// `Pnlx\Helpers\*` classes (the self-contained value-type layer) are resolved by
+// `Pnlx\Types\*` classes (the self-contained value-type layer) are resolved by
 // the autoloader above, like the rest of the SDK. The `Pnlx\Util\*` functions
 // (is_null + the wrapper-aware is_int/is_float/is_string/gettype helpers) live in
 // one file.

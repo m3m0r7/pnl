@@ -16,10 +16,8 @@ pub const LOCK_FILE: &str = "{{lockfile}}";
 pub const PATHMAP_FILE: &str = "{{pathmap}}";
 pub const AUTOLOAD_FILE: &str = "{{autoload}}";
 pub const GENERATED_DIR: &str = "{{generated_dir}}";
-pub const BRIDGE_DIR: &str = "{{bridge_dir}}";
 pub const ALIASES_FILE: &str = "{{aliases_file}}";
 pub const FFI_FILE_SUFFIX: &str = "{{ffi_suffix}}";
-pub const BRIDGE_FILE_SUFFIX: &str = "{{bridge_suffix}}";
 /// The target OS this binary was built for (`std::env::consts::OS` form).
 pub const BUILD_OS: &str = "{{build_os}}";
 /// The target architecture this binary was built for (`std::env::consts::ARCH` form).

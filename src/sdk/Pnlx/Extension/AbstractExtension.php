@@ -13,10 +13,8 @@ use Pnlx\Runtime;
  *
  * A C library is a bag of functions, not an object, so entities are never
  * instantiated: call them statically, `Libsdl::SDL_Init(...)`. The first static
- * call boots the extension once (opens the native bridge) and returns without
- * dispatching; the generated file calls `<Class>::initialize()` once at the very
- * bottom of its definition to absorb that bootstrap, so every later call goes
- * straight to the native library.
+ * call boots the extension once (opens the native library) and then dispatches
+ * the requested C function.
  *
  * Collision-safety is the whole point of this shape: the ONLY named surface the
  * generated subclass inherits is the magic {@see __callStatic()} (a C function
@@ -25,18 +23,20 @@ use Pnlx\Runtime;
  * external helpers (`\Pnlx\FFI\ArgumentMarshaller::…`). So a C function named
  * `boot`, `dispatch`, `name`, … can never clash with the runtime.
  *
- * Metadata is *build-time* information, baked into the generated subclass as
+ * Metadata is install-time information, baked into the generated subclass as
  * constants (`Libsdl::NAME`, `VERSION`, `HASH`, `DESCRIPTION`, `PATH`) when the
- * package is installed — not read back from the manifest/pathmap at runtime. The
- * `HASH`/`PATH` of the compiled bridge are stamped in after it is built.
+ * package is installed — not read back from the manifest/pathmap at runtime.
  */
 abstract class AbstractExtension
 {
     /** The package's generated FFI cdef file; the subclass overrides it. */
     protected const string FFI_FILE = '';
 
-    /** The generated alias-map file (PHP name -> bridge symbol), a cdef sibling. */
+    /** The generated alias-map file (PHP name -> native symbol), a cdef sibling. */
     protected const string ALIASES_FILE = 'function.aliases.php';
+
+    /** Per-generated-class boot sentinel; subclasses override with a hard-to-collide token. */
+    protected const string PNLX_BOOT_TOKEN = '';
 
     public const string NAME = '';
 
@@ -49,7 +49,7 @@ abstract class AbstractExtension
     public const string PATH = '';
 
     /**
-     * Compiled native library per concrete class.
+     * Loaded native library per concrete class.
      *
      * @var array<class-string, NativeLibrary>
      */
@@ -68,10 +68,6 @@ abstract class AbstractExtension
     }
 
     /**
-     * The first static call on a class boots it and returns without dispatching;
-     * the generated file's bottom-of-class `initialize()` call absorbs that, so a
-     * later C function of any name (including `initialize`) dispatches normally.
-     *
      * The generated static methods also route their native dispatch through here
      * (`static::__callStatic('SDL_Init', [...])`) because the name `__callStatic`
      * can never collide with a C function.
@@ -80,17 +76,39 @@ abstract class AbstractExtension
      */
     public static function __callStatic(string $name, array $arguments): mixed
     {
-        if (!isset(self::$initialized[static::class])) {
-            self::boot();
+        if (static::PNLX_BOOT_TOKEN !== '' && $name === static::PNLX_BOOT_TOKEN) {
+            if (!isset(self::$initialized[static::class])) {
+                self::boot();
+            }
 
             return null;
+        }
+
+        if (!isset(self::$initialized[static::class])) {
+            self::boot();
         }
 
         return self::$natives[static::class]->call($name, $arguments);
     }
 
     /**
-     * One-time per-class setup: verify the baked bridge against its constant hash
+     * The booted {@see NativeLibrary} for this extension, used SDK-internally to
+     * resolve exported globals ({@see \Pnlx\FFI\ArgumentMarshaller}) and allocate
+     * package structs (`new ...\Types\<struct>()`). Examples never call this
+     * directly. Named with a `pnlx` prefix so it can't realistically clash with a
+     * C function (and a data symbol can't share a function symbol's name anyway).
+     */
+    public static function pnlxNativeLibrary(): NativeLibrary
+    {
+        if (!isset(self::$initialized[static::class])) {
+            self::boot();
+        }
+
+        return self::$natives[static::class];
+    }
+
+    /**
+     * One-time per-class setup: verify the baked native library against its constant hash
      * and open it. The cdef and alias map are siblings of the generated entity, so
      * we locate them from this class's own file — no manifest or pathmap lookup.
      *
@@ -108,12 +126,11 @@ abstract class AbstractExtension
             Runtime::useScalarsInParams($runtime->projectRoot()),
         );
 
-        if (!is_file(static::PATH)) {
-            throw new ExtensionLoadException('an extension cannot be loaded');
-        }
-        $actual = hash_file('sha256', static::PATH);
-        if ($actual === false || !hash_equals(static::HASH, $actual)) {
-            throw new ExtensionLoadException('Native bridge hash does not match the generated constant.');
+        if (is_file(static::PATH) && static::HASH !== '') {
+            $actual = hash_file('sha256', static::PATH);
+            if ($actual === false || !hash_equals(static::HASH, $actual)) {
+                throw new ExtensionLoadException('Native library hash does not match the generated constant.');
+            }
         }
 
         // Entity variants live in cdata/scalar subdirs; the cdef/alias map sit in
@@ -127,6 +144,7 @@ abstract class AbstractExtension
             $directory . '/' . static::FFI_FILE,
             static::PATH,
             $directory . '/' . static::ALIASES_FILE,
+            false,
         );
 
         self::$initialized[static::class] = true;

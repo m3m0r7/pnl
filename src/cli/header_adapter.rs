@@ -32,6 +32,16 @@ pub struct HeaderAdapterOptions {
     /// not define but a (recursive) `dependencies` package does, so a macro that
     /// calls one renders a static call to the dependency instead of throwing.
     pub dependency_functions: BTreeMap<String, String>,
+    /// When set, cdef function declarations are limited to these exported
+    /// symbols (so the installed library's version/build skew can't fail the
+    /// FFI load). `None` keeps every declaration.
+    pub exported_symbols: Option<BTreeSet<String>>,
+    /// The package's resolved header file paths. Their directory (and a
+    /// subdirectory named after the umbrella header, e.g. `sodium.h` ->
+    /// `sodium/`) define which `#include`d headers are part of *this* package,
+    /// so functions split across the package's own sub-headers are collected
+    /// while system / other-library headers are not.
+    pub package_header_paths: Vec<PathBuf>,
 }
 
 /// A function-like macro turned into a PHP function (in `\Pnlx\Func\<Class>`).
@@ -53,6 +63,18 @@ pub struct HeaderArtifacts {
     /// `(name, php_value_expression)` pairs, in source order, for `const.php`.
     pub constants: Vec<(String, String)>,
     pub macro_functions: Vec<MacroFunction>,
+    /// Exported data symbols (C globals), for generating per-symbol marker classes.
+    pub symbols: Vec<DataSymbol>,
+}
+
+/// One exported data symbol (a C global variable). `pointer` is true when the
+/// symbol's own type is already a pointer (the API wants its value, e.g.
+/// `OnigDefaultSyntax`); false for a value the API takes the address of (e.g. the
+/// struct instance `OnigEncodingUTF8`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSymbol {
+    pub name: String,
+    pub pointer: bool,
 }
 
 /// Translate a C header into a normalised cdef suitable for PHP `FFI::cdef`,
@@ -78,14 +100,46 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     let workspace = Workspace::new()?;
     let prelude_path = workspace.write("prelude.h", PRELUDE)?;
 
-    let collected = parse_with_neutralized_macros(&index, &workspace, &prelude_path, header)?;
+    let owned_dirs = owned_package_dirs(&options.package_header_paths);
+    let include_dirs = include_search_dirs(&options.package_header_paths);
+    let collected = parse_with_neutralized_macros(
+        &index,
+        &workspace,
+        &prelude_path,
+        header,
+        &owned_dirs,
+        &include_dirs,
+    )?;
     let constants = header_constants(&collected, prefix);
     let constant_names: BTreeSet<String> = constants.iter().map(|(name, _)| name.clone()).collect();
     Ok(HeaderArtifacts {
-        cdef: render(&collected, prefix),
+        cdef: render(&collected, options.exported_symbols.as_ref()),
         macro_functions: macro_functions(&collected, prefix, &constant_names, options),
+        symbols: data_symbols(&collected, options.exported_symbols.as_ref()),
         constants,
     })
+}
+
+/// The exported data symbols to surface as marker classes, filtered by the
+/// installed library's exports (same guard as the cdef's `extern` declarations).
+fn data_symbols(
+    collected: &Collected,
+    exported_symbols: Option<&BTreeSet<String>>,
+) -> Vec<DataSymbol> {
+    collected
+        .globals
+        .iter()
+        .filter_map(|global| {
+            let name = global_decl_name(global)?;
+            if exported_symbols.is_some_and(|symbols| !symbols.contains(&name)) {
+                return None;
+            }
+            Some(DataSymbol {
+                pointer: global.contains('*'),
+                name,
+            })
+        })
+        .collect()
 }
 
 /// Parse the header, neutralising the ABI/attribute macros (e.g. `DECLSPEC`,
@@ -103,19 +157,34 @@ fn parse_with_neutralized_macros(
     workspace: &Workspace,
     prelude_path: &Path,
     header: &str,
+    owned_dirs: &[PathBuf],
+    include_dirs: &[PathBuf],
 ) -> Result<Collected> {
-    let arguments = [
-        "-x",
-        "c",
-        "-std=c11",
-        "-ferror-limit=0",
+    let mut arguments = vec![
+        "-x".to_owned(),
+        "c".to_owned(),
+        "-std=c11".to_owned(),
+        "-ferror-limit=0".to_owned(),
         // Keep `#define`s in the AST as MacroDefinition cursors so object-like
         // constant macros can be re-emitted as PHP `const`s.
-        "-Xclang",
-        "-detailed-preprocessing-record",
-        "-include",
-        prelude_path.to_str().context("prelude path is not UTF-8")?,
+        "-Xclang".to_owned(),
+        "-detailed-preprocessing-record".to_owned(),
+        "-include".to_owned(),
+        prelude_path
+            .to_str()
+            .context("prelude path is not UTF-8")?
+            .to_owned(),
     ];
+    // Add the package's own include roots so `#include <libxml/xmlstring.h>`
+    // style directives inside the concatenated headers resolve to the real
+    // sub-headers (otherwise types defined only there, e.g. `xmlChar`, are
+    // undefined and collapse to `int`). Only dirs nested below a system include
+    // root are added, so `/usr/include` packages are unaffected.
+    for dir in include_dirs {
+        if let Some(dir) = dir.to_str() {
+            arguments.push(format!("-I{dir}"));
+        }
+    }
     let parse = |source: &str| -> Result<_> {
         let header_path = workspace.write("header.h", source)?;
         index
@@ -133,22 +202,29 @@ fn parse_with_neutralized_macros(
         .difference(&enum_constants)
         .cloned()
         .collect();
+    let mut opaque_types: BTreeMap<String, &'static str> = BTreeMap::new();
 
     for _ in 0..32 {
-        let unit = parse(&neutralized_source(header, &defines))?;
+        let unit = parse(&neutralized_source(header, &defines, &opaque_types))?;
 
         let mut discovered = false;
         for diagnostic in unit.get_diagnostics() {
             if let Some(name) = unknown_type_name(&diagnostic.get_text())
                 && !enum_constants.contains(&name)
-                && defines.insert(name)
             {
-                discovered = true;
+                if let Some(kind) = declared_aggregate_kind(header, &name) {
+                    if opaque_types.insert(name, kind).is_none() {
+                        discovered = true;
+                    }
+                } else if defines.insert(name) {
+                    discovered = true;
+                }
             }
         }
 
         if !discovered {
-            return Ok(collect(&unit.get_entity()));
+            let main_header = workspace.root.join("header.h");
+            return Ok(collect(&unit.get_entity(), &main_header, owned_dirs));
         }
     }
 
@@ -166,13 +242,46 @@ fn abi_macro_candidates(header: &str) -> BTreeSet<String> {
     // (`#define LIBUSB_API_VERSION 0x…`) feed `#if` expressions. The header's own
     // (possibly platform-conditional) definition is the right one.
     let defined = header_defined_macros(header);
+    // Macros used in preprocessor conditionals (`#ifndef Z_SOLO`, `#if
+    // defined(FOO)`) are feature/config gates, not ABI annotations. Stubbing
+    // one with an empty `#define` would flip the condition and silently drop
+    // whole `#ifndef`-guarded blocks (e.g. zlib's `compress`/`gz*` functions).
+    let conditional = header_conditional_macros(header);
     let mut candidates = BTreeSet::new();
     for token in identifier_tokens(header) {
-        if is_abi_macro_token(token) && !defined.contains(token) {
+        if is_abi_macro_token(token) && !defined.contains(token) && !conditional.contains(token) {
             candidates.insert(token.to_owned());
         }
     }
     candidates
+}
+
+/// Identifiers that appear in preprocessor conditional directives (`#if`,
+/// `#ifdef`, `#ifndef`, `#elif`, and `defined(...)`). These gate compilation and
+/// must never be neutralised.
+fn header_conditional_macros(header: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in header.lines() {
+        let rest = line.trim_start();
+        let Some(rest) = rest.strip_prefix('#') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let directive = rest
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .next()
+            .unwrap_or("");
+        let operands = match directive {
+            "ifdef" | "ifndef" | "if" | "elif" => &rest[directive.len()..],
+            _ => continue,
+        };
+        for token in identifier_tokens(operands) {
+            if token != "defined" {
+                names.insert(token.to_owned());
+            }
+        }
+    }
+    names
 }
 
 /// Names introduced by `#define NAME …` anywhere in the header.
@@ -242,15 +351,78 @@ fn gather_enum_constants(translation_unit: &Entity<'_>) -> BTreeSet<String> {
     constants
 }
 
-fn neutralized_source(header: &str, defines: &BTreeSet<String>) -> String {
+/// Whether `name` is ever invoked as a function-like macro in the header — i.e.
+/// appears as a whole token immediately (modulo whitespace) followed by `(`. Used
+/// to choose a passthrough stub over an empty object-like one when neutralising it.
+fn used_function_like(header: &str, name: &str) -> bool {
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = header.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = header[from..].find(name) {
+        let start = from + offset;
+        let end = start + name.len();
+        from = end;
+        // Reject a match that is part of a longer identifier on either side.
+        if start > 0 && is_ident(bytes[start - 1]) {
+            continue;
+        }
+        if end < bytes.len() && is_ident(bytes[end]) {
+            continue;
+        }
+        let mut cursor = end;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'(' {
+            return true;
+        }
+    }
+    false
+}
+
+fn neutralized_source(
+    header: &str,
+    defines: &BTreeSet<String>,
+    opaque_types: &BTreeMap<String, &'static str>,
+) -> String {
     let mut source = String::new();
     for name in defines {
         source.push_str("#define ");
         source.push_str(name);
+        // A macro invoked function-like — wrapping the return type (`FT_EXPORT( T )`)
+        // or the parameter list (zlib's `OF((args))`) — must be stubbed as a
+        // passthrough that yields its arguments, or the leftover parentheses break
+        // the declaration. An object-like stub is right for the rest (`ZEXTERN`).
+        if used_function_like(header, name) {
+            source.push_str("(...) __VA_ARGS__");
+        }
         source.push('\n');
+    }
+    for (name, kind) in opaque_types {
+        source.push_str("typedef ");
+        source.push_str(kind);
+        source.push(' ');
+        source.push_str(name);
+        source.push(' ');
+        source.push_str(name);
+        source.push_str(";\n");
     }
     source.push_str(header);
     source
+}
+
+fn declared_aggregate_kind(header: &str, name: &str) -> Option<&'static str> {
+    if contains_c_identifier(header, &format!("typedef struct {name}"))
+        || contains_c_identifier(header, &format!("struct {name}"))
+    {
+        return Some("struct");
+    }
+    if contains_c_identifier(header, &format!("typedef union {name}"))
+        || contains_c_identifier(header, &format!("union {name}"))
+    {
+        return Some("union");
+    }
+    None
 }
 
 /// Extract `unknown type name 'X'` from a diagnostic message.
@@ -281,9 +453,17 @@ struct RawFnMacro {
 #[derive(Default)]
 struct Collected {
     structs: BTreeMap<String, String>,
+    struct_aliases: BTreeMap<String, String>,
+    unions: BTreeMap<String, String>,
+    union_aliases: BTreeMap<String, String>,
     enums: BTreeSet<String>,
+    typedef_names: BTreeSet<String>,
     typedefs: Vec<String>,
     functions: Vec<String>,
+    /// Exported global variables (`extern <type> <name>;`), so a PHP example can
+    /// take their address through `NativeLibrary::addressOf()` for an API that wants
+    /// a pointer to a global (oniguruma's `ONIG_ENCODING_UTF8` = `&OnigEncodingUTF8`).
+    globals: Vec<String>,
     macros: Vec<RawMacro>,
     /// Function-like macros by name, for constant-argument expansion.
     fn_macros: BTreeMap<String, RawFnMacro>,
@@ -292,19 +472,180 @@ struct Collected {
     function_names: BTreeSet<String>,
     /// `(name, value)` for every enumerator, in source order, for `const.php`.
     enum_constants: Vec<(String, i64)>,
+    /// Enumerators from #included (non-owned) headers, e.g. libtidy's
+    /// `TidyOptionId` values in `tidyenum.h` when it sits flat in `/usr/include`
+    /// (Alpine) rather than a package subdir (Ubuntu's `/usr/include/tidy/`).
+    /// Only the symbol-prefix-matching ones are surfaced in `const.php`, so this
+    /// can't drag in unrelated system enumerators.
+    pool_enum_constants: Vec<(String, i64)>,
+    /// Plain typedefs (`name -> underlying display`) discovered in *included*
+    /// headers (e.g. `voidpf`, `uLong` from zlib's `zconf.h`). Not emitted
+    /// wholesale; only those a kept declaration transitively references are
+    /// resolved into the cdef (see `resolve_pool_types`).
+    pool_typedefs: BTreeMap<String, String>,
+    /// Record/enum typedefs from included headers: `alias -> struct/union tag`,
+    /// and bare enum-typedef names projected onto `int`.
+    pool_struct_aliases: BTreeMap<String, String>,
+    pool_union_aliases: BTreeMap<String, String>,
+    pool_enums: BTreeSet<String>,
 }
 
-fn collect(translation_unit: &Entity<'_>) -> Collected {
+/// Whether a declaration belongs to the package's own header rather than an
+/// `#include`d one. Unlike `Entity::is_in_main_file`, this uses the *expansion*
+/// location, so a function declared through macros (e.g. zlib's `ZEXTERN ret
+/// ZEXPORT name OF((args))`, or libbz2's `BZ_API(name)`) is still recognised as
+/// belonging to the main file instead of being misattributed to the macro body.
+fn entity_owned(entity: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf]) -> bool {
+    let Some(path) = entity
+        .get_location()
+        .and_then(|location| location.get_expansion_location().file)
+        .map(|file| file.get_path())
+    else {
+        return false;
+    };
+    // The concatenated package headers are written to a temp `header.h`; match it
+    // by leaf name (libclang may normalise the directory, e.g. `/private/var`).
+    if path.file_name() == main_header.file_name() {
+        return true;
+    }
+    owned_dirs.iter().any(|dir| path.starts_with(dir))
+}
+
+/// Directories whose headers count as part of this package: each resolved
+/// header's own directory (unless it's a shared system include root) plus a
+/// subdirectory named after the umbrella header (`sodium.h` -> `sodium/`),
+/// where libraries keep their split-out sub-headers.
+fn owned_package_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if !is_system_include_root(parent) && !dirs.contains(&parent.to_path_buf()) {
+            dirs.push(parent.to_path_buf());
+        }
+        if let Some(stem) = path.file_stem() {
+            let sub = parent.join(stem);
+            if !dirs.contains(&sub) {
+                dirs.push(sub);
+            }
+        }
+    }
+    dirs
+}
+
+/// `-I` search roots for the package's nested headers. For a resolved header
+/// such as `/usr/include/libxml2/libxml/parser.h`, libclang's default search
+/// path covers `/usr/include` but not `/usr/include/libxml2`, so an internal
+/// `#include <libxml/xmlstring.h>` fails and types defined only there collapse
+/// to `int`. Each ancestor directory between the header and the first system
+/// include root (exclusive) is returned, so packages laid out directly under
+/// `/usr/include` (already on the default path) gain no extra roots.
+///
+/// Only headers that actually live below a system include root contribute roots;
+/// a header elsewhere (a test fixture, a `self_build` checkout) yields none,
+/// rather than walking up to `/` and feeding libclang bogus `-I` paths.
+fn include_search_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        let mut pending: Vec<PathBuf> = Vec::new();
+        let mut current = path.parent();
+        let mut under_system_root = false;
+        while let Some(dir) = current {
+            if is_system_include_root(dir) {
+                under_system_root = true;
+                break;
+            }
+            pending.push(dir.to_path_buf());
+            current = dir.parent();
+        }
+        if under_system_root {
+            for dir in pending {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// A top-level include directory shared with the C library and system headers,
+/// so it must not, on its own, mark every header inside it as package-owned.
+fn is_system_include_root(dir: &Path) -> bool {
+    let path = dir.to_string_lossy();
+    if matches!(
+        path.as_ref(),
+        "/usr/include" | "/usr/local/include" | "/opt/homebrew/include" | "/include"
+    ) {
+        return true;
+    }
+    // Debian/Ubuntu multiarch root, e.g. `/usr/include/x86_64-linux-gnu`.
+    dir.parent() == Some(Path::new("/usr/include"))
+        && dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.ends_with("-gnu") || name.ends_with("-musl") || name.contains("-linux-")
+            })
+}
+
+/// Names of object-like macros that are pure annotations: ones that expand to
+/// nothing (zlib's `FAR`, `ZEXPORT`) or to a GCC `__attribute__((…))` (FFmpeg's
+/// `av_const`, nettle's `_NETTLE_ATTRIBUTE_PURE`). libclang consumes these as
+/// attributes, but the *source* spelling still carries the macro name, so they
+/// must be dropped when a type is reconstructed from source tokens, or they leak
+/// into the cdef (`void FAR *`, `int64_t av_const av_gcd(...)`). Gathered from the
+/// whole TU, since they usually live in an #included header.
+fn gather_empty_macros(translation_unit: &Entity<'_>) -> BTreeSet<String> {
+    let mut empty = BTreeSet::new();
+    for entity in translation_unit.get_children() {
+        if entity.get_kind() != EntityKind::MacroDefinition
+            || entity.is_builtin_macro()
+            || entity.is_function_like_macro()
+        {
+            continue;
+        }
+        let (Some(name), Some(range)) = (entity.get_name(), entity.get_range()) else {
+            continue;
+        };
+        let body: Vec<String> = range
+            .tokenize()
+            .iter()
+            .map(|token| token.get_spelling())
+            .skip_while(|spelling| spelling == &name)
+            .collect();
+        let is_attribute = body.first().map(String::as_str) == Some("__attribute__");
+        if body.is_empty() || is_attribute {
+            empty.insert(name);
+        }
+    }
+    empty
+}
+
+fn collect(translation_unit: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf]) -> Collected {
     let mut collected = Collected::default();
+    let empty_macros = gather_empty_macros(translation_unit);
 
     for entity in translation_unit.get_children() {
-        if !entity.is_in_main_file() {
+        // Declarations from system / other-library headers are not emitted
+        // wholesale, but their *types* are pooled so a kept declaration that
+        // references them (e.g. zlib functions using `voidpf` from `zconf.h`)
+        // can have the real definition resolved into the cdef.
+        if !entity_owned(&entity, main_header, owned_dirs) {
+            match entity.get_kind() {
+                EntityKind::TypedefDecl => collect_pool_typedef(&entity, &mut collected),
+                EntityKind::EnumDecl => collect_pool_enum_constants(&entity, &mut collected),
+                _ => {}
+            }
             continue;
         }
 
         match entity.get_kind() {
-            EntityKind::FunctionDecl => collect_function(&entity, &mut collected),
+            EntityKind::FunctionDecl => collect_function(&entity, &mut collected, &empty_macros),
+            EntityKind::VarDecl => collect_global(&entity, &mut collected),
             EntityKind::StructDecl => collect_struct(&entity, &mut collected),
+            EntityKind::UnionDecl => collect_union(&entity, &mut collected),
             EntityKind::EnumDecl => collect_enum(&entity, &mut collected),
             EntityKind::TypedefDecl => collect_typedef(&entity, &mut collected),
             EntityKind::MacroDefinition => collect_macro(&entity, &mut collected),
@@ -322,7 +663,9 @@ fn collect(translation_unit: &Entity<'_>) -> Collected {
 /// Record the enum's name (projected onto `int` in the cdef) and each of its
 /// enumerators with its evaluated integer value (for `const.php`).
 fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
-    if let Some(name) = entity.get_name() {
+    if let Some(name) = entity.get_name()
+        && !is_synthetic_anonymous_name(&name)
+    {
         collected.enums.insert(name);
     }
     for constant in entity.get_children() {
@@ -335,6 +678,27 @@ fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
             collected.enum_constants.push((name, signed));
         }
     }
+}
+
+/// Record the enumerators of an enum declared in an #included (non-owned) header,
+/// for later prefix-filtered emission in `const.php`. The enum's *name* is not
+/// registered (no cdef `typedef int`); only a referencing declaration pulls the
+/// type in through the pool.
+fn collect_pool_enum_constants(entity: &Entity<'_>, collected: &mut Collected) {
+    for constant in entity.get_children() {
+        if constant.get_kind() != EntityKind::EnumConstantDecl {
+            continue;
+        }
+        if let (Some(name), Some((signed, _))) =
+            (constant.get_name(), constant.get_enum_constant_value())
+        {
+            collected.pool_enum_constants.push((name, signed));
+        }
+    }
+}
+
+fn is_synthetic_anonymous_name(name: &str) -> bool {
+    name.contains("(unnamed") || name.contains("(anonymous")
 }
 
 /// Record a `#define`. Object-like macros become constant candidates; the body
@@ -399,7 +763,58 @@ fn split_fn_macro(tokens: &[Token]) -> Option<(Vec<String>, Vec<Token>)> {
     None
 }
 
-fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
+/// Whether an entity's type (a parameter or a struct/union field) is a function or
+/// a pointer to one (`int (*cb)(void *)`, a callback typedef like libconfig's
+/// `config_include_fn_t`, or a bare function-type that decays to a pointer). Such a
+/// type has no PHP callable mapping and is rendered as an opaque `void *`. Uses the
+/// canonical type so a typedef'd callback is seen through.
+fn is_function_pointer_entity(argument: &Entity<'_>) -> bool {
+    let Some(canonical) = argument.get_type().map(|ty| ty.get_canonical_type()) else {
+        return false;
+    };
+    let is_function = |ty: &clang::Type<'_>| {
+        matches!(
+            ty.get_kind(),
+            TypeKind::FunctionPrototype | TypeKind::FunctionNoPrototype
+        )
+    };
+    // Follow the whole pointer chain: a function pointer (`(*)`) and a pointer to one
+    // (`(**)`, gmp's `__gmp_get_memory_functions`) both reconstruct into invalid C
+    // (the name dangles outside the declarator), so any pointer chain ending in a
+    // function is rendered as an opaque `void *`.
+    let mut ty = canonical;
+    loop {
+        if is_function(&ty) {
+            return true;
+        }
+        match ty.get_pointee_type() {
+            Some(pointee) => ty = pointee,
+            None => return false,
+        }
+    }
+}
+
+/// Rewrite an array parameter declarator to the equivalent pointer (`T name[N]`
+/// is `T *name` in C). PHP FFI can't size an array of an incomplete struct
+/// (libtiff's `const TIFFFieldInfo arg1[]`), and a fixed byte array param
+/// (`char arg3[1024]`) is likewise just a pointer at the ABI.
+fn array_param_to_pointer(param: &str) -> String {
+    let Some(open) = param.find('[') else {
+        return param.to_owned();
+    };
+    let head = param[..open].trim_end();
+    let name_start = head
+        .rfind(|ch: char| !is_c_identifier_char(ch))
+        .map_or(0, |index| index + 1);
+    let (type_part, name) = head.split_at(name_start);
+    format!("{}*{name}", type_part)
+}
+
+fn collect_function(
+    entity: &Entity<'_>,
+    collected: &mut Collected,
+    empty_macros: &BTreeSet<String>,
+) {
     if entity.is_variadic() {
         return;
     }
@@ -415,6 +830,19 @@ fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
         .get_result_type()
         .map(|ty| ty.get_display_name())
         .unwrap_or_else(|| "void".to_owned());
+    let return_type = source_return_type(entity, &name, empty_macros).unwrap_or(return_type);
+    let return_type = fill_missing_pointer_base(&return_type);
+    // A function whose *return* type is itself a function pointer (`RET (*)(args)`,
+    // openssl's `DSA_meth_get_sign`) can't be woven into a plain declarator without
+    // producing an invalid "function returning function" (`RET (*name)(args)(params)`).
+    // Render the return as an opaque `void *` — a function pointer is pointer-sized
+    // and PHP can't call a returned C callback anyway, mirroring the `void *`
+    // treatment of function-pointer parameters and struct fields.
+    let return_type = if return_type.contains("(*") {
+        "void *".to_owned()
+    } else {
+        return_type
+    };
 
     let params = entity
         .get_arguments()
@@ -422,12 +850,20 @@ fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
         .iter()
         .enumerate()
         .map(|(index, argument)| {
+            let param_name = argument.get_name().unwrap_or_else(|| format!("arg{index}"));
+            // A function-pointer parameter (`int (*cb)(void *)`) has no PHP callable
+            // mapping and its source spelling reconstructs badly; treat it as an
+            // opaque `void *` (callbacks are passed as raw FFI pointers).
+            if is_function_pointer_entity(argument) {
+                return format!("void *{param_name}");
+            }
             let type_name = argument
                 .get_type()
                 .map(|ty| ty.get_display_name())
                 .unwrap_or_default();
-            let param_name = argument.get_name().unwrap_or_else(|| format!("arg{index}"));
-            declarator(&type_name, &param_name)
+            let type_name = source_argument_type(argument, empty_macros).unwrap_or(type_name);
+            let type_name = fill_missing_pointer_base(&type_name);
+            array_param_to_pointer(&declarator(&type_name, &param_name))
         })
         .collect::<Vec<_>>();
 
@@ -437,10 +873,182 @@ fn collect_function(entity: &Entity<'_>, collected: &mut Collected) {
         params.join(", ")
     };
 
-    collected.function_names.insert(name.clone());
+    // Keep only the first declaration of a given name. A header may declare the same
+    // function twice (gmp's `__gmpz_size` appears with a named and an unnamed param);
+    // the spellings differ so `dedup()` can't merge them, and FFI rejects the
+    // redefinition. `insert` is false when the name was already collected.
+    if collected.function_names.insert(name.clone()) {
+        collected
+            .functions
+            .push(format!("{}({});", declarator(&return_type, &name), params));
+    }
+}
+
+/// Collect an exported global variable as an `extern <type> <name>;` declaration,
+/// so a PHP example can address it through `NativeLibrary::addressOf()`. Only
+/// externally-linked globals (a real exported symbol) are kept; `static` file-scope
+/// globals and anything whose type can't be spelled cleanly are skipped.
+fn collect_global(entity: &Entity<'_>, collected: &mut Collected) {
+    if entity.get_linkage() != Some(Linkage::External) {
+        return;
+    }
+    let Some(name) = entity.get_name() else {
+        return;
+    };
+    let Some(field_type) = entity.get_type() else {
+        return;
+    };
+    if is_function_pointer_entity(entity) {
+        return;
+    }
+    let type_name = field_type.get_display_name();
+    if type_name.contains("(unnamed")
+        || type_name.contains("(anonymous")
+        || type_name.contains('(')
+        || type_name.contains('[')
+    {
+        return;
+    }
     collected
-        .functions
-        .push(format!("{}({});", declarator(&return_type, &name), params));
+        .globals
+        .push(format!("extern {};", declarator(&type_name, &name)));
+}
+
+/// libclang's error recovery on an unknown type (e.g. `FILE` in a header that
+/// forgot to `#include <stdio.h>`) can drop the base type from a declaration's
+/// source range, leaving a bare pointer like `*outfile`. Substitute `void` for
+/// the missing base so the cdef stays valid C; PHP FFI passes the pointer
+/// opaquely either way.
+fn fill_missing_pointer_base(type_name: &str) -> String {
+    if !type_name.contains('*') {
+        return type_name.to_owned();
+    }
+    let has_base = type_name
+        .split(|ch: char| ch == '*' || ch.is_whitespace())
+        .any(|token| !matches!(token, "" | "const" | "volatile" | "restrict"));
+    if has_base {
+        type_name.to_owned()
+    } else {
+        format!("void {}", type_name.trim_start())
+    }
+}
+
+fn source_return_type(
+    entity: &Entity<'_>,
+    function_name: &str,
+    empty_macros: &BTreeSet<String>,
+) -> Option<String> {
+    let tokens = source_tokens(entity)?;
+    let name_index = tokens
+        .iter()
+        .position(|token| token.as_str() == function_name)?;
+    let mut type_tokens = tokens[..name_index]
+        .iter()
+        .filter(|token| !is_function_decl_modifier(token) && !empty_macros.contains(*token))
+        .cloned()
+        .collect::<Vec<_>>();
+    while type_tokens
+        .last()
+        .is_some_and(|token| is_abi_macro_token(token))
+    {
+        type_tokens.pop();
+    }
+    // Drop a leading export/visibility annotation macro (e.g. libxml2's
+    // `XMLPUBFUN`) that survives in the source spelling, while keeping at least
+    // the real type token.
+    while type_tokens.len() > 1 && is_annotation_macro(&type_tokens[0]) {
+        type_tokens.remove(0);
+    }
+    simple_type_from_tokens(&type_tokens)
+}
+
+/// An all-uppercase identifier that is not a builtin type name — i.e. an
+/// export/calling-convention annotation macro (`XMLPUBFUN`, `DECLSPEC`, …)
+/// rather than part of the type.
+fn is_annotation_macro(token: &str) -> bool {
+    token.len() >= 2
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        && token.chars().any(|ch| ch.is_ascii_uppercase())
+        && !builtin_type_names().contains(token)
+}
+
+fn source_argument_type(argument: &Entity<'_>, empty_macros: &BTreeSet<String>) -> Option<String> {
+    let name = argument.get_name()?;
+    let mut tokens = source_tokens(argument)?;
+    let name_index = tokens.iter().rposition(|token| token.as_str() == name)?;
+    // A trailing array declarator (`T name[]`/`T name[N]`) decays to a pointer in C,
+    // but it sits *after* the name and is dropped with it below — so detect it here
+    // and add the pointer level. Without this an array parameter whose element is a
+    // typedef'd pointer collapses one level (oniguruma's `OnigEncoding encodings[]`
+    // becomes `OnigEncoding`, not `OnigEncoding *`).
+    let is_array = tokens.get(name_index + 1).is_some_and(|token| token == "[");
+    tokens.drain(name_index..);
+    // Drop empty annotation macros (e.g. `FAR`) and ABI/calling-convention
+    // macros that survived in the source spelling, so they don't leak into the
+    // cdef as bogus type tokens.
+    tokens.retain(|token| !empty_macros.contains(token) && !is_abi_macro_token(token));
+    let type_name = simple_type_from_tokens(&tokens)?;
+    Some(if is_array {
+        format!("{type_name} *")
+    } else {
+        type_name
+    })
+}
+
+fn source_tokens(entity: &Entity<'_>) -> Option<Vec<String>> {
+    Some(
+        entity
+            .get_range()?
+            .tokenize()
+            .iter()
+            .map(|token| token.get_spelling())
+            .collect(),
+    )
+}
+
+fn simple_type_from_tokens(tokens: &[String]) -> Option<String> {
+    if tokens.is_empty()
+        || tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "(" | ")" | "," | ";"))
+    {
+        return None;
+    }
+    Some(format_type_tokens(tokens))
+}
+
+fn is_function_decl_modifier(token: &str) -> bool {
+    matches!(token, "extern" | "static" | "inline") || is_abi_macro_token(token)
+}
+
+fn format_type_tokens(tokens: &[String]) -> String {
+    let mut out = String::new();
+    for token in tokens {
+        match token.as_str() {
+            "*" => {
+                if !out.ends_with(' ') && !out.ends_with('*') && !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push('*');
+            }
+            "[" => out.push('['),
+            "]" => out.push(']'),
+            _ if out.ends_with('[') => out.push_str(token),
+            _ => {
+                // Separate the previous token from this one with a space, unless
+                // the buffer is empty or already ends with a space. A trailing `*`
+                // still needs the space (`int *` then `name` → `int *name` is wrong
+                // here; tokens are space-joined and pointers reattach later).
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(token);
+            }
+        }
+    }
+    out
 }
 
 fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
@@ -450,6 +1058,9 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
     let Some(name) = entity.get_name() else {
         return;
     };
+    if is_synthetic_anonymous_name(&name) {
+        return;
+    }
 
     // If any field cannot be rendered cleanly, leave the struct opaque
     // (forward-declared) instead of emitting an invalid definition.
@@ -457,7 +1068,7 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
         .get_children()
         .into_iter()
         .filter(|child| child.get_kind() == EntityKind::FieldDecl)
-        .map(|field| render_struct_field(&field))
+        .map(|field| render_union_field(&field, collected))
         .collect();
 
     if let Some(fields) = fields {
@@ -468,6 +1079,127 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
     }
 }
 
+fn collect_union(entity: &Entity<'_>, collected: &mut Collected) {
+    if !entity.is_definition() {
+        return;
+    }
+    let Some(name) = entity.get_name() else {
+        return;
+    };
+    if is_synthetic_anonymous_name(&name) {
+        return;
+    }
+
+    let fields: Option<Vec<String>> = entity
+        .get_children()
+        .into_iter()
+        .filter(|child| child.get_kind() == EntityKind::FieldDecl)
+        .map(|field| render_struct_field(&field))
+        .collect();
+
+    if let Some(fields) = fields {
+        collected.unions.insert(
+            name.clone(),
+            format!("union {name} {{ {} }};", fields.join(" ")),
+        );
+    }
+}
+
+fn render_union_field(field: &Entity<'_>, collected: &Collected) -> Option<String> {
+    let field_type = field.get_type()?;
+    // A function-pointer field — inline `void (*destroy)(…)` or a typedef'd callback
+    // (libconfig's `config_include_fn_t include_fn`) — is rendered as an opaque,
+    // pointer-sized `void *`. Otherwise the None-gate below would drop the whole
+    // struct (a callback typedef is not a builtin value field), keeping it opaque.
+    if is_function_pointer_entity(field) {
+        let name = field.get_name()?;
+        return Some(format!("void *{name};"));
+    }
+    // An enum field projects to `int` in the cdef (`typedef int <name>;`), so it is a
+    // renderable value field even though its typedef name is not a builtin scalar
+    // (libconfig's `config_error_t error_type`). Without this it would trip the
+    // None-gate below and leave the whole struct opaque.
+    let is_enum_field = field_type.get_canonical_type().get_kind() == TypeKind::Enum;
+    let display = field_type.get_display_name();
+    if !display.contains('*') && !is_enum_field {
+        if let Some(declaration) = field_type.get_declaration()
+            && matches!(
+                declaration.get_kind(),
+                EntityKind::StructDecl | EntityKind::UnionDecl
+            )
+            && declaration.is_anonymous()
+        {
+            return render_struct_field(field);
+        }
+        if collected.struct_aliases.contains_key(&display)
+            || collected.structs.contains_key(&display)
+            || collected.union_aliases.contains_key(&display)
+            || collected.unions.contains_key(&display)
+            || !is_builtin_value_field_type(&display)
+        {
+            return None;
+        }
+    }
+
+    render_struct_field(field)
+}
+
+fn is_builtin_value_field_type(display: &str) -> bool {
+    let base = display
+        .split('[')
+        .next()
+        .unwrap_or(display)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        base.as_str(),
+        "char"
+            | "signed char"
+            | "unsigned char"
+            | "short"
+            | "short int"
+            | "unsigned short"
+            | "unsigned short int"
+            | "int"
+            | "unsigned"
+            | "unsigned int"
+            | "long"
+            | "long int"
+            | "unsigned long"
+            | "unsigned long int"
+            | "long long"
+            | "long long int"
+            | "unsigned long long"
+            | "unsigned long long int"
+            | "float"
+            | "double"
+            | "long double"
+            | "bool"
+            | "_Bool"
+            | "size_t"
+            | "ssize_t"
+            | "intptr_t"
+            | "uintptr_t"
+            | "int8_t"
+            | "uint8_t"
+            | "int16_t"
+            | "uint16_t"
+            | "int32_t"
+            | "uint32_t"
+            | "int64_t"
+            | "uint64_t"
+            | "Uint8"
+            | "Uint16"
+            | "Uint32"
+            | "Uint64"
+            | "Sint8"
+            | "Sint16"
+            | "Sint32"
+            | "Sint64"
+    )
+}
+
 /// Render one struct field, recursing into anonymous nested unions/structs and
 /// weaving the field name into function-pointer types. Returns `None` for a
 /// field libclang can only describe by source location (which would produce
@@ -475,6 +1207,15 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
 fn render_struct_field(field: &Entity<'_>) -> Option<String> {
     let name = field.get_name()?;
     let field_type = field.get_type()?;
+
+    // A function-pointer field (inline `void (*destroy)(…)` or a typedef'd callback)
+    // is rendered as an opaque, pointer-sized `void *`: ABI-compatible, the generated
+    // PHP can't invoke a struct-stored callback anyway, and it keeps the enclosing
+    // struct loadable when the callback's parameters reference a type PHP FFI rejects
+    // in a struct context (libmongoc's `_mongoc_stream_t`, libconfig's `config_t`).
+    if is_function_pointer_entity(field) {
+        return Some(format!("void *{name};"));
+    }
 
     if let Some(declaration) = field_type.get_declaration()
         && matches!(
@@ -501,34 +1242,175 @@ fn render_struct_field(field: &Entity<'_>) -> Option<String> {
     if display.contains("(unnamed") || display.contains("(anonymous") {
         return None;
     }
-    if display.contains("(*)") {
-        // Function-pointer field: `ret (*name)(args)`.
-        return Some(format!(
-            "{};",
-            display.replacen("(*)", &format!("(*{name})"), 1)
-        ));
+    // Any remaining parenthesised field type is not a plain value (a function-pointer
+    // field was already collapsed to `void *` above); leave the struct opaque.
+    if display.contains('(') || display.contains(')') {
+        return None;
     }
+    // A flexible array member (`unsigned char x[]`) has no size; PHP FFI rejects
+    // it. Give it one element so the aggregate is sizable (a union is sized by its
+    // largest member anyway; such a field is only the last member of a struct).
+    let display = display.replace("[]", "[1]");
     Some(format!("{};", declarator(&display, &name)))
+}
+
+/// A same-size struct re-expression for a scalar type PHP FFI can't represent,
+/// or `None` for ordinary types. `_Complex double`/`float` become a `{re, im}`
+/// pair (their C layout), and `__int128`/`unsigned __int128` a `{lo, hi}` pair of
+/// 64-bit halves — both stay passable by value, unlike a bare `int` fallback that
+/// would silently shrink them.
+fn unsupported_scalar_typedef(name: &str, kind: TypeKind, display: &str) -> Option<String> {
+    match kind {
+        TypeKind::Complex => {
+            let element = if display.contains("float") {
+                "float"
+            } else {
+                "double"
+            };
+            Some(format!(
+                "typedef struct {{ {element} re; {element} im; }} {name};"
+            ))
+        }
+        TypeKind::Int128 | TypeKind::UInt128 => Some(format!(
+            "typedef struct {{ uint64_t lo; uint64_t hi; }} {name};"
+        )),
+        _ => None,
+    }
+}
+
+/// Whether a name is a C fundamental type / keyword that must never be redefined
+/// by a typedef. libmongoc's headers yield a spurious `typedef int bool(int *);`
+/// that turns the builtin `bool` into a function type, breaking every struct with
+/// a `bool` field; PHP FFI already knows these names, so any typedef over one is an
+/// artifact to drop.
+fn is_c_fundamental_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "_Bool"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "void"
+            | "signed"
+            | "unsigned"
+            | "wchar_t"
+    )
 }
 
 fn collect_typedef(entity: &Entity<'_>, collected: &mut Collected) {
     let Some(name) = entity.get_name() else {
         return;
     };
+    if is_synthetic_anonymous_name(&name) || is_c_fundamental_type_name(&name) {
+        return;
+    }
     let Some(underlying) = entity.get_typedef_underlying_type() else {
         return;
     };
 
-    match underlying.get_canonical_type().get_kind() {
+    let canonical = underlying.get_canonical_type();
+    let canonical_kind = canonical.get_kind();
+    // PHP FFI rejects `_Complex` and 128-bit integers. Re-express them as a
+    // same-size struct so the typedef parses and the type stays passable by value
+    // (a complex is layout-compatible with two reals; an __int128 with two u64s).
+    if let Some(decl) =
+        unsupported_scalar_typedef(&name, canonical_kind, &canonical.get_display_name())
+    {
+        collected.typedef_names.insert(name);
+        collected.typedefs.push(decl);
+        return;
+    }
+
+    match canonical_kind {
         // Enums are projected onto `int`, which is what FFI cares about.
         TypeKind::Enum => {
             collected.enums.insert(name);
         }
-        // Struct aliases are emitted from the struct section to avoid duplicates.
-        TypeKind::Record => {}
-        _ => collected
-            .typedefs
-            .push(typedef_declaration(&name, &underlying.get_display_name())),
+        TypeKind::Record => {
+            // `typedef struct { … } jpeg_component_info;` has no tag of its own;
+            // libclang names it `(unnamed struct at …)`, which is not valid C.
+            // Use the typedef's own name as the (opaque) tag instead.
+            if let Some(tag) = underlying
+                .get_display_name()
+                .strip_prefix("struct ")
+                .map(str::to_owned)
+            {
+                let tag = if is_synthetic_anonymous_name(&tag) {
+                    name.clone()
+                } else {
+                    tag
+                };
+                collected.struct_aliases.insert(name, tag);
+            } else if let Some(tag) = underlying
+                .get_display_name()
+                .strip_prefix("union ")
+                .map(str::to_owned)
+            {
+                let tag = if is_synthetic_anonymous_name(&tag) {
+                    name.clone()
+                } else {
+                    tag
+                };
+                collected.union_aliases.insert(name, tag);
+            }
+        }
+        _ => {
+            collected.typedef_names.insert(name.clone());
+            collected
+                .typedefs
+                .push(typedef_declaration(&name, &underlying.get_display_name()));
+        }
+    }
+}
+
+/// Pool a typedef from an included header for later closure resolution. Stores
+/// the surface underlying type (e.g. `void *` for `voidpf`), or a struct/union
+/// tag alias, or an enum projected onto `int`. Synthetic/anonymous names are
+/// skipped.
+fn collect_pool_typedef(entity: &Entity<'_>, collected: &mut Collected) {
+    let Some(name) = entity.get_name() else {
+        return;
+    };
+    if is_synthetic_anonymous_name(&name) || is_c_fundamental_type_name(&name) {
+        return;
+    }
+    let Some(underlying) = entity.get_typedef_underlying_type() else {
+        return;
+    };
+    match underlying.get_canonical_type().get_kind() {
+        TypeKind::Enum => {
+            collected.pool_enums.insert(name);
+        }
+        TypeKind::Record => {
+            // An anonymous record typedef carries an `(unnamed …)` tag; fall back
+            // to the typedef's own name so the resolved alias is valid C.
+            let display = underlying.get_display_name();
+            if let Some(tag) = display.strip_prefix("struct ") {
+                let tag = if is_synthetic_anonymous_name(tag) {
+                    name.clone()
+                } else {
+                    tag.to_owned()
+                };
+                collected.pool_struct_aliases.insert(name, tag);
+            } else if let Some(tag) = display.strip_prefix("union ") {
+                let tag = if is_synthetic_anonymous_name(tag) {
+                    name.clone()
+                } else {
+                    tag.to_owned()
+                };
+                collected.pool_union_aliases.insert(name, tag);
+            }
+        }
+        _ => {
+            collected
+                .pool_typedefs
+                .entry(name)
+                .or_insert_with(|| underlying.get_display_name());
+        }
     }
 }
 
@@ -536,6 +1418,11 @@ fn collect_typedef(entity: &Entity<'_>, collected: &mut Collected) {
 /// array extents to the identifier the way C syntax requires.
 fn declarator(type_name: &str, identifier: &str) -> String {
     let type_name = type_name.trim();
+    // Function-pointer type (`void (*)(int)`): the identifier belongs inside the
+    // `(*)`, giving `void (*name)(int)` — appending it after would be invalid C.
+    if type_name.contains("(*)") {
+        return type_name.replacen("(*)", &format!("(*{identifier})"), 1);
+    }
     if let Some(open) = type_name.find('[') {
         let (base, array) = type_name.split_at(open);
         return format!("{} {identifier}{}", base.trim(), array.trim());
@@ -548,14 +1435,30 @@ fn declarator(type_name: &str, identifier: &str) -> String {
 }
 
 fn typedef_declaration(name: &str, underlying: &str) -> String {
-    if underlying.contains("(*)") {
-        format!(
-            "typedef {};",
-            underlying.replacen("(*)", &format!("(*{name})"), 1)
-        )
-    } else {
-        format!("typedef {};", declarator(underlying, name))
+    if let Some(open) = underlying.find('(') {
+        // Distinguish a function-*pointer* typedef (`ret (*)(args)`, where the
+        // first `(` opens the pointer declarator) from a function-*type* typedef
+        // (`ret name(args)`). The discriminator is whether the first `(` is
+        // immediately followed by `*`. A bare `underlying.contains("(*)")` test is
+        // wrong when the typedef is a function *type* whose parameters are
+        // themselves function pointers: its display carries a `(*)` belonging to a
+        // *parameter*, and naively weaving the name into that first `(*)` mangles
+        // it into `typedef int (const int *, int (*name)(…), …);` (openssl's
+        // `OSSL_FUNC_provider_register_child_cb_fn`).
+        if underlying[open + 1..].trim_start().starts_with('*') {
+            return format!(
+                "typedef {};",
+                underlying.replacen("(*)", &format!("(*{name})"), 1)
+            );
+        }
+        // A function-type typedef (`typedef int handler(void *, size_t);`): the
+        // name belongs between the return type and the parameter list, not after
+        // the whole thing (which would yield `typedef int (args) name;`). Any
+        // function-pointer *parameters* in the list are left untouched.
+        let (return_type, params) = underlying.split_at(open);
+        return format!("typedef {} {name}{};", return_type.trim(), params);
     }
+    format!("typedef {};", declarator(underlying, name))
 }
 
 /// The prefix-matching constants worth surfacing as PHP `const`s, in emit order:
@@ -573,6 +1476,15 @@ fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)
     let mut constants = Vec::new();
 
     for (name, value) in &collected.enum_constants {
+        if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.clone()) {
+            constants.push((name.clone(), value.to_string()));
+        }
+    }
+
+    // Enumerators from #included headers, kept only when they match the symbol
+    // prefix (so unrelated system enums never appear). Emitted after the owned
+    // ones, which win on a name clash.
+    for (name, value) in &collected.pool_enum_constants {
         if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.clone()) {
             constants.push((name.clone(), value.to_string()));
         }
@@ -625,15 +1537,32 @@ fn expand_tokens(
         return None;
     }
     let mut parts = Vec::new();
+    // C concatenates adjacent string literals (`"a" "b"`, or `"a" STR_MACRO`)
+    // with no operator between them; PHP needs an explicit `.`. Track whether the
+    // previous part was an operand so a following operand gets one inserted.
+    let mut prev_was_operand = false;
+    // Whether any real operand (literal/identifier/expansion) was emitted at all.
+    // A body that is only punctuation (`()`, mongoc's empty
+    // `#define MONGOC_PRERELEASE_VERSION ()`) would render as `( )`, which is not a
+    // PHP expression — drop the whole constant instead.
+    let mut has_operand = false;
     let mut index = 0;
     while index < tokens.len() {
         let (kind, spelling) = &tokens[index];
         match kind {
             TokenKind::Literal => {
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 parts.push(translate_literal(spelling)?);
+                prev_was_operand = true;
+                has_operand = true;
                 index += 1;
             }
             TokenKind::Punctuation if is_allowed_operator(spelling) => {
+                // A closing `)` ends a parenthesised operand; every other operator
+                // expects an operand next, so it never triggers concatenation.
+                prev_was_operand = spelling == ")";
                 parts.push(spelling.clone());
                 index += 1;
             }
@@ -645,15 +1574,34 @@ fn expand_tokens(
                 }
                 let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
                 let expanded = expand_tokens(&substituted, emitted, fn_macros, depth + 1)?;
+                // A call that expands to nothing (an empty macro body) would emit
+                // `()`, which is not a PHP expression — drop the whole constant
+                // (glib's `G_GNUC_FUNCTION ""` + empty `__func__`-style macro).
+                if expanded.is_empty() {
+                    return None;
+                }
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 parts.push(format!("({expanded})"));
+                prev_was_operand = true;
+                has_operand = true;
                 index = after;
             }
             TokenKind::Identifier if emitted.contains(spelling) => {
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 parts.push(spelling.clone());
+                prev_was_operand = true;
+                has_operand = true;
                 index += 1;
             }
             _ => return None,
         }
+    }
+    if !has_operand {
+        return None;
     }
     Some(parts.join(" "))
 }
@@ -736,6 +1684,10 @@ fn translate_number(literal: &str) -> Option<String> {
         || !trimmed
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'+' | b'-'))
+        // A C pp-number allows several dots (`1.1.0`, a version literal), but that
+        // is not a valid PHP number — reject it instead of emitting `const X = 1.1.0;`.
+        || trimmed.bytes().filter(|b| *b == b'.').count() > 1
+        || trimmed.bytes().filter(|b| *b == b'e').count() > 1
     {
         return None;
     }
@@ -834,22 +1786,56 @@ fn render_fn_body(
         return Err(FnBodyError::Untranslatable);
     }
     let mut parts = Vec::new();
+    // Distinguishes a prefix `&` (C address-of, which has no faithful PHP
+    // rendering) from a binary `&` (bitwise-and): a prefix operator has no
+    // operand before it. `)` closes a parenthesised operand. Also drives PHP `.`
+    // insertion between adjacent operands (C string-literal concatenation, e.g.
+    // duktape's `"\x80" x`).
+    let mut prev_was_operand = false;
+    let mut has_operand = false;
     let mut index = 0;
     while index < tokens.len() {
         let (kind, spelling) = &tokens[index];
         let is_call = tokens.get(index + 1).is_some_and(|(_, next)| next == "(");
         match kind {
             TokenKind::Literal => {
-                parts.push(translate_literal(spelling).ok_or(FnBodyError::Untranslatable)?);
+                let literal = translate_literal(spelling).ok_or(FnBodyError::Untranslatable)?;
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
+                parts.push(literal);
+                prev_was_operand = true;
+                has_operand = true;
                 index += 1;
             }
+            // A prefix `&`/`*` (address-of / dereference) can't be expressed as a
+            // PHP call argument, so the whole macro is dropped rather than emitting
+            // invalid PHP like `fn(& ( $x ))`.
+            TokenKind::Punctuation
+                if matches!(spelling.as_str(), "&" | "*") && !prev_was_operand =>
+            {
+                return Err(FnBodyError::Untranslatable);
+            }
+            // A `*`/`&` immediately before `)` is a pointer marker in a C cast
+            // (`(type *)`), not multiplication — that whole cast idiom (glib's
+            // `g_chunk_new` → `((type *) g_mem_chunk_alloc(...))`) has no PHP form.
+            TokenKind::Punctuation
+                if matches!(spelling.as_str(), "&" | "*")
+                    && tokens.get(index + 1).is_some_and(|(_, next)| next == ")") =>
+            {
+                return Err(FnBodyError::Untranslatable);
+            }
             TokenKind::Punctuation if is_allowed_operator(spelling) => {
+                prev_was_operand = spelling == ")";
                 parts.push(spelling.clone());
                 index += 1;
             }
             TokenKind::Identifier if is_call => {
                 let (args, after) =
                     parse_call_args(tokens, index + 1).ok_or(FnBodyError::Untranslatable)?;
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 let render_args = || {
                     args.iter()
                         .map(|arg| render_fn_body(arg, context, depth + 1))
@@ -861,10 +1847,13 @@ fn render_fn_body(
                         return Err(FnBodyError::Untranslatable);
                     }
                     let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
-                    parts.push(format!(
-                        "({})",
-                        render_fn_body(&substituted, context, depth + 1)?
-                    ));
+                    let expanded = render_fn_body(&substituted, context, depth + 1)?;
+                    // A nested call expanding to nothing would emit `()`, not a PHP
+                    // expression — drop the whole macro function.
+                    if expanded.is_empty() {
+                        return Err(FnBodyError::Untranslatable);
+                    }
+                    parts.push(format!("({expanded})"));
                 } else if context.functions.contains(spelling) {
                     parts.push(format!(
                         "{}::{spelling}({})",
@@ -876,34 +1865,343 @@ fn render_fn_body(
                 } else {
                     return Err(FnBodyError::UndefinedCall(spelling.clone()));
                 }
+                prev_was_operand = true;
+                has_operand = true;
                 index = after;
             }
             TokenKind::Identifier if context.params.contains(spelling.as_str()) => {
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 parts.push(format!("${spelling}"));
+                prev_was_operand = true;
+                has_operand = true;
                 index += 1;
             }
             TokenKind::Identifier if context.consts.contains(spelling) => {
+                if prev_was_operand {
+                    parts.push(".".to_owned());
+                }
                 parts.push(format!("{}\\{spelling}", context.const_namespace));
+                prev_was_operand = true;
+                has_operand = true;
                 index += 1;
             }
             _ => return Err(FnBodyError::Untranslatable),
         }
     }
+    // A body with no operand at all (e.g. lzo2's `LZO_PP_ECONCAT0()` → `()`) has
+    // no PHP expression to return.
+    if !has_operand {
+        return Err(FnBodyError::Untranslatable);
+    }
     Ok(parts.join(" "))
 }
 
-fn render(collected: &Collected, prefix: &str) -> String {
-    let typedefs = collected
+/// Byte-pointer base types PHP FFI will NOT coerce a PHP string into, even though
+/// they are the same 1-byte pointer as `char *` at the ABI and the generated
+/// wrapper already types a single-level pointer to them as `string`. PHP FFI only
+/// passes a string for `char *` (and `void *`), so a parameter of one of these is
+/// rewritten to `char *` in the cdef. `char`/`const char` already work and are not
+/// listed.
+const NON_CHAR_BYTE_POINTER_BASES: &[&str] = &["unsigned char", "signed char", "uint8_t", "int8_t"];
+
+/// Rewrite single-level pointer-to-byte function *parameters* (`const uint8_t *`,
+/// `unsigned char *`, oniguruma's `const OnigUChar *`, pcre2's `PCRE2_SPTR8`) to
+/// `char *` so PHP FFI accepts a PHP string for them — directly or through a
+/// typedef. The return type is left untouched (a string return is read with
+/// `FFI::string`, which works on any byte pointer), and so are pointer-to-pointer,
+/// arrays, and function-pointer params. A declaration whose parameters are all
+/// unchanged is returned byte-for-byte; only ones with a real rewrite are
+/// re-joined.
+fn rewrite_byte_pointer_params(decl: &str, typedefs: &BTreeMap<String, String>) -> String {
+    let (Some(open), Some(close)) = (decl.find('('), decl.rfind(')')) else {
+        return decl.to_owned();
+    };
+    if close <= open + 1 {
+        return decl.to_owned();
+    }
+    let head = &decl[..=open];
+    let params = &decl[open + 1..close];
+    let tail = &decl[close..];
+    let originals = split_top_level_commas(params);
+    let rewritten: Vec<String> = originals
+        .iter()
+        .map(|param| rewrite_byte_pointer_param(param, typedefs))
+        .collect();
+    if originals
+        .iter()
+        .zip(&rewritten)
+        .all(|(original, new)| original.trim() == new.as_str())
+    {
+        return decl.to_owned();
+    }
+    format!("{head}{}{tail}", rewritten.join(", "))
+}
+
+/// Rewrite one parameter to `char *` when it is (or resolves through a typedef to)
+/// a single-level pointer to a non-`char` byte type PHP FFI won't accept a string
+/// for; otherwise return it trimmed-but-unchanged.
+fn rewrite_byte_pointer_param(param: &str, typedefs: &BTreeMap<String, String>) -> String {
+    let trimmed = param.trim();
+    if trimmed.contains('[') || trimmed.contains('(') {
+        return trimmed.to_owned();
+    }
+    match trimmed.matches('*').count() {
+        // `<quals> <byte> *name`: the element (builtin or a byte typedef like
+        // `OnigUChar`) resolves to a non-char byte scalar.
+        1 => {
+            let star = trimmed.find('*').unwrap();
+            let (quals, base) = split_type_qualifiers(&trimmed[..star]);
+            if !resolves_to_non_char_byte_scalar(&base, typedefs, 0) {
+                return trimmed.to_owned();
+            }
+            let name = trimmed[star..].trim_start_matches('*').trim();
+            let prefix = if quals.is_empty() {
+                String::new()
+            } else {
+                format!("{quals} ")
+            };
+            format!("{prefix}char *{name}")
+        }
+        // `<typedef> name`: the typedef itself is a single-level byte pointer
+        // (pcre2 `PCRE2_SPTR8` → `const unsigned char *`).
+        0 => {
+            let Some((type_name, name)) = split_declaration_name(trimmed) else {
+                return trimmed.to_owned();
+            };
+            let (quals, base) = split_type_qualifiers(&type_name);
+            match resolves_to_non_char_byte_pointer(&base, typedefs, 0) {
+                Some(pointee_const) => {
+                    let prefix = if quals.contains("const") || pointee_const {
+                        "const "
+                    } else {
+                        ""
+                    };
+                    format!("{prefix}char *{name}")
+                }
+                None => trimmed.to_owned(),
+            }
+        }
+        _ => trimmed.to_owned(),
+    }
+}
+
+/// Split a type prefix into its `const`/`volatile`/`restrict` qualifiers and the
+/// remaining base type tokens.
+fn split_type_qualifiers(prefix: &str) -> (String, String) {
+    let mut quals = Vec::new();
+    let mut base = Vec::new();
+    for token in prefix.split_whitespace() {
+        if matches!(token, "const" | "volatile" | "restrict") {
+            quals.push(token);
+        } else {
+            base.push(token);
+        }
+    }
+    (quals.join(" "), base.join(" "))
+}
+
+/// Whether a type name is, or resolves through single-level scalar typedefs to, a
+/// non-`char` byte scalar (`unsigned char`/`signed char`/`uint8_t`/`int8_t`).
+/// `char` is excluded — a `char *` already accepts a PHP string.
+fn resolves_to_non_char_byte_scalar(
+    type_name: &str,
+    typedefs: &BTreeMap<String, String>,
+    depth: usize,
+) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    let (_, base) = split_type_qualifiers(type_name);
+    if NON_CHAR_BYTE_POINTER_BASES.contains(&base.as_str()) {
+        return true;
+    }
+    if base.chars().all(is_c_identifier_char)
+        && let Some(underlying) = typedefs.get(&base)
+        && !underlying.contains('*')
+        && !underlying.contains('[')
+        && !underlying.contains('(')
+    {
+        return resolves_to_non_char_byte_scalar(underlying, typedefs, depth + 1);
+    }
+    false
+}
+
+/// Whether a typedef name resolves to a single-level pointer to a non-`char` byte
+/// type. Returns `Some(pointee_is_const)` so the rewrite can keep `const`.
+fn resolves_to_non_char_byte_pointer(
+    type_name: &str,
+    typedefs: &BTreeMap<String, String>,
+    depth: usize,
+) -> Option<bool> {
+    if depth > 16 {
+        return None;
+    }
+    let underlying = typedefs.get(type_name.trim())?;
+    match underlying.matches('*').count() {
+        1 => {
+            let element = underlying.replace('*', " ");
+            resolves_to_non_char_byte_scalar(&element, typedefs, depth + 1)
+                .then_some(underlying.contains("const"))
+        }
+        // A plain alias to another typedef (`PCRE2_SPTR` → `PCRE2_SPTR8`).
+        0 if underlying
+            .chars()
+            .all(|ch| is_c_identifier_char(ch) || ch == ' ') =>
+        {
+            resolves_to_non_char_byte_pointer(underlying.trim(), typedefs, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Map of typedef name -> underlying type display for simple (non-function,
+/// non-array) typedefs, from the package's own typedefs and the #included pool, so
+/// a byte-pointer parameter hidden behind a typedef can be resolved.
+fn simple_typedef_map(collected: &Collected) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for decl in &collected.typedefs {
+        let Some(inner) = decl
+            .strip_prefix("typedef ")
+            .map(|rest| rest.trim_end_matches(';').trim())
+        else {
+            continue;
+        };
+        if inner.contains('(') || inner.contains('[') {
+            continue;
+        }
+        if let Some((underlying, name)) = split_declaration_name(inner) {
+            map.entry(name).or_insert(underlying);
+        }
+    }
+    for (name, underlying) in &collected.pool_typedefs {
+        map.entry(name.clone())
+            .or_insert_with(|| underlying.clone());
+    }
+    map
+}
+
+/// Split a parameter list on commas at the top paren/bracket nesting level, so a
+/// comma inside a function-pointer parameter's own argument list is not a split
+/// point.
+fn split_top_level_commas(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, ch) in params.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&params[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&params[start..]);
+    parts
+}
+
+fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) -> String {
+    let mut typedefs = collected
         .typedefs
         .iter()
-        .map(|typedef| replace_prefixed_enums(typedef, &collected.enums))
+        .map(|typedef| project_enums_to_int(typedef))
         .collect::<Vec<_>>();
+    // For resolving byte-pointer parameters hidden behind a typedef.
+    let byte_typedefs = simple_typedef_map(collected);
+    // Every declared type name, so a parameter that shadows one can be renamed
+    // (the cdef parser would otherwise read the name as a second type).
+    let declared_type_names: BTreeSet<String> = collected
+        .typedef_names
+        .iter()
+        .chain(collected.enums.iter())
+        .chain(collected.structs.keys())
+        .chain(collected.struct_aliases.keys())
+        .chain(collected.unions.keys())
+        .chain(collected.union_aliases.keys())
+        .chain(collected.pool_typedefs.keys())
+        .chain(collected.pool_struct_aliases.keys())
+        .chain(collected.pool_union_aliases.keys())
+        .chain(collected.pool_enums.iter())
+        .cloned()
+        .collect();
+    // Every externally-linked function declared in the package's own header(s)
+    // is part of its API. The declarations are already scoped to the main file
+    // (system/#included headers are excluded during collection), so there is no
+    // need to additionally filter by symbol prefix — and doing so wrongly drops
+    // functions for libraries without a uniform prefix (e.g. zlib's `deflate`,
+    // `compress`, `crc32`). When the installed library's exported symbols are
+    // known, drop declarations it does not provide so the FFI load can't fail on
+    // a single absent symbol (version/build skew).
     let functions = collected
         .functions
         .iter()
-        .filter(|function| function.contains(prefix))
-        .map(|function| replace_prefixed_enums(function, &collected.enums))
+        .filter(|function| match exported_symbols {
+            Some(symbols) => function_decl_name(function).is_none_or(|name| symbols.contains(name)),
+            None => true,
+        })
+        .map(|function| project_enums_to_int(function))
+        .map(|function| rewrite_byte_pointer_params(&function, &byte_typedefs))
+        .map(|function| rename_type_colliding_params(&function, &declared_type_names))
         .collect::<Vec<_>>();
+
+    // Exported global variables, dropped when the installed `.so` doesn't export the
+    // symbol (same version/build-skew guard as functions).
+    let globals = collected
+        .globals
+        .iter()
+        .filter(|global| match exported_symbols {
+            Some(symbols) => global_decl_name(global).is_none_or(|name| symbols.contains(&name)),
+            None => true,
+        })
+        .map(|global| project_enums_to_int(global))
+        .collect::<Vec<_>>();
+
+    // Resolve types referenced by the kept declarations but defined only in
+    // #included headers (e.g. zlib's `voidpf`/`uLong` from `zconf.h`), pulling
+    // their real definitions from the pool so the cdef is self-contained. These
+    // go before the package's own typedefs, which may reference them.
+    let pool_resolved = resolve_pool_types(&typedefs, &functions, collected);
+    let resolved_names = pool_resolved_names(&pool_resolved);
+    let mut typedefs_with_pool = pool_resolved;
+    typedefs_with_pool.append(&mut typedefs);
+    // Emit each typedef name at most once: a type can be both pooled (from an
+    // #included header) and declared in the package's own header, which would
+    // otherwise produce a "Redeclaration of …" cdef error. On a name clash,
+    // prefer a "real" (pointer/record/scalar) typedef over a function-type one,
+    // which libclang's error recovery can emit as a spurious duplicate.
+    let mut chosen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut typedefs: Vec<String> = Vec::new();
+    for decl in typedefs_with_pool {
+        match typedef_defined_name(&decl) {
+            Some(name) => match chosen.get(&name).copied() {
+                None => {
+                    chosen.insert(name, typedefs.len());
+                    typedefs.push(decl);
+                }
+                Some(index) => {
+                    if is_function_typedef(&typedefs[index]) && !is_function_typedef(&decl) {
+                        typedefs[index] = decl;
+                    }
+                }
+            },
+            None => typedefs.push(decl),
+        }
+    }
+    // A typedef may reference another typedef's name in its body (e.g. SQLite's
+    // `typedef sqlite_uint64 sqlite3_uint64;`), so order them dependencies-first
+    // rather than alphabetically — C requires a type to be defined before use.
+    let typedefs = order_typedefs(typedefs);
+    let typedefs: Vec<String> = typedefs
+        .iter()
+        .map(|decl| degrade_unsizable_array_typedef(decl, collected))
+        .map(|decl| rewrite_unsupported_scalar_typedef(&decl))
+        .collect();
+
+    let missing_types = missing_function_types(&functions, &typedefs, collected, &resolved_names);
     let referenced = referenced_structs(&typedefs, &functions, &collected.structs);
 
     let mut out = String::new();
@@ -911,17 +2209,90 @@ fn render(collected: &Collected, prefix: &str) -> String {
     out.push('\n');
 
     out.push_str("struct timeval;\n");
-    for name in referenced.iter().chain(collected.structs.keys()) {
+    let alias_tags = collected
+        .struct_aliases
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for name in referenced
+        .iter()
+        .chain(collected.structs.keys())
+        .chain(alias_tags.iter())
+    {
+        out.push_str("struct ");
+        out.push_str(name);
+        out.push_str(";\n");
+    }
+    let union_alias_tags = collected
+        .union_aliases
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for name in collected.unions.keys().chain(union_alias_tags.iter()) {
+        out.push_str("union ");
+        out.push_str(name);
+        out.push_str(";\n");
+    }
+    for name in missing_types
+        .iter()
+        .filter_map(|(name, kind)| matches!(kind, MissingTypeKind::OpaqueStruct).then_some(name))
+    {
         out.push_str("struct ");
         out.push_str(name);
         out.push_str(";\n");
     }
 
+    // A struct/union/enum tag may share its spelling with a function or a real
+    // typedef (C keeps tags in a separate namespace; PHP FFI does not). Emitting
+    // the convenience `typedef <tag> <tag>;` then collides ("Redeclaration"), so
+    // skip it — such types are still reachable through `struct <tag>`/`enum <tag>`
+    // (soxr's `soxr_quality_spec`, gnutls's `gnutls_random_art`, popt's
+    // `poptOption`, which already has a real pointer typedef).
+    let self_typedef_collides = |name: &str| {
+        collected.function_names.contains(name) || collected.typedef_names.contains(name)
+    };
+
     out.push('\n');
     for name in collected.structs.keys() {
+        if self_typedef_collides(name) {
+            continue;
+        }
+        out.push_str(&format!("typedef struct {name} {name};\n"));
+    }
+    for (alias, tag) in &collected.struct_aliases {
+        if collected.structs.contains_key(alias) && alias == tag {
+            continue;
+        }
+        out.push_str(&format!("typedef struct {tag} {alias};\n"));
+    }
+    for (alias, tag) in &collected.union_aliases {
+        if collected.unions.contains_key(alias) && alias == tag {
+            continue;
+        }
+        out.push_str(&format!("typedef union {tag} {alias};\n"));
+    }
+    for name in collected.unions.keys() {
+        if self_typedef_collides(name) {
+            continue;
+        }
+        out.push_str(&format!("typedef union {name} {name};\n"));
+    }
+    for name in missing_types
+        .iter()
+        .filter_map(|(name, kind)| matches!(kind, MissingTypeKind::OpaqueStruct).then_some(name))
+    {
         out.push_str(&format!("typedef struct {name} {name};\n"));
     }
     for name in &collected.enums {
+        if self_typedef_collides(name) {
+            continue;
+        }
+        out.push_str(&format!("typedef int {name};\n"));
+    }
+    for name in missing_types
+        .iter()
+        .filter_map(|(name, kind)| matches!(kind, MissingTypeKind::Int).then_some(name))
+    {
         out.push_str(&format!("typedef int {name};\n"));
     }
     for typedef in &typedefs {
@@ -931,8 +2302,21 @@ fn render(collected: &Collected, prefix: &str) -> String {
 
     out.push('\n');
     out.push_str("struct timeval { long tv_sec; int tv_usec; };\n");
-    for definition in collected.structs.values() {
-        out.push_str(&replace_prefixed_enums(definition, &collected.enums));
+    for (name, definition) in &collected.unions {
+        if !is_safe_union_definition(name, definition, collected) {
+            continue;
+        }
+        out.push_str(&project_enums_to_int(definition));
+        out.push('\n');
+    }
+    for definition in ordered_struct_definitions(collected) {
+        // A struct with a by-value member of a type the cdef leaves incomplete
+        // (an embedded system `struct sockaddr_in`) can't be laid out; keep it
+        // opaque (forward-declared only) rather than emit an unsizable body.
+        if has_incomplete_value_member(definition, collected) {
+            continue;
+        }
+        out.push_str(&project_enums_to_int(definition));
         out.push('\n');
     }
 
@@ -942,7 +2326,774 @@ fn render(collected: &Collected, prefix: &str) -> String {
         out.push('\n');
     }
 
+    for global in &globals {
+        out.push_str(global);
+        out.push('\n');
+    }
+
     out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MissingTypeKind {
+    Int,
+    OpaqueStruct,
+}
+
+/// Resolve types referenced by the kept typedefs/functions but defined only in
+/// #included headers, pulling their definitions out of the pool. Returns typedef
+/// declarations in dependency order (a type's own dependencies first), so the
+/// list can be emitted ahead of the package's own typedefs.
+fn resolve_pool_types(
+    typedefs: &[String],
+    functions: &[String],
+    collected: &Collected,
+) -> Vec<String> {
+    let known = known_type_names(collected);
+
+    fn visit(
+        name: &str,
+        collected: &Collected,
+        known: &BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if known.contains(name) || !visited.insert(name.to_owned()) {
+            return;
+        }
+        if let Some(underlying) = collected.pool_typedefs.get(name) {
+            for token in identifier_tokens(underlying) {
+                visit(token, collected, known, visited, out);
+            }
+            let underlying = strip_unsizable_array(underlying, collected);
+            out.push(typedef_declaration(name, &underlying));
+        } else if let Some(tag) = collected.pool_struct_aliases.get(name) {
+            out.push(format!("typedef struct {tag} {name};"));
+        } else if let Some(tag) = collected.pool_union_aliases.get(name) {
+            out.push(format!("typedef union {tag} {name};"));
+        } else if collected.pool_enums.contains(name) {
+            out.push(format!("typedef int {name};"));
+        }
+        // Not in the pool: leave it for the int/opaque-struct fallback.
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut out = Vec::new();
+    for declaration in typedefs
+        .iter()
+        .chain(functions.iter())
+        .chain(collected.structs.values())
+        .chain(collected.unions.values())
+    {
+        for token in identifier_tokens(declaration) {
+            visit(token, collected, &known, &mut visited, &mut out);
+        }
+    }
+    out
+}
+
+/// Order typedef declarations so each one appears after any other typedef it
+/// references in its body (topological sort). Preserves the original order among
+/// independent typedefs. Cycles (rare/illegal in C) fall back to insertion order.
+fn order_typedefs(typedefs: Vec<String>) -> Vec<String> {
+    // name -> (index, decl); index keeps a stable order for independents.
+    let mut by_name: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut unnamed = Vec::new();
+    for (index, decl) in typedefs.iter().enumerate() {
+        match typedef_defined_name(decl) {
+            Some(name) => {
+                by_name.entry(name).or_insert((index, decl.clone()));
+            }
+            None => unnamed.push(decl.clone()),
+        }
+    }
+
+    fn visit(
+        name: &str,
+        by_name: &BTreeMap<String, (usize, String)>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        ordered: &mut Vec<String>,
+    ) {
+        if visited.contains(name) || !visiting.insert(name.to_owned()) {
+            return;
+        }
+        if let Some((_, decl)) = by_name.get(name) {
+            for token in identifier_tokens(decl) {
+                if token != name && by_name.contains_key(token) {
+                    visit(token, by_name, visiting, visited, ordered);
+                }
+            }
+            ordered.push(decl.clone());
+        }
+        visiting.remove(name);
+        visited.insert(name.to_owned());
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut ordered = Vec::new();
+    // Iterate in the original index order for determinism.
+    let mut names: Vec<&String> = by_name.keys().collect();
+    names.sort_by_key(|name| by_name[*name].0);
+    for name in names {
+        visit(name, &by_name, &mut visiting, &mut visited, &mut ordered);
+    }
+    ordered.extend(unnamed);
+    ordered
+}
+
+/// Drop the array dimension from a pooled typedef whose element is a struct/union
+/// tag that stays opaque in the cdef (no body is emitted for it). PHP FFI needs
+/// the element size to lay out an array, so `typedef struct __jmp_buf_tag
+/// jmp_buf[1];` over an incomplete `__jmp_buf_tag` fails to parse. Such types
+/// (e.g. `jmp_buf`) are only ever used through a pointer, for which the element
+/// size is irrelevant, so the alias to the incomplete struct is enough.
+fn strip_unsizable_array(underlying: &str, collected: &Collected) -> String {
+    let Some(open) = underlying.find('[') else {
+        return underlying.to_owned();
+    };
+    let base = underlying[..open].trim_end();
+    if is_incomplete_aggregate(base, collected) {
+        base.to_owned()
+    } else {
+        underlying.to_owned()
+    }
+}
+
+/// Whether a type name denotes a struct/union the cdef leaves incomplete (only
+/// forward-declared, no body) — directly (`struct X`/`union X`) or through a
+/// typedef alias (`__gmp_randstate_struct`, libreadline's `KEYMAP_ENTRY`). PHP
+/// FFI can't size such a type for a by-value array element.
+fn is_incomplete_aggregate(name: &str, collected: &Collected) -> bool {
+    if let Some(tag) = name.strip_prefix("struct ") {
+        return !collected.structs.contains_key(tag);
+    }
+    if let Some(tag) = name.strip_prefix("union ") {
+        return !collected.unions.contains_key(tag);
+    }
+    if let Some(tag) = collected
+        .struct_aliases
+        .get(name)
+        .or_else(|| collected.pool_struct_aliases.get(name))
+    {
+        return !collected.structs.contains_key(tag);
+    }
+    if let Some(tag) = collected
+        .union_aliases
+        .get(name)
+        .or_else(|| collected.pool_union_aliases.get(name))
+    {
+        return !collected.unions.contains_key(tag);
+    }
+    false
+}
+
+/// Render-time pass: degrade `typedef <elem> name[N];` to `typedef <elem> name;`
+/// when `<elem>` is an aggregate (struct/union) — libgmp `mpz_t[1]`, libtheora
+/// `th_ycbcr_buffer[3]`, libreadline `KEYMAP_ENTRY_ARRAY[257]`. These are the C
+/// by-reference array idiom; the typedef is always used through a pointer (an
+/// array parameter decays anyway), so dropping the dimension is functionally
+/// transparent and sidesteps both "incomplete struct" and definition-ordering
+/// parse errors. A scalar-element buffer (`unsigned char th_quant_base[64]`)
+/// keeps its array, since those are real fixed-size byte buffers.
+fn degrade_unsizable_array_typedef(decl: &str, collected: &Collected) -> String {
+    if !decl.contains('[') {
+        return decl.to_owned();
+    }
+    let Some(inner) = decl.strip_prefix("typedef ") else {
+        return decl.to_owned();
+    };
+    let inner = inner.trim_end_matches(';').trim();
+    let Some(open) = inner.find('[') else {
+        return decl.to_owned();
+    };
+    let Some((element, name)) = split_declaration_name(inner[..open].trim()) else {
+        return decl.to_owned();
+    };
+    if is_aggregate_type(&element, collected) {
+        format!("typedef {element} {name};")
+    } else {
+        decl.to_owned()
+    }
+}
+
+/// Render-time string form of [`unsupported_scalar_typedef`], for typedefs that
+/// reach the cdef through the pool resolver (where only the textual underlying is
+/// available, e.g. openblas's `typedef _Complex double openblas_complex_double;`).
+fn rewrite_unsupported_scalar_typedef(decl: &str) -> String {
+    let parsed = decl
+        .strip_prefix("typedef ")
+        .and_then(|inner| Some((inner, typedef_defined_name(decl)?)));
+    let Some((inner, name)) = parsed else {
+        return decl.to_owned();
+    };
+    if inner.contains("__int128") {
+        return format!("typedef struct {{ uint64_t lo; uint64_t hi; }} {name};");
+    }
+    if inner.contains("_Complex") {
+        let element = if inner.contains("float") {
+            "float"
+        } else {
+            "double"
+        };
+        return format!("typedef struct {{ {element} re; {element} im; }} {name};");
+    }
+    decl.to_owned()
+}
+
+/// Whether a type name denotes a struct/union (complete or not), directly or via
+/// a typedef alias.
+fn is_aggregate_type(name: &str, collected: &Collected) -> bool {
+    name.starts_with("struct ")
+        || name.starts_with("union ")
+        || collected.struct_aliases.contains_key(name)
+        || collected.pool_struct_aliases.contains_key(name)
+        || collected.union_aliases.contains_key(name)
+        || collected.pool_union_aliases.contains_key(name)
+}
+
+/// The names defined by `resolve_pool_types`' output (the identifier of each
+/// `typedef … <name>;`).
+fn pool_resolved_names(resolved: &[String]) -> BTreeSet<String> {
+    resolved
+        .iter()
+        .filter_map(|d| typedef_defined_name(d))
+        .collect()
+}
+
+/// The identifier a `typedef …;` declaration introduces, handling plain
+/// (`typedef unsigned long uLong;`), function-pointer (`typedef void (*cb)(int);`)
+/// and function-type (`typedef int handler(void *);`) forms.
+fn typedef_defined_name(decl: &str) -> Option<String> {
+    let inner = decl.strip_prefix("typedef ")?.trim_end_matches(';').trim();
+    if let Some(open) = inner.find("(*") {
+        // Function-pointer typedef: the name follows `(*` up to `)`.
+        let rest = &inner[open + 2..];
+        let name: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        return (!name.is_empty()).then_some(name);
+    }
+    if let Some(open) = inner.find('(') {
+        // Function-type typedef (`int handler(args)`): the name is the identifier
+        // immediately before the parameter list.
+        let before = inner[..open].trim_end();
+        let start = before
+            .rfind(|ch: char| !is_c_identifier_char(ch))
+            .map_or(0, |index| index + 1);
+        let name = &before[start..];
+        return (!name.is_empty()).then_some(name.to_owned());
+    }
+    // Array typedef (`struct __jmp_buf_tag jmp_buf[1];`): the name precedes the
+    // `[`, so drop the array declarator before extracting it.
+    let inner = match inner.find('[') {
+        Some(open) => inner[..open].trim_end(),
+        None => inner,
+    };
+    split_declaration_name(inner).map(|(_, name)| name)
+}
+
+/// Whether a typedef declaration is a function-type form (`typedef ret name(args);`).
+/// libclang's error recovery can emit such a typedef as a spurious duplicate of a
+/// real (pointer/record) typedef of the same name; the real one should win.
+fn is_function_typedef(decl: &str) -> bool {
+    let Some(inner) = decl.strip_prefix("typedef ") else {
+        return false;
+    };
+    !inner.contains("(*") && inner.contains('(')
+}
+
+fn missing_function_types(
+    functions: &[String],
+    typedefs: &[String],
+    collected: &Collected,
+    resolved_names: &BTreeSet<String>,
+) -> BTreeMap<String, MissingTypeKind> {
+    let known = known_type_names(collected);
+    let mut missing = BTreeMap::new();
+    let mut scan = |fragment: &str| {
+        for (start, token) in identifier_spans(fragment) {
+            if is_c_keyword(token)
+                || known.contains(token)
+                || resolved_names.contains(token)
+                || collected.function_names.contains(token)
+                || !looks_like_external_type_name(token)
+            {
+                continue;
+            }
+            // A token right after a `struct`/`union`/`enum` keyword is a tag,
+            // already forward-declared by `referenced_structs`; not a typedef.
+            if matches!(
+                last_identifier(&fragment[..start]),
+                "struct" | "union" | "enum"
+            ) {
+                continue;
+            }
+            let before = previous_nonspace(fragment, start);
+            if before == Some('*') {
+                continue;
+            }
+            let after = next_nonspace(fragment, start + token.len());
+            let kind = if after == Some('*') {
+                MissingTypeKind::OpaqueStruct
+            } else {
+                MissingTypeKind::Int
+            };
+            missing
+                .entry(token.to_owned())
+                .and_modify(|existing| {
+                    if kind == MissingTypeKind::Int {
+                        *existing = MissingTypeKind::Int;
+                    }
+                })
+                .or_insert(kind);
+        }
+    };
+    for function in functions {
+        for type_part in function_type_parts(function) {
+            if type_part.contains('(') || type_part.contains(')') {
+                continue;
+            }
+            scan(&type_part);
+        }
+    }
+    // Also scan typedefs, so a type referenced only inside a function-pointer
+    // typedef (mbedtls's `mbedtls_x509_buf` in a callback signature) is backfilled.
+    // The typedef's own name is already in `known` (collected.typedef_names).
+    for typedef in typedefs {
+        scan(typedef);
+    }
+    missing
+}
+
+/// The function name in a cdef declaration like `int foo(int a);` — the
+/// identifier immediately before the parameter list.
+fn function_decl_name(function: &str) -> Option<&str> {
+    let open = function.find('(')?;
+    let before = function[..open].trim_end();
+    let start = before
+        .rfind(|ch: char| !is_c_identifier_char(ch))
+        .map_or(0, |index| index + 1);
+    let name = &before[start..];
+    (!name.is_empty()).then_some(name)
+}
+
+/// The variable name in a global declaration like `extern T name;` — the trailing
+/// identifier, so the export filter can check the symbol.
+fn global_decl_name(global: &str) -> Option<String> {
+    let inner = global.strip_prefix("extern ")?.trim_end_matches(';').trim();
+    split_declaration_name(inner).map(|(_, name)| name)
+}
+
+fn function_type_parts(function: &str) -> Vec<String> {
+    let Some(open) = function.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = function.rfind(')') else {
+        return Vec::new();
+    };
+
+    let mut parts = Vec::new();
+    if let Some((return_type, _)) = split_declaration_name(function[..open].trim()) {
+        parts.push(return_type);
+    }
+
+    for param in split_comma_separated(&function[open + 1..close]) {
+        if param == "void" || param == "..." {
+            continue;
+        }
+        if let Some((type_name, _)) = split_declaration_name(param) {
+            parts.push(type_name);
+        }
+    }
+    parts
+}
+
+fn split_declaration_name(declaration: &str) -> Option<(String, String)> {
+    let declaration = declaration.trim().trim_end_matches(';').trim();
+    let end = declaration
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index + ch.len_utf8()))?;
+    let trimmed = &declaration[..end];
+    let mut start = trimmed.len();
+    for (index, ch) in trimmed.char_indices().rev() {
+        if is_c_identifier_char(ch) {
+            start = index;
+        } else {
+            break;
+        }
+    }
+    if start == trimmed.len() {
+        return None;
+    }
+    let name = trimmed[start..].to_owned();
+    let type_name = trimmed[..start].trim().to_owned();
+    (!type_name.is_empty()).then_some((type_name, name))
+}
+
+fn split_comma_separated(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(input[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].trim());
+    parts
+}
+
+fn known_type_names(collected: &Collected) -> BTreeSet<String> {
+    let mut known = builtin_type_names();
+    known.extend(collected.structs.keys().cloned());
+    known.extend(collected.struct_aliases.keys().cloned());
+    known.extend(collected.unions.keys().cloned());
+    known.extend(collected.union_aliases.keys().cloned());
+    known.extend(collected.enums.iter().cloned());
+    known.extend(collected.typedef_names.iter().cloned());
+    known
+}
+
+fn builtin_type_names() -> BTreeSet<String> {
+    [
+        "const",
+        "volatile",
+        "restrict",
+        "signed",
+        "unsigned",
+        "char",
+        "short",
+        "int",
+        "long",
+        "float",
+        "double",
+        "void",
+        "bool",
+        "_Bool",
+        "size_t",
+        "ssize_t",
+        "intptr_t",
+        "uintptr_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "Uint8",
+        "Uint16",
+        "Uint32",
+        "Uint64",
+        "Sint8",
+        "Sint16",
+        "Sint32",
+        "Sint64",
+        "wchar_t",
+        "va_list",
+        // GLib fundamental types, defined in the prelude (their real definitions
+        // live in a libdir `glibconfig.h` libclang never sees). Listed here so the
+        // missing-type backfill treats them as known and never re-emits them.
+        "gchar",
+        "guchar",
+        "gshort",
+        "gushort",
+        "gint",
+        "guint",
+        "glong",
+        "gulong",
+        "gboolean",
+        "gint8",
+        "guint8",
+        "gint16",
+        "guint16",
+        "gint32",
+        "guint32",
+        "gint64",
+        "guint64",
+        "gsize",
+        "gssize",
+        "goffset",
+        "gintptr",
+        "guintptr",
+        "gunichar",
+        "gunichar2",
+        "gfloat",
+        "gdouble",
+        "gpointer",
+        "gconstpointer",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Whether an unresolved identifier in a type position is plausibly an undefined
+/// *type* worth backfilling. Kept conservative — `FILE`, names with an underscore,
+/// or any name carrying an uppercase letter (`TIFFFieldInfo`, `mbedtls_x509_buf`,
+/// camelCase `xmlXPathObjectPtr`). A bare *all-lowercase* token is rejected: it is
+/// usually a dropped parameter *name* (libclang leaves `order` when it can't
+/// resolve `CBLAS_ORDER order`), which must not become a spurious `typedef int
+/// order;` that collides with a generated class.
+fn looks_like_external_type_name(token: &str) -> bool {
+    token == "FILE" || token.contains('_') || token.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+/// C keywords that can appear in a type position but are never themselves a type
+/// name to backfill. (Type keywords like `int`/`const` are in `builtin_type_names`.)
+fn is_c_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "struct"
+            | "union"
+            | "enum"
+            | "typedef"
+            | "return"
+            | "static"
+            | "extern"
+            | "inline"
+            | "sizeof"
+            | "_Complex"
+    )
+}
+
+/// The last C identifier in a string (e.g. the keyword preceding a tag), or "".
+fn last_identifier(input: &str) -> &str {
+    let trimmed = input.trim_end();
+    let start = trimmed
+        .rfind(|ch: char| !is_c_identifier_char(ch))
+        .map_or(0, |index| index + 1);
+    &trimmed[start..]
+}
+
+fn identifier_spans(input: &str) -> Vec<(usize, &str)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, ch) in input.char_indices() {
+        if is_c_identifier_char(ch) {
+            start.get_or_insert(index);
+        } else if let Some(token_start) = start.take() {
+            spans.push((token_start, &input[token_start..index]));
+        }
+    }
+    if let Some(token_start) = start {
+        spans.push((token_start, &input[token_start..]));
+    }
+    spans
+}
+
+fn previous_nonspace(input: &str, index: usize) -> Option<char> {
+    input[..index].chars().rev().find(|ch| !ch.is_whitespace())
+}
+
+fn next_nonspace(input: &str, index: usize) -> Option<char> {
+    input[index..].chars().find(|ch| !ch.is_whitespace())
+}
+
+fn is_safe_union_definition(name: &str, definition: &str, collected: &Collected) -> bool {
+    for candidate in collected
+        .structs
+        .keys()
+        .chain(collected.struct_aliases.keys())
+    {
+        if contains_c_identifier(definition, candidate) {
+            return false;
+        }
+    }
+    for candidate in collected
+        .unions
+        .keys()
+        .chain(collected.union_aliases.keys())
+    {
+        if candidate != name && contains_c_identifier(definition, candidate) {
+            return false;
+        }
+    }
+    !has_incomplete_value_member(definition, collected)
+}
+
+/// Whether an aggregate body has a *by-value* member of a `struct`/`union` whose
+/// full definition the cdef never emits (a system type like `struct sockaddr_in`,
+/// only forward-declared). PHP FFI can't size such a member, so the enclosing
+/// aggregate must stay opaque (libuv/libcares/libwebsockets embed sockaddrs by
+/// value). Pointer members (`struct sockaddr_in *`) are fine and ignored.
+fn has_incomplete_value_member(definition: &str, collected: &Collected) -> bool {
+    for keyword in ["struct", "union"] {
+        let mut search_from = 0;
+        while let Some(found) = definition[search_from..].find(keyword) {
+            let index = search_from + found;
+            search_from = index + keyword.len();
+            // Require word boundaries so `struct` doesn't match inside an identifier.
+            let before_ok = definition[..index]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_c_identifier_char(ch));
+            let after = &definition[search_from..];
+            let after_ok = after
+                .chars()
+                .next()
+                .is_some_and(|ch| !is_c_identifier_char(ch));
+            if !before_ok || !after_ok {
+                continue;
+            }
+            let after = after.trim_start();
+            let tag: String = after
+                .chars()
+                .take_while(|ch| is_c_identifier_char(*ch))
+                .collect();
+            if tag.is_empty() {
+                continue; // anonymous inline `struct { … }`
+            }
+            // A pointer member needs no size; only by-value members must be sized.
+            if after[tag.len()..].trim_start().starts_with('*') {
+                continue;
+            }
+            let complete = if keyword == "struct" {
+                collected.structs.contains_key(&tag)
+            } else {
+                collected.unions.contains_key(&tag)
+            };
+            if !complete {
+                return true;
+            }
+        }
+    }
+    // A by-value member typed as a bare *typedef* (no `struct`/`union` keyword)
+    // that aliases an aggregate whose body the cdef never emits — mbedtls embeds
+    // `mbedtls_x509_san_other_name`, a typedef for an incomplete struct, by value
+    // inside a union. PHP FFI can't size it, so the enclosing aggregate must stay
+    // opaque. Pointer members (`alias *p`) need no size and are ignored.
+    let incomplete_value_aliases = collected
+        .struct_aliases
+        .iter()
+        .filter(|(_, tag)| !collected.structs.contains_key(*tag))
+        .map(|(alias, _)| alias)
+        .chain(
+            collected
+                .union_aliases
+                .iter()
+                .filter(|(_, tag)| !collected.unions.contains_key(*tag))
+                .map(|(alias, _)| alias),
+        );
+    for alias in incomplete_value_aliases {
+        if contains_value_member(definition, alias) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `definition` uses `identifier` as a whole-word, by-value member type
+/// (`identifier name;`) — i.e. not as a pointer (`identifier *name;`), which needs
+/// no size. Used to spot by-value members of an incomplete typedef'd aggregate.
+fn contains_value_member(definition: &str, identifier: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(found) = definition[search_from..].find(identifier) {
+        let start = search_from + found;
+        let end = start + identifier.len();
+        search_from = end;
+        let before_ok = definition[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_c_identifier_char(ch));
+        let after_ok = definition[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_c_identifier_char(ch));
+        if !before_ok || !after_ok {
+            continue;
+        }
+        // A pointer member (`alias *name`) is fine; only by-value members must be
+        // sized.
+        if !definition[end..].trim_start().starts_with('*') {
+            return true;
+        }
+    }
+    false
+}
+
+fn ordered_struct_definitions(collected: &Collected) -> Vec<&String> {
+    fn visit<'a>(
+        name: &str,
+        collected: &'a Collected,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        ordered: &mut Vec<&'a String>,
+    ) {
+        if visited.contains(name) || !visiting.insert(name.to_owned()) {
+            return;
+        }
+
+        if let Some(definition) = collected.structs.get(name) {
+            for dependency in struct_definition_dependencies(name, definition, collected) {
+                visit(&dependency, collected, visiting, visited, ordered);
+            }
+            ordered.push(definition);
+        }
+
+        visiting.remove(name);
+        visited.insert(name.to_owned());
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for name in collected.structs.keys() {
+        visit(name, collected, &mut visiting, &mut visited, &mut ordered);
+    }
+    ordered
+}
+
+fn struct_definition_dependencies(
+    name: &str,
+    definition: &str,
+    collected: &Collected,
+) -> Vec<String> {
+    let mut dependencies = BTreeSet::new();
+    for candidate in collected.structs.keys() {
+        if candidate != name && contains_c_identifier(definition, candidate) {
+            dependencies.insert(candidate.clone());
+        }
+    }
+    for (alias, tag) in &collected.struct_aliases {
+        if tag != name
+            && collected.structs.contains_key(tag)
+            && contains_c_identifier(definition, alias)
+        {
+            dependencies.insert(tag.clone());
+        }
+    }
+    dependencies.into_iter().collect()
+}
+
+fn contains_c_identifier(input: &str, identifier: &str) -> bool {
+    let mut rest = input;
+    while let Some(index) = rest.find(identifier) {
+        let before = rest[..index].chars().next_back();
+        let after = rest[index + identifier.len()..].chars().next();
+        let boundary_before = before.is_none_or(|ch| !is_c_identifier_char(ch));
+        let boundary_after = after.is_none_or(|ch| !is_c_identifier_char(ch));
+        if boundary_before && boundary_after {
+            return true;
+        }
+        rest = &rest[index + identifier.len()..];
+    }
+    false
+}
+
+fn is_c_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 /// Collect struct names that are referenced by the kept declarations but are
@@ -970,13 +3121,89 @@ fn referenced_structs(
 }
 
 /// Replace `enum <name>` references (for enums projected onto `int`) with `int`.
-fn replace_prefixed_enums(input: &str, enums: &BTreeSet<String>) -> String {
-    let mut out = input.to_owned();
-    // Longest names first so a name that is a prefix of another is not mangled.
-    for name in enums.iter().rev() {
-        out = out.replace(&format!("enum {name}"), "int");
+/// Rename any parameter whose name shadows a declared type (typedef/struct/enum) to
+/// `argN`. OpenBLAS's `cblas_cgemm_batch` has a parameter literally named `blasint`,
+/// which is also a typedef — FFI's cdef parser then reads the name as a second type
+/// and rejects the declaration. The name is cosmetic, so renaming keeps the cdef valid.
+fn rename_type_colliding_params(function: &str, type_names: &BTreeSet<String>) -> String {
+    let (Some(open), Some(close)) = (function.find('('), function.rfind(')')) else {
+        return function.to_owned();
+    };
+    if close <= open {
+        return function.to_owned();
     }
-    out
+    let params = &function[open + 1..close];
+    let renamed = params
+        .split(',')
+        .enumerate()
+        .map(|(index, param)| rename_param_if_type(param, index, type_names))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}{renamed}{}", &function[..=open], &function[close..])
+}
+
+fn rename_param_if_type(param: &str, index: usize, type_names: &BTreeSet<String>) -> String {
+    let trimmed = param.trim();
+    let bytes = trimmed.as_bytes();
+    let mut start = trimmed.len();
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    // Need a real type before the trailing identifier, separated from it.
+    if start == 0 || start == trimmed.len() {
+        return param.to_owned();
+    }
+    let prev = bytes[start - 1];
+    if prev != b' ' && prev != b'*' && prev != b'\t' {
+        return param.to_owned();
+    }
+    if !type_names.contains(&trimmed[start..]) {
+        return param.to_owned();
+    }
+    let type_part = trimmed[..start].trim_end();
+    let connector = if type_part.ends_with('*') { "" } else { " " };
+    format!(" {type_part}{connector}arg{index}")
+}
+
+/// Project every `enum <Name>` *usage* to `int` (its FFI representation), so an
+/// enum referenced by a struct field/parameter/return doesn't need its definition
+/// in the cdef. This covers enums declared in a #included header that libclang only
+/// forward-declares (FFmpeg's `AVMediaType`) and case-variant enum tags that would
+/// otherwise generate colliding wrappers (OpenBLAS's `order`/`Order`). A definition
+/// (`enum Name { ... }`) is left intact.
+fn project_enums_to_int(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || !is_ident(bytes[i - 1]);
+        if at_boundary && input[i..].starts_with("enum ") {
+            let mut j = i + 5;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let id_start = j;
+            while j < bytes.len() && is_ident(bytes[j]) {
+                j += 1;
+            }
+            if j > id_start {
+                let mut k = j;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                // `enum Name {` is a definition — keep it; a usage projects to int.
+                if !(k < bytes.len() && bytes[k] == b'{') {
+                    out.extend_from_slice(b"int");
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_owned())
 }
 
 /// A scratch directory for the temporary headers handed to libclang.
@@ -1034,12 +3261,17 @@ mod tests {
         #define EX_FLAG_B (1 << 1)
         #define EX_FLAGS (EX_FLAG_A | EX_FLAG_B)
         #define EX_NAME "example"
+        #define EX_TITLE "lib " EX_NAME " v"
         #define EX_RATIO 1.5f
         #define EX_MAX(a, b) ((a) > (b) ? (a) : (b))
         #define EX_POS_MASK 0x2FFF0000
         #define EX_POS_DISPLAY(X) (EX_POS_MASK | (X))
         #define EX_POS_CENTERED EX_POS_DISPLAY(0)
         #define EX_DOUBLE(N) ex_add(N, N)
+        #define EX_TAKE_ADDR(N) ex_add(&(N), N)
+        #define EX_VERSION_STR(MJR, MNR) MJR "." MNR
+        #define EX_EMPTY_CONCAT() ()
+        #define EX_BAD_VERSION 1.2.3
         #define EX_MIX(X, Y) ex_add(1, ex_add(X, Y))
         #define EX_BADCALL(Z) ex_unknown(Z)
         typedef enum ex_color { EX_RED = 0, EX_GREEN, EX_BLUE } ex_color;
@@ -1115,6 +3347,169 @@ mod tests {
     }
 
     #[test]
+    fn emits_opaque_struct_typedefs() {
+        let cdef = cdef_from_header(
+            "typedef struct ex_context ex_context;\n\
+             int ex_open(ex_context **ctx);\n\
+             void ex_close(ex_context *ctx);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("struct ex_context;"), "{cdef}");
+        assert!(
+            cdef.contains("typedef struct ex_context ex_context;"),
+            "{cdef}"
+        );
+        assert!(cdef.contains("int ex_open(ex_context **ctx);"), "{cdef}");
+    }
+
+    #[test]
+    fn preserves_late_opaque_struct_typedef_parameters() {
+        let cdef = cdef_from_header(
+            "int ex_use(ex_context *ctx);\n\
+             typedef struct ex_context ex_context;",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(
+            cdef.contains("typedef struct ex_context ex_context;"),
+            "{cdef}"
+        );
+        assert!(cdef.contains("int ex_use(ex_context *ctx);"), "{cdef}");
+        assert!(!cdef.contains("int ex_use(int *ctx);"), "{cdef}");
+    }
+
+    #[test]
+    fn preserves_late_opaque_struct_typedef_parameters_with_abi_macros() {
+        let cdef = cdef_from_header(
+            "extern DECLSPEC ex_context * EXCALL ex_create(void);\n\
+             extern DECLSPEC int EXCALL ex_use(ex_context *ctx);\n\
+             typedef struct ex_context ex_context;",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("ex_context *ex_create(void);"), "{cdef}");
+        assert!(cdef.contains("int ex_use(ex_context *ctx);"), "{cdef}");
+        assert!(!cdef.contains("int ex_use(int *ctx);"), "{cdef}");
+    }
+
+    #[test]
+    fn detects_sdl_style_aggregate_declarations() {
+        let header = "typedef struct SDL_Window SDL_Window;\n";
+        assert_eq!(
+            super::declared_aggregate_kind(header, "SDL_Window"),
+            Some("struct")
+        );
+    }
+
+    #[test]
+    fn emits_opaque_union_typedefs() {
+        let cdef = cdef_from_header(
+            "typedef union ex_event ex_event;\n\
+             int ex_poll(ex_event *event);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("union ex_event;"), "{cdef}");
+        assert!(cdef.contains("typedef union ex_event ex_event;"), "{cdef}");
+        assert!(cdef.contains("int ex_poll(ex_event *event);"), "{cdef}");
+    }
+
+    #[test]
+    fn emits_named_union_definitions() {
+        let cdef = cdef_from_header(
+            "union ex_params { int a; float b; };\n\
+             typedef union ex_params ex_params;\n\
+             struct ex_mode { ex_params params; };\n\
+             typedef struct ex_mode ex_mode;\n\
+             int ex_use(ex_mode *mode);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(
+            cdef.contains("union ex_params { int a; float b; };"),
+            "{cdef}"
+        );
+        assert!(cdef.contains("int ex_use(ex_mode *mode);"), "{cdef}");
+    }
+
+    #[test]
+    fn leaves_union_with_named_aggregate_values_opaque() {
+        let cdef = cdef_from_header(
+            "struct ex_common { int type; };\n\
+             typedef struct ex_common ex_common;\n\
+             union ex_event { ex_common common; int type; };\n\
+             typedef union ex_event ex_event;\n\
+             int ex_poll(ex_event *event);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("union ex_event;"), "{cdef}");
+        assert!(!cdef.contains("union ex_event {"), "{cdef}");
+        assert!(cdef.contains("int ex_poll(ex_event *event);"), "{cdef}");
+    }
+
+    #[test]
+    fn orders_struct_definitions_before_value_dependants() {
+        let cdef = cdef_from_header(
+            "struct ex_z { int value; };\n\
+             typedef struct ex_z ex_z;\n\
+             struct ex_a { ex_z z; };\n\
+             typedef struct ex_a ex_a;\n\
+             int ex_use(ex_a *value);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        let z = cdef
+            .find("struct ex_z { int value; };")
+            .unwrap_or(usize::MAX);
+        let a = cdef.find("struct ex_a { ex_z z; };").unwrap_or(usize::MAX);
+        assert!(z < a, "{cdef}");
+    }
+
+    #[test]
     fn emits_anonymous_union_struct_fields_inline() {
         // Mirrors SDL's SDL_GameControllerButtonBind, whose anonymous union once
         // produced an invalid `union (unnamed union at ...)` field.
@@ -1141,6 +3536,25 @@ mod tests {
             "unexpected signatures: {:?}",
             signatures.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn drops_synthetic_anonymous_enum_names() {
+        let cdef = cdef_from_header(
+            "typedef enum { EX_KIND_A = 1, EX_KIND_B = 2 } ex_kind;\n\
+             int ex_kind_name(ex_kind kind);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("typedef int ex_kind;"), "{cdef}");
+        assert!(!cdef.contains("unnamed"), "{cdef}");
+        assert!(!cdef.contains("anonymous"), "{cdef}");
     }
 
     #[test]
@@ -1175,6 +3589,9 @@ mod tests {
         assert_eq!(lookup("EX_FLAGS"), Some("( EX_FLAG_A | EX_FLAG_B )"));
         assert_eq!(lookup("EX_NAME"), Some("\"example\""));
         assert_eq!(lookup("EX_RATIO"), Some("1.5"));
+
+        // C concatenates adjacent string literals/macros; PHP needs explicit `.`.
+        assert_eq!(lookup("EX_TITLE"), Some("\"lib \" . EX_NAME . \" v\""));
 
         // Function-like macros are not emitted as constants themselves …
         assert_eq!(lookup("EX_MAX"), None);
@@ -1214,6 +3631,28 @@ mod tests {
         // EX_MAX uses `?:`, which has no allowed-operator rendering, so it is
         // dropped entirely rather than emitted.
         assert!(find("EX_MAX").is_none());
+
+        // A prefix `&` (C address-of) has no faithful PHP rendering, so a macro
+        // using it is dropped rather than emitting invalid `fn(& ( $N ))`.
+        assert!(find("EX_TAKE_ADDR").is_none());
+
+        // C concatenates adjacent operands in a macro body too; PHP needs `.`.
+        let version = find("EX_VERSION_STR").expect("EX_VERSION_STR function");
+        assert_eq!(version.body, Ok("$MJR . \".\" . $MNR".to_owned()));
+
+        // A macro body with no operand (`()`) has no PHP expression, so it drops.
+        assert!(find("EX_EMPTY_CONCAT").is_none());
+    }
+
+    #[test]
+    fn rejects_multi_dot_version_number_constants() {
+        // `#define X 1.2.3` is a C pp-number but not a valid PHP literal, so it
+        // must be dropped rather than emitted as `const X = 1.2.3;`.
+        let constants = artifacts(HEADER).constants;
+        assert!(
+            !constants.iter().any(|(name, _)| name == "EX_BAD_VERSION"),
+            "{constants:?}"
+        );
     }
 
     #[test]
@@ -1227,6 +3666,7 @@ mod tests {
                 symbol_prefix: "ex_".to_owned(),
                 entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
                 dependency_functions,
+                ..Default::default()
             },
         )
         .expect("libclang must be available to run header_adapter tests")
@@ -1241,6 +3681,351 @@ mod tests {
         assert_eq!(
             use_dep.body,
             Ok("\\Pnlx\\Dep\\Dep::ex_dep_call($X)".to_owned())
+        );
+    }
+
+    #[test]
+    fn derives_include_roots_for_nested_package_headers() {
+        use std::path::PathBuf;
+        // A package whose headers live below a system include root (libxml2)
+        // contributes each intermediate directory as a `-I` root, so internal
+        // `#include <libxml/...>` directives resolve to the real sub-headers.
+        let dirs =
+            super::include_search_dirs(&[PathBuf::from("/usr/include/libxml2/libxml/parser.h")]);
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/usr/include/libxml2/libxml"),
+                PathBuf::from("/usr/include/libxml2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn fills_missing_pointer_base_with_void() {
+        use super::fill_missing_pointer_base;
+        // A bare `*` (base type dropped by libclang error recovery) becomes `void *`.
+        assert_eq!(fill_missing_pointer_base("*"), "void *");
+        assert_eq!(fill_missing_pointer_base("const *"), "void const *");
+        // Types with a real base, or non-pointer types, are left untouched.
+        assert_eq!(fill_missing_pointer_base("FILE *"), "FILE *");
+        assert_eq!(fill_missing_pointer_base("const char *"), "const char *");
+        assert_eq!(fill_missing_pointer_base("int"), "int");
+    }
+
+    #[test]
+    fn array_parameters_decay_to_pointers() {
+        use super::array_param_to_pointer;
+        // C array parameters are pointers; rendering them so avoids "incomplete
+        // struct" when the element type is opaque (libtiff `const TIFFFieldInfo arg1[]`).
+        assert_eq!(
+            array_param_to_pointer("const TIFFFieldInfo arg1[]"),
+            "const TIFFFieldInfo *arg1"
+        );
+        assert_eq!(array_param_to_pointer("char arg3[1024]"), "char *arg3");
+        assert_eq!(array_param_to_pointer("int *arr[]"), "int **arr");
+        assert_eq!(array_param_to_pointer("int x"), "int x");
+    }
+
+    #[test]
+    fn rewrites_unsupported_scalar_typedefs() {
+        // `_Complex` and 128-bit integers are re-expressed as same-size structs.
+        let cdef = cdef(
+            "typedef _Complex double cplx;\n\
+             typedef unsigned __int128 u128;\n\
+             int ex_use(cplx a, u128 b);\n",
+        );
+        assert!(
+            cdef.contains("typedef struct { double re; double im; } cplx;"),
+            "{cdef}"
+        );
+        assert!(
+            cdef.contains("typedef struct { uint64_t lo; uint64_t hi; } u128;"),
+            "{cdef}"
+        );
+        assert!(
+            !cdef.contains("_Complex") && !cdef.contains("__int128"),
+            "{cdef}"
+        );
+    }
+
+    #[test]
+    fn skips_self_typedef_colliding_with_a_function() {
+        // A struct tag and a function can share a name in C (separate namespaces)
+        // but not in PHP FFI, so the convenience `typedef struct X X;` is dropped
+        // (soxr's `soxr_quality_spec`, gnutls's `gnutls_random_art`).
+        let cdef = cdef(
+            "struct ex_spec { int p; };\n\
+             int ex_spec(int recipe);\n",
+        );
+        assert!(!cdef.contains("typedef struct ex_spec ex_spec;"), "{cdef}");
+        assert!(cdef.contains("int ex_spec(int recipe);"), "{cdef}");
+    }
+
+    #[test]
+    fn aggregate_array_typedefs_drop_their_dimension() {
+        // `typedef ex_plane ex_planes[3];` is the C by-reference array idiom; the
+        // dimension is dropped so it parses regardless of element completeness.
+        let cdef = cdef(
+            "typedef struct ex_plane { int w; int h; } ex_plane;\n\
+             typedef ex_plane ex_planes[3];\n\
+             int ex_use(ex_planes p);\n",
+        );
+        assert!(cdef.contains("typedef ex_plane ex_planes;"), "{cdef}");
+        assert!(!cdef.contains("ex_planes[3]"), "{cdef}");
+    }
+
+    #[test]
+    fn adds_no_include_roots_for_headers_on_the_default_path() {
+        use std::path::PathBuf;
+        // Headers directly under a system include root are already searched by
+        // libclang, so they need no extra `-I` roots.
+        assert!(super::include_search_dirs(&[PathBuf::from("/usr/include/sodium.h")]).is_empty());
+        assert!(
+            super::include_search_dirs(&[PathBuf::from("/usr/local/include/zlib.h")]).is_empty()
+        );
+        // A header that does not live below any system include root (a fixture or
+        // self-build checkout) contributes no roots, rather than walking up to `/`
+        // and handing libclang bogus `-I` paths.
+        assert!(
+            super::include_search_dirs(&[PathBuf::from("/home/dev/proj/tests/example.h")])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn function_type_typedef_keeps_nested_function_pointer_parameters() {
+        use super::typedef_declaration;
+        // A function-*pointer* typedef: the name is woven into the first `(*)`.
+        assert_eq!(
+            typedef_declaration("cb", "void (*)(int, void *)"),
+            "typedef void (*cb)(int, void *);"
+        );
+        // A function-*type* typedef: the name goes before the parameter list.
+        assert_eq!(
+            typedef_declaration("handler", "int (void *, size_t)"),
+            "typedef int handler(void *, size_t);"
+        );
+        // A function-type typedef whose parameters are themselves function
+        // pointers (openssl's `OSSL_FUNC_provider_register_child_cb_fn`): the
+        // nested `(*)` belongs to a parameter and must NOT capture the typedef
+        // name (the old `contains("(*)")` test mangled it).
+        assert_eq!(
+            typedef_declaration(
+                "OSSL_FN",
+                "int (const int *, int (*)(const void *, void *), void *)"
+            ),
+            "typedef int OSSL_FN(const int *, int (*)(const void *, void *), void *);"
+        );
+        // A plain pointer typedef is unaffected.
+        assert_eq!(typedef_declaration("ptr", "void *"), "typedef void *ptr;");
+    }
+
+    #[test]
+    fn renders_function_pointer_struct_fields_as_void_pointers() {
+        // libmongoc's `_mongoc_stream_t` has many function-pointer fields; render
+        // them as opaque `void *` so the struct loads (a function pointer is
+        // pointer-sized and PHP can't invoke a struct-stored callback anyway).
+        let cdef = cdef(
+            "struct ex_stream {\n\
+                 int type;\n\
+                 void (*destroy)(struct ex_stream *s);\n\
+                 int (*read)(struct ex_stream *s, void *buf);\n\
+             };\n\
+             typedef struct ex_stream ex_stream;\n\
+             int ex_use(ex_stream *s);\n",
+        );
+        assert!(cdef.contains("struct ex_stream {"), "{cdef}");
+        assert!(cdef.contains("void *destroy;"), "{cdef}");
+        assert!(cdef.contains("void *read;"), "{cdef}");
+        assert!(!cdef.contains("(*destroy)"), "{cdef}");
+        assert!(!cdef.contains("(*read)"), "{cdef}");
+    }
+
+    #[test]
+    fn array_parameter_of_typedef_pointer_decays_to_pointer() {
+        // oniguruma's `onig_initialize(OnigEncoding encodings[], int)` where
+        // `OnigEncoding` is `OnigEncodingType *`: the array parameter must decay to
+        // `OnigEncoding *` (a pointer to the encoding pointer), not collapse to a
+        // single `OnigEncoding` (which under-declares it by one pointer level).
+        let cdef = cdef(
+            "typedef struct ex_enc ex_enc;\n\
+             typedef ex_enc *ex_encoding;\n\
+             int ex_init(ex_encoding encodings[], int n);\n",
+        );
+        assert!(
+            cdef.contains("int ex_init(ex_encoding *encodings, int n);"),
+            "{cdef}"
+        );
+    }
+
+    #[test]
+    fn emits_exported_global_variables() {
+        // Exported globals become `extern <type> <name>;` so a PHP example can take
+        // their address (oniguruma's `OnigEncodingUTF8`) or read their value
+        // (`OnigDefaultSyntax`, itself a pointer). `static` file-scope globals have no
+        // exported symbol and are dropped.
+        let cdef = cdef(
+            "typedef struct ex_enc ex_enc;\n\
+             extern ex_enc ex_encoding_utf8;\n\
+             extern ex_enc *ex_default_syntax;\n\
+             static int ex_internal_counter;\n\
+             int ex_use(ex_enc *e);\n",
+        );
+        assert!(cdef.contains("extern ex_enc ex_encoding_utf8;"), "{cdef}");
+        assert!(cdef.contains("extern ex_enc *ex_default_syntax;"), "{cdef}");
+        assert!(!cdef.contains("ex_internal_counter"), "{cdef}");
+    }
+
+    #[test]
+    fn renders_struct_with_callback_typedef_and_enum_fields() {
+        // libconfig's `config_t` has a function-pointer-typedef field
+        // (`config_include_fn_t include_fn`) and an enum-typedef field
+        // (`config_error_t error_type`). Both must be rendered (callback → void*,
+        // enum → its int typedef) so the struct is emitted, not left opaque.
+        let cdef = cdef(
+            "typedef const char **(*ex_include_fn)(int);\n\
+             typedef enum ex_err { EX_OK = 0, EX_BAD = 1 } ex_err;\n\
+             struct ex_cfg { int options; ex_include_fn include_fn; ex_err error_type; };\n\
+             typedef struct ex_cfg ex_cfg;\n\
+             void ex_init(ex_cfg *cfg);\n",
+        );
+        assert!(cdef.contains("struct ex_cfg {"), "{cdef}");
+        assert!(cdef.contains("void *include_fn;"), "{cdef}");
+        assert!(cdef.contains("ex_err error_type;"), "{cdef}");
+        assert!(cdef.contains("typedef int ex_err;"), "{cdef}");
+    }
+
+    #[test]
+    fn keeps_struct_opaque_when_it_embeds_an_incomplete_typedef_by_value() {
+        // mbedtls embeds `mbedtls_x509_san_other_name` (a typedef for an
+        // incomplete struct) by value inside an anonymous union, which slips past
+        // the by-keyword check; PHP FFI can't size it, so the enclosing struct
+        // must stay opaque.
+        let cdef = cdef(
+            "typedef struct ex_inner ex_inner;\n\
+             struct ex_outer { int tag; union { ex_inner other; int code; } u; };\n\
+             typedef struct ex_outer ex_outer;\n\
+             int ex_use(ex_outer *o);\n",
+        );
+        assert!(cdef.contains("struct ex_outer;"), "{cdef}");
+        assert!(!cdef.contains("struct ex_outer {"), "{cdef}");
+        assert!(cdef.contains("int ex_use(ex_outer *o);"), "{cdef}");
+    }
+
+    #[test]
+    fn rewrites_byte_pointer_parameters_to_char_pointers() {
+        use super::rewrite_byte_pointer_params;
+        let none = BTreeMap::new();
+        // libidn2 `idn2_lookup_u8(const uint8_t *src, …)`: a single-level
+        // `uint8_t *` parameter becomes `char *` so PHP FFI accepts a string; the
+        // `uint8_t **` parameter and `int` are untouched.
+        assert_eq!(
+            rewrite_byte_pointer_params(
+                "int idn2_lookup_u8(const uint8_t *src, uint8_t **lookupname, int flags);",
+                &none
+            ),
+            "int idn2_lookup_u8(const char *src, uint8_t **lookupname, int flags);"
+        );
+        // `unsigned char *` and `signed char *` are also rejected by FFI for a
+        // string, so both become `char *`.
+        assert_eq!(
+            rewrite_byte_pointer_params("int f(unsigned char *a, signed char *b);", &none),
+            "int f(char *a, char *b);"
+        );
+        // `char *`, `void *`, and `int *` already work (or are not byte strings)
+        // and are left alone.
+        assert_eq!(
+            rewrite_byte_pointer_params("int g(const char *s, void *p, int *n);", &none),
+            "int g(const char *s, void *p, int *n);"
+        );
+        // Only parameters are rewritten — a byte-pointer *return* is left as is
+        // (a string return is read with `FFI::string`, which works on any byte
+        // pointer).
+        assert_eq!(
+            rewrite_byte_pointer_params("const uint8_t *h(uint8_t *in);", &none),
+            "const uint8_t *h(char *in);"
+        );
+    }
+
+    #[test]
+    fn renders_function_returning_function_pointer_as_void_pointer() {
+        // openssl `DSA_meth_get_sign` returns an *inline* function pointer; weaving
+        // the name into the return declarator produced an invalid "function
+        // returning function". Such a return collapses to an opaque `void *`. A
+        // function-pointer *typedef* return (`ex_cb`) is pointer-sized and valid, so
+        // it is left as is.
+        let cdef = cdef(
+            "typedef int (*ex_cb)(int);\n\
+             ex_cb ex_get_cb(int slot);\n\
+             int (*ex_get_handler(const char *name))(void *, int);\n",
+        );
+        assert!(
+            cdef.contains("void *ex_get_handler(const char *name);"),
+            "{cdef}"
+        );
+        assert!(!cdef.contains("(*ex_get_handler)"), "{cdef}");
+        assert!(cdef.contains("ex_cb ex_get_cb(int slot);"), "{cdef}");
+    }
+
+    #[test]
+    fn never_redefines_a_builtin_type_via_typedef() {
+        use super::is_c_fundamental_type_name;
+        // libmongoc's headers produce a spurious `typedef int bool(int *);` that
+        // turns the builtin `bool` into a function type, so a `bool` struct field
+        // becomes "function type is not allowed". A typedef over a fundamental type
+        // name must never be emitted.
+        assert!(is_c_fundamental_type_name("bool"));
+        assert!(is_c_fundamental_type_name("int"));
+        assert!(!is_c_fundamental_type_name("uint8_t"));
+        assert!(!is_c_fundamental_type_name("OnigUChar"));
+    }
+
+    #[test]
+    fn drops_object_like_macro_with_empty_parenthesised_body() {
+        // mongoc's `#define MONGOC_PRERELEASE_VERSION ()` renders as `( )`, which is
+        // not a PHP expression; the constant must be dropped, not emitted.
+        let constants = artifacts(
+            "#define EX_PRERELEASE ()\n\
+             #define EX_REAL 7\n\
+             int ex_use(int x);\n",
+        )
+        .constants;
+        assert!(
+            !constants.iter().any(|(name, _)| name == "EX_PRERELEASE"),
+            "{constants:?}"
+        );
+        assert!(
+            constants
+                .iter()
+                .any(|(name, value)| name == "EX_REAL" && value == "7"),
+            "{constants:?}"
+        );
+    }
+
+    #[test]
+    fn rewrites_byte_pointer_parameters_hidden_behind_a_typedef() {
+        use super::rewrite_byte_pointer_params;
+        let mut typedefs = BTreeMap::new();
+        // oniguruma: `OnigUChar` is `unsigned char`, used as `const OnigUChar *`.
+        typedefs.insert("OnigUChar".to_owned(), "unsigned char".to_owned());
+        // pcre2: `PCRE2_SPTR8` is itself a byte pointer, used directly.
+        typedefs.insert("PCRE2_SPTR8".to_owned(), "const unsigned char *".to_owned());
+        // A `char`-based typedef must NOT be rewritten — `char *` already works.
+        typedefs.insert("tmbchar".to_owned(), "char".to_owned());
+
+        assert_eq!(
+            rewrite_byte_pointer_params("int onig_search(const OnigUChar *pattern);", &typedefs),
+            "int onig_search(const char *pattern);"
+        );
+        assert_eq!(
+            rewrite_byte_pointer_params("int pcre2_compile(PCRE2_SPTR8 pattern);", &typedefs),
+            "int pcre2_compile(const char *pattern);"
+        );
+        // `char`-based typedef pointers are left untouched.
+        assert_eq!(
+            rewrite_byte_pointer_params("int tidy(const tmbchar *s);", &typedefs),
+            "int tidy(const tmbchar *s);"
         );
     }
 }

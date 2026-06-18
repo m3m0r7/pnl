@@ -40,9 +40,6 @@ pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
 # インストール後にプロジェクトを検証。
 pnl validate
 
-# インストール済みの libusb bridge を再ビルド。
-pnlx build libusb
-
 # 「PHP からの使い方」の libusb サンプルを実行。
 php <libusb-example.php>
 ```

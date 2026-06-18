@@ -1,5 +1,3 @@
-use super::FunctionSignature;
-
 /// Every alias the case-insensitive dispatch map recognizes for a symbol — the
 /// original C name plus camelCase and PascalCase spellings.
 pub(super) fn alias_names(name: &str) -> Vec<String> {
@@ -19,10 +17,6 @@ pub(super) fn method_names(name: &str) -> Vec<String> {
     names.sort();
     names.dedup();
     names
-}
-
-pub(super) fn bridge_symbol_name(signature: &FunctionSignature) -> String {
-    format!("pnlx_bridge_{}", signature.name)
 }
 
 fn snake_to_camel(name: &str) -> String {

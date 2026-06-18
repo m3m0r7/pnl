@@ -111,10 +111,8 @@ fn generate_config_constants(out_dir: &Path) {
         "pathmap": string(&["filenames", "pathmap"]),
         "autoload": string(&["filenames", "autoload"]),
         "generated_dir": string(&["filenames", "generated_dir"]),
-        "bridge_dir": string(&["filenames", "bridge_dir"]),
         "aliases_file": string(&["filenames", "aliases_file"]),
         "ffi_suffix": string(&["filenames", "ffi_suffix"]),
-        "bridge_suffix": string(&["filenames", "bridge_suffix"]),
         // The build target, surfaced to the PHP layer as PNLX_BUILD_OS/ARCH.
         "build_os": env::var("CARGO_CFG_TARGET_OS").unwrap_or_default(),
         "build_arch": env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default(),

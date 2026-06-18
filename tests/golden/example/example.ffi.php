@@ -20,10 +20,64 @@ declare(strict_types=1);
  */
 
 return <<<'CDEF'
-typedef unsigned long size_t;
 typedef signed long ssize_t;
+typedef unsigned long size_t;
+typedef long intptr_t;
+typedef unsigned long uintptr_t;
+typedef signed char int8_t;
+typedef signed short int16_t;
+typedef signed int int32_t;
+typedef signed long long int64_t;
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+typedef int wchar_t;
+typedef void *va_list;
+typedef unsigned char Uint8;
+typedef unsigned short Uint16;
+typedef unsigned int Uint32;
+typedef unsigned long long Uint64;
+typedef signed char Sint8;
+typedef signed short Sint16;
+typedef signed int Sint32;
+typedef signed long long Sint64;
+typedef char gchar;
+typedef unsigned char guchar;
+typedef short gshort;
+typedef unsigned short gushort;
+typedef int gint;
+typedef unsigned int guint;
+typedef long glong;
+typedef unsigned long gulong;
+typedef int gboolean;
+typedef signed char gint8;
+typedef unsigned char guint8;
+typedef signed short gint16;
+typedef unsigned short guint16;
+typedef signed int gint32;
+typedef unsigned int guint32;
+typedef signed long long gint64;
+typedef unsigned long long guint64;
+typedef unsigned long gsize;
+typedef signed long gssize;
+typedef signed long long goffset;
+typedef long gintptr;
+typedef unsigned long guintptr;
+typedef unsigned int gunichar;
+typedef unsigned short gunichar2;
+typedef float gfloat;
+typedef double gdouble;
+typedef void *gpointer;
+typedef const void *gconstpointer;
 
-const char * pnlx_bridge_example_version(void);
-int pnlx_bridge_example_add(int left, int right);
+struct timeval;
+
+typedef int example_mode;
+
+struct timeval { long tv_sec; int tv_usec; };
+
+const char *example_version(void);
+int example_add(int left, int right);
 
 CDEF;

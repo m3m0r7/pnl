@@ -16,17 +16,53 @@ use crate::manifest::PnlManifest;
 //   UPDATE_CHECK_TTL_SECONDS, UPDATE_CHECK_OPT_OUT_ENV, UPDATE_CHECK_CACHE_KEY,
 //   BINARIES, AUTHORIZED_REPOSITORIES, and the `[filenames]` path constants
 //   (PNL_MANIFEST_FILE, PNLX_MANIFEST_FILE, LOCK_FILE, PATHMAP_FILE,
-//   AUTOLOAD_FILE, GENERATED_DIR, BRIDGE_DIR, ALIASES_FILE, FFI_FILE_SUFFIX,
-//   BRIDGE_FILE_SUFFIX).
+//   AUTOLOAD_FILE, GENERATED_DIR, ALIASES_FILE, FFI_FILE_SUFFIX).
 include!(concat!(env!("OUT_DIR"), "/config_constants.rs"));
 
 /// Whether an install-source URL is covered by a built-in authorized-repository
 /// prefix (`repositories.authorized` in `config.toml`). Packages from these
 /// trusted sources skip the "install scripts can run arbitrary commands" prompt.
 pub fn is_authorized_repository(source_url: &str) -> bool {
-    AUTHORIZED_REPOSITORIES
-        .iter()
-        .any(|prefix| source_url.starts_with(prefix))
+    let source_url = source_url.trim();
+    let normalized = normalize_git_source_url(source_url);
+
+    AUTHORIZED_REPOSITORIES.iter().any(|prefix| {
+        matches_authorized_prefix(source_url, prefix)
+            || normalized
+                .as_deref()
+                .is_some_and(|source| matches_authorized_prefix(source, prefix))
+    })
+}
+
+fn matches_authorized_prefix(source_url: &str, prefix: &str) -> bool {
+    let Some(rest) = source_url.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with('/') || rest.starts_with(".git")
+}
+
+fn normalize_git_source_url(source_url: &str) -> Option<String> {
+    if let Some(rest) = source_url.strip_prefix("git@github.com:") {
+        return Some(format!(
+            "https://github.com/{}",
+            strip_git_suffix_from_path(rest)
+        ));
+    }
+    if let Some(rest) = source_url.strip_prefix("ssh://git@github.com/") {
+        return Some(format!(
+            "https://github.com/{}",
+            strip_git_suffix_from_path(rest)
+        ));
+    }
+    None
+}
+
+fn strip_git_suffix_from_path(path: &str) -> String {
+    if let Some((repository, suffix)) = path.split_once(".git/") {
+        format!("{repository}/{suffix}")
+    } else {
+        path.strip_suffix(".git").unwrap_or(path).to_owned()
+    }
 }
 
 /// The default repository pnl releases come from.
@@ -85,9 +121,18 @@ mod tests {
         assert!(is_authorized_repository(
             "https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb"
         ));
+        assert!(is_authorized_repository(
+            "git@github.com:m3m0r7/pnl-packages.git"
+        ));
+        assert!(is_authorized_repository(
+            "ssh://git@github.com/m3m0r7/pnl-packages.git"
+        ));
         // An unrelated source still prompts.
         assert!(!is_authorized_repository(
             "https://github.com/someone-else/packages/tree/main/libusb"
+        ));
+        assert!(!is_authorized_repository(
+            "https://github.com/m3m0r7/pnl-packages-fake/tree/main/packages/libusb"
         ));
         assert!(!is_authorized_repository("/local/path/to/package"));
     }

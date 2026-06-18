@@ -26,11 +26,11 @@ namespace Pnlx\Example;
  *
  * Concrete per-type wrappers under {@see Example\Types} extend this class, and an
  * opaque (`void *`) value falls back to it directly. Methods that take a pointer
- * accept any {@see \Pnlx\Helpers\ContextInterface}; the inner `\FFI\CData` is
+ * accept any {@see \Pnlx\Types\PointerInterface}; the inner `\FFI\CData` is
  * unwrapped via {@see toValue()} before the native call. Pass {@see cdata()}
  * when you need the underlying value.
  */
-class ExampleContext implements \Pnlx\Helpers\ContextInterface
+class ExampleContext implements \Pnlx\Types\PointerInterface
 {
     public function __construct(
         protected readonly \FFI\CData $cdata,

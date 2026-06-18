@@ -1,2 +1,2 @@
-{{#each aliases}}    '{{alias}}' => '{{bridge}}',
+{{#each aliases}}    '{{alias}}' => '{{native}}',
 {{/each}}

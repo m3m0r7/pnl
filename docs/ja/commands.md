@@ -31,7 +31,6 @@
   - [`pnlx init`](#pnlx-init)
   - [`pnlx validate`](#pnlx-validate)
   - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
-  - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
   - [`pnlx publish`](#pnlx-publish)
   - [`pnlx package`](#pnlx-package)
 
@@ -125,7 +124,7 @@ initialized ./pnl.json
 
 ### `pnl install <source>`
 
-指定した拡張をインストールします。具体的には、C ライブラリ本体とヘッダーを探し、PHP/Rust のラッパーを生成し、bridge をコンパイルし、`pnl.json`・ロックファイル・パスマップ・`@pnlx/autoload.php` を更新します。
+指定した拡張をインストールします。具体的には、C ライブラリ本体とヘッダーを探し、PHP ラッパーを生成し、`pnl.json`・ロックファイル・パスマップ・`@pnlx/autoload.php` を更新します。
 
 ソースには URL・ローカルパス・**パッケージ名だけ**・**配布アーカイブ**（`.tar.gz`/`.tgz`/`.zip`。ローカルでもリモートでも可。必要ならダウンロードして展開し、中に `pnlx.json` が無ければエラー）を指定できます。**複数ソースを一度に**渡すこともできます（`pnl install libusb libnfc`）。
 
@@ -168,7 +167,6 @@ pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/index.php
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/functions.php
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/function.aliases.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/libusb.bridge.rs
   ✓ installed extension libusb/libusb
 
 added 1 extension in 1.42s
@@ -178,7 +176,6 @@ added 1 extension in 1.42s
 
 ```text
 @pnlx/packages/libusb/libusb/1.0.27/
-@pnlx/packages/libusb/libusb/1.0.27/bridge/libusb_bridge.dylib
 pnlx-lock.json
 @pnlx/pnlx-pathmap.json
 @pnlx/autoload.php
@@ -204,7 +201,7 @@ pnl update
 
 - `pnlx-lock.json` を読み、
 - 記録された `source.url` を再利用し、
-- インストール・生成・bridge のコンパイル・パスマップ更新を再実行します。
+- インストール・生成・パスマップ更新を再実行します。
 
 ### `pnl uninstall <vendor/package>`
 
@@ -441,7 +438,7 @@ pnl purge cache
 
 ## `pnlx` コマンド
 
-`pnlx` は、ライブラリのパッケージを「作る側」のためのツールです。ふだん使うだけなら、`pnlx build` 以外はあまり触らないかもしれません。
+`pnlx` は、ライブラリのパッケージを「作る側」のためのツールです。ふだん使うだけなら、直接触る機会はあまりないかもしれません。
 
 ### `pnlx help`
 
@@ -509,7 +506,7 @@ pnlx workspace is valid
 
 ### `pnlx gen <target> [--library-key <key>]`
 
-拡張パッケージの `src/generated` 以下に、PHP/Rust のラッパーなどを生成します。
+拡張パッケージの `src/generated` 以下に、PHP FFI 定義とラッパーなどを生成します。
 
 ```sh
 # パッケージ作成用にリポジトリを clone。
@@ -518,7 +515,7 @@ git clone https://github.com/m3m0r7/pnl-packages.git
 # libusb パッケージのフォルダに移動。
 cd pnl-packages/packages/libusb
 
-# FFI 定義・クラス・別名・入口・bridge の Rust を生成。
+# FFI 定義・クラス・別名・入口を生成。
 pnlx gen libusb
 ```
 
@@ -530,7 +527,6 @@ src/generated/Libusb.php
 src/generated/LibusbContext.php
 src/generated/index.php
 src/generated/function.aliases.php
-src/generated/libusb.bridge.rs
 ```
 
 このコマンドは、
@@ -538,7 +534,7 @@ src/generated/libusb.bridge.rs
 - `pnlx.json` を読み、
 - インストール済みプロジェクト内で実行された場合は `@pnlx/pnlx-pathmap.json` からヘッダーを解決し、
 - パスマップにヘッダーが無ければ、パッケージの `headers` 設定にフォールバックし、
-- PHP のクラス・PHPDoc 付きメソッド・別名・FFI 定義・入口・Rust bridge を生成します。
+- PHP のクラス・PHPDoc 付きメソッド・別名・FFI 定義・入口を生成します。
 
 1 つのパッケージが複数の C ライブラリを必要としていて、ターゲット名だけでは区別できないときは `--library-key` を使います。
 
@@ -546,38 +542,6 @@ src/generated/libusb.bridge.rs
 # どの C ライブラリ向けかを明示して生成。
 pnlx gen libfoo --library-key libfoo-2.0
 ```
-
-### `pnlx build [vendor/package ...]`
-
-インストール済みパッケージの、コンパイル済み Rust bridge を再ビルドします。
-
-```sh
-# インストール済みの bridge をすべてビルド。
-pnlx build
-
-# 名前が一意なら、末尾の名前だけでビルド可能。
-pnlx build libusb
-
-# 複数まとめてビルド。
-pnlx build libusb libnfc libsdl
-
-# vendor/package のフルネームでもビルド可能。
-pnlx build libusb/libusb
-```
-
-出力例です。
-
-```text
-built 3 bridge(s)
-```
-
-このコマンドは、
-
-- `pnlx-lock.json` を読み、
-- `@pnlx/pnlx-pathmap.json` から C ライブラリのパスを読み、
-- インストール済みの `src/generated/*.bridge.rs` を `rustc --crate-type cdylib` でコンパイルし、
-- 出来上がったライブラリを `@pnlx/packages/<vendor>/<package>/<version>/bridge/` に書き、
-- `@pnlx/pnlx-pathmap.json` の `bridges` を更新します。
 
 ### `pnlx publish`
 

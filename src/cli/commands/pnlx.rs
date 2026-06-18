@@ -3,12 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use crate::commands::pnl::build_installed_bridges;
 use crate::generate::{
-    PhpPackageTemplateOptions, generate_aliases_php, generate_bridge_ffi_php, generate_bridge_rs,
-    generate_const_php, generate_context_php, generate_entity_php, generate_exception_php,
+    PhpPackageTemplateOptions, generate_aliases_php, generate_const_php, generate_context_php,
+    generate_entity_php, generate_exception_php, generate_ffi_php_from_cdef,
     generate_functions_php, generate_index_php, generate_macro_functions_php,
-    generate_manifest_php, generate_types_php, parse_function_signatures,
+    generate_manifest_php, generate_symbols_php, generate_types_php, parse_function_signatures,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
@@ -54,9 +53,6 @@ enum Command {
         #[arg(long)]
         library_key: Option<String>,
     },
-    Build {
-        packages: Vec<String>,
-    },
     /// Stamp publish-time metadata into pnlx.json.
     Publish,
     Version,
@@ -95,7 +91,6 @@ pub fn run() -> Result<()> {
                 library_key,
             },
         ),
-        Command::Build { packages } => build_installed_bridges(Path::new("."), &packages),
         Command::Publish => publish_pnlx(Path::new(".")),
         Command::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));
@@ -149,6 +144,7 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         description: &manifest.description,
         headers: &headers,
         dependency_functions: &std::collections::BTreeMap::new(),
+        exported_symbols: None,
     })
 }
 
@@ -162,6 +158,7 @@ pub(crate) fn generate_installed_package_artifacts(
     alias_class: Option<&str>,
     function_prefix: Option<&str>,
     dependency_functions: &std::collections::BTreeMap<String, String>,
+    exported_symbols: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<()> {
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(package_leaf);
@@ -182,6 +179,7 @@ pub(crate) fn generate_installed_package_artifacts(
         description: &manifest.description,
         headers,
         dependency_functions,
+        exported_symbols,
     })
 }
 
@@ -189,7 +187,7 @@ pub(crate) fn generate_installed_package_artifacts(
 struct GenerateArtifacts<'a> {
     /// `<package>/src/generated` directory the artifacts are written into.
     generated_dir: &'a Path,
-    /// File stem for the per-library `*.ffi.php` / `*.bridge.rs` artifacts.
+    /// File stem for the per-library `*.ffi.php` artifact.
     artifact_stem: &'a str,
     namespace: &'a str,
     class_name: &'a str,
@@ -206,6 +204,9 @@ struct GenerateArtifacts<'a> {
     /// `C function name -> dependency entity FQCN` for resolving cross-package
     /// calls inside function-like macros (empty for the local `pnlx gen` path).
     dependency_functions: &'a std::collections::BTreeMap<String, String>,
+    /// Symbols the resolved native library exports; when present, cdef function
+    /// declarations are limited to these. `None` disables the filter.
+    exported_symbols: Option<&'a std::collections::BTreeSet<String>>,
 }
 
 fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
@@ -216,8 +217,13 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         args.artifact_stem,
         crate::config::FFI_FILE_SUFFIX
     ));
-    let (cdef, constants, macro_functions) = if args.headers.is_empty() {
-        (read_existing_ffi_cdef(&out)?, Vec::new(), Vec::new())
+    let (cdef, constants, macro_functions, symbols) = if args.headers.is_empty() {
+        (
+            read_existing_ffi_cdef(&out)?,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     } else {
         let artifacts = cdef_from_header(
             &read_headers(args.headers)?,
@@ -228,16 +234,19 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                     .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
                 entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
                 dependency_functions: args.dependency_functions.clone(),
+                exported_symbols: args.exported_symbols.cloned(),
+                package_header_paths: args.headers.to_vec(),
             },
         )?;
         (
             artifacts.cdef,
             artifacts.constants,
             artifacts.macro_functions,
+            artifacts.symbols,
         )
     };
     let signatures = parse_function_signatures(&cdef);
-    generate_bridge_ffi_php(&signatures, &out)?;
+    generate_ffi_php_from_cdef(&cdef, &out)?;
     let ffi_file = out
         .file_name()
         .and_then(|value| value.to_str())
@@ -253,6 +262,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         native_library_name: args.native_library_name,
         native_library_version: args.native_library_version,
         description: args.description,
+        symbols: &symbols,
     };
     // Metadata, the CData wrapper, and the per-extension exception are shared by
     // every entity variant.
@@ -269,6 +279,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         &template_options,
     )?;
     generate_types_php(&generated_dir.join("types"), &template_options)?;
+    generate_symbols_php(&generated_dir.join("symbol"), &template_options)?;
     // Four entity variants on two axes, selected at runtime by `index.php`:
     // `allow_cdata` (the `cdata/` subdir, params also accept raw `\FFI\CData`) and
     // `use_php_scalars_in_return` (the `scalar/` subdir, methods return native
@@ -304,15 +315,6 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     generate_functions_php(&generated_dir.join("functions.php"), &template_options)?;
     generate_aliases_php(
         &generated_dir.join(crate::config::ALIASES_FILE),
-        &signatures,
-    )?;
-    generate_bridge_rs(
-        &generated_dir.join(format!(
-            "{}{}",
-            args.artifact_stem,
-            crate::config::BRIDGE_FILE_SUFFIX
-        )),
-        &template_options,
         &signatures,
     )?;
     Ok(())

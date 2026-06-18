@@ -51,7 +51,7 @@ class ExampleManifest implements ManifestInterface
 
     public function hash(): string
     {
-        return $this->bridge()['sha256'];
+        return $this->native()['sha256'];
     }
 
     public function description(): string
@@ -61,7 +61,7 @@ class ExampleManifest implements ManifestInterface
 
     public function path(): string
     {
-        return $this->absolutePath($this->bridge()['library']);
+        return $this->absolutePath($this->native()['library']);
     }
 
     /**
@@ -73,22 +73,27 @@ class ExampleManifest implements ManifestInterface
     }
 
     /**
-     * @return array{source: string, library: string, sha256: string}
+     * @return array{source?: string, library: string, sha256: string}
      */
-    protected function bridge(): array
+    protected function native(): array
     {
-        $bridge = $this->runtime->pathmap()['bridges']['example'] ?? null;
-        if (!is_array($bridge)) {
-            throw new ExtensionLoadException('Bridge example is not installed.');
+        $native = $this->runtime->pathmap()['requires']['example'] ?? null;
+        if (!is_array($native)) {
+            throw new ExtensionLoadException('Native library example is not installed.');
         }
 
-        foreach (['source', 'library', 'sha256'] as $key) {
-            if (!isset($bridge[$key]) || !is_string($bridge[$key]) || $bridge[$key] === '') {
-                throw new ExtensionLoadException(sprintf('Bridge example is missing %s.', $key));
+        $libraryKey = isset($native['library']) ? 'library' : 'path';
+        foreach ([$libraryKey, 'sha256'] as $key) {
+            if (!isset($native[$key]) || !is_string($native[$key]) || $native[$key] === '') {
+                throw new ExtensionLoadException(sprintf('Native library example is missing %s.', $key));
             }
         }
 
-        return $bridge;
+        if ($libraryKey === 'path') {
+            $native['library'] = $native['path'];
+        }
+
+        return $native;
     }
 
     protected function absolutePath(string $path): string

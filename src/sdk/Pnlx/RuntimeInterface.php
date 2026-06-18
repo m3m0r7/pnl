@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Pnlx;
 
-use Pnlx\FFI\Allocator;
-
 /**
  * Public entry point for loading pnl-generated extensions.
  *
@@ -25,7 +23,7 @@ interface RuntimeInterface
     public function loadEntrypoint(string $class): void;
 
     /**
-     * Load the extension and return its generated `*Manifest` describing the native bridge.
+     * Load the extension and return its generated `*Manifest` describing the native library.
      *
      * @throws \Pnlx\Exception\ExtensionLoadException When the info class is missing or not an {@see ManifestInterface}.
      */
@@ -47,7 +45,4 @@ interface RuntimeInterface
      * @return array<string, mixed>
      */
     public function pathmap(): array;
-
-    /** Shared {@see Allocator} for creating standalone FFI C data. */
-    public function allocator(): Allocator;
 }

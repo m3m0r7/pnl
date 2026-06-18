@@ -22,7 +22,6 @@ pnl automates that pain away. Concretely, it:
 - installs library "packages",
 - finds the C library and its headers (type information) already installed on your machine,
 - **generates wrappers** (PHP classes and methods) so you can call the library from PHP,
-- automatically compiles a small **bridge** (glue code written in Rust) that connects PHP and C,
 - and exposes everything through the `Pnlx` PHP SDK.
 
 Think of it like Composer, but for using C libraries from PHP.
@@ -30,7 +29,7 @@ Think of it like Composer, but for using C libraries from PHP.
 This repository ships two command-line tools:
 
 - **`pnl`**: the tool for *using* libraries — install, lockfile management, validation, and listing.
-- **`pnlx`**: the tool for *authoring* library packages — generating wrappers and rebuilding installed bridges.
+- **`pnlx`**: the tool for *authoring* library packages — generating wrappers and validating package metadata.
 
 If you just want to use libraries, `pnl` is usually all you need.
 
@@ -50,7 +49,7 @@ If you just want to get a feel for it, start with the install in step 3 and the 
 
 ### How It Works
 
-At install time, `pnl` finds the native library and its C headers, generates PHP wrappers plus a small Rust **bridge**, and compiles that bridge into a dynamic library. At runtime, the `Pnlx` SDK loads the compiled bridge through PHP's FFI and forwards your calls into C.
+At install time, `pnl` finds the native library and its C headers, then generates PHP wrappers and C FFI definitions. At runtime, the `Pnlx` SDK opens the native library through PHP's FFI and forwards your calls into C.
 
 ```mermaid
 flowchart TD
@@ -58,22 +57,18 @@ flowchart TD
     R["Package repository<br/>github.com/m3m0r7/pnl-packages"] -->|pnlx.json| B
     B -->|find on this machine| C["Native library<br/>.dylib / .so / .dll + C headers"]
     B -->|libclang| D[Generate PHP wrappers]
-    B -->|libclang| E[Generate Rust bridge]
-    E -->|rustc, links the native lib| F["Compiled bridge<br/>lib&lt;pkg&gt;_bridge.dylib"]
     subgraph W["@pnlx/ (generated)"]
         D
-        F
         AL[autoload.php]
     end
     L["pnlx-lock.json<br/>(versions + hashes)"] -.records.- B
     G["Your PHP code"] -->|require @pnlx/autoload.php| AL
     AL --> H["Pnlx\\Runtime"]
-    H -->|PHP FFI loads the bridge| F
-    F --> C
+    H -->|PHP FFI opens the native library| C
 ```
 
-- **`pnl`** resolves and installs packages; **`pnlx`** authors them (generates the wrappers/bridge).
-- The generated PHP and the compiled bridge live under `@pnlx/`; you load them with one `require`.
+- **`pnl`** resolves and installs packages; **`pnlx`** authors them and generates wrappers.
+- The generated PHP lives under `@pnlx/`; you load it with one `require`.
 - `pnlx-lock.json` (next to `pnl.json`) pins the installed versions and content hashes so installs are reproducible.
 
 

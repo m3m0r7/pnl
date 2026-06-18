@@ -8,7 +8,7 @@ use FFI;
 use FFI\CData;
 
 /**
- * Static helpers for working with FFI values returned by native bridges.
+ * Static helpers for working with FFI values returned by native libraries.
  *
  * Used by generated extension code to convert C string pointers to PHP strings.
  * The null-pointer check lives as a function instead — see
@@ -16,6 +16,9 @@ use FFI\CData;
  */
 class Util
 {
+    /** A symbol-less FFI scope used only to cast a byte pointer to `char *`. */
+    private static ?FFI $scope = null;
+
     /**
      * Convert a value to a PHP string, dereferencing FFI C string pointers.
      *
@@ -32,6 +35,10 @@ class Util
             throw new \InvalidArgumentException('Value must be a string or FFI\CData pointer.');
         }
 
-        return FFI::string($value);
+        // `FFI::string()` only accepts a `char *`; a different byte pointer (a
+        // `uint8_t *`/`unsigned char *` such as GLEW's `GLubyte *`) is cast first.
+        $charPointer = (self::$scope ??= FFI::cdef(''))->cast('char *', $value);
+
+        return $charPointer instanceof CData ? FFI::string($charPointer) : '';
     }
 }

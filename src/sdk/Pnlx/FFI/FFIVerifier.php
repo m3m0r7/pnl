@@ -8,7 +8,7 @@ use FFI;
 use Pnlx\Exception\FFIUnavailableException;
 
 /**
- * Guards that the PHP FFI runtime needed to load native bridges is present.
+ * Guards that the PHP FFI runtime needed to load native libraries is present.
  *
  * Invoked early (via {@see \Pnlx\Verifier::shouldEnabledFFI()} from
  * {@see \Pnlx\Runtime}) so the SDK fails fast with a clear message instead of a

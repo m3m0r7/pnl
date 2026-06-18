@@ -6,8 +6,8 @@ namespace Pnlx\Attribute;
 
 use Attribute;
 
-/** The original C-library symbol name a generated method wraps (not the Rust bridge symbol). */
-#[Attribute(Attribute::TARGET_METHOD)]
+/** The original C-library symbol name a generated method/function wraps. */
+#[Attribute(Attribute::TARGET_METHOD | Attribute::TARGET_FUNCTION)]
 final class RawNativeName
 {
     public function __construct(public readonly string $name)

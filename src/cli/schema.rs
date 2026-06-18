@@ -54,7 +54,7 @@ impl SchemaKind {
     }
 }
 
-/// Validate a JSON string against the schema for `kind`. Used by the FFI bridge
+/// Validate a JSON string against the schema for `kind`. Used by the PHP SDK
 /// so the PHP runtime can re-validate workspace files without an OpenAPI library.
 pub fn validate_json_str(kind: SchemaKind, json: &str) -> Result<()> {
     let value: Value = serde_json::from_str(json).context("input is not valid JSON")?;

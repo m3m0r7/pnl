@@ -9,15 +9,12 @@ use crate::io::{read_json, read_or_default, write_json, write_json_if_missing};
 use crate::manifest::{PnlLock, PnlManifest, PnlxPathmap, Repository, RepositoryType};
 use crate::validate::{ensure_platform_matches, validate_pnl_workspace};
 
-mod bridge;
 mod index;
 mod info;
 mod install;
 mod native;
 mod package;
 mod search;
-
-pub(crate) use bridge::build_installed_bridges;
 
 use install::{InstallOptions, install};
 use package::{

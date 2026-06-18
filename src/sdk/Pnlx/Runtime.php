@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Pnlx;
 
 use Pnlx\Exception\ExtensionLoadException;
-use Pnlx\FFI\Allocator;
 
 /**
  * Central entry point that wires together the SDK and loads extensions.
@@ -31,8 +30,6 @@ class Runtime implements RuntimeInterface
 
     private ExtensionRegistryInterface $registry;
 
-    private ?Allocator $allocator = null;
-
     /**
      * @param string|null                       $projectRoot Project root to operate within; falls back to the active scope or cwd.
      * @param RuntimeConfigInterface|null        $config      Optional config override (path/output-dir resolution).
@@ -46,7 +43,7 @@ class Runtime implements RuntimeInterface
         ?WorkspaceRepositoryInterface $repository = null,
         ?ExtensionRegistryInterface $registry = null,
     ) {
-        // Fail fast if the FFI environment cannot support loading native bridges.
+        // Fail fast if the FFI environment cannot support loading native libraries.
         Verifier::shouldEnabledFFI();
 
         // Prefer the caller's root, then the scope of an enclosing (generated) load, then cwd.
@@ -54,7 +51,7 @@ class Runtime implements RuntimeInterface
         $jsonReader = new JsonReader($this->schemaValidator());
         $this->repository = $repository ?? new WorkspaceRepository($this->config, $jsonReader);
         $this->registry = $registry ?? new ExtensionRegistry($this->config, $this->repository);
-        // The self-contained type layer (Pnlx\Helpers\*) ships with the SDK and is
+        // The self-contained type layer (Pnlx\Types\*) ships with the SDK and is
         // resolved by the SDK autoloader, so nothing extra is loaded here.
     }
 
@@ -99,7 +96,7 @@ class Runtime implements RuntimeInterface
     /**
      * Whether `features.use_php_scalars_in_params` is on, i.e. generated methods
      * accept a raw PHP scalar argument (otherwise a raw scalar throws and the
-     * caller must pass a `Pnlx\Helpers\*` wrapper).
+     * caller must pass a `Pnlx\Types\*` wrapper).
      */
     public static function useScalarsInParams(?string $projectRoot = null): bool
     {
@@ -191,13 +188,6 @@ class Runtime implements RuntimeInterface
     public function pathmap(): array
     {
         return $this->repository->pathmap();
-    }
-
-
-    /** Lazily create and reuse a single {@see Allocator} for this runtime. */
-    public function allocator(): Allocator
-    {
-        return $this->allocator ??= new Allocator();
     }
 
     /**

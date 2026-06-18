@@ -105,14 +105,13 @@ class RuntimeTest extends TestCase
             'const.php',
             'function.aliases.php',
             'example.ffi.php',
-            'example.bridge.rs',
         ] as $file) {
             self::assertFileExists($generated . '/' . $file);
         }
 
         // The self-contained type layer ships with the SDK (one class per file)
         // and is copied into @pnlx/runtime with the rest of the runtime.
-        $helpers = self::$workspace->projectRoot . '/@pnlx/runtime/Pnlx/Helpers';
+        $helpers = self::$workspace->projectRoot . '/@pnlx/runtime/Pnlx/Types';
         self::assertFileExists($helpers . '/AbstractInteger.php');
         self::assertFileExists($helpers . '/UnsignedInt64.php');
         // The wrapper-aware is_*/gettype helpers live alongside is_null in Util.
@@ -123,9 +122,22 @@ class RuntimeTest extends TestCase
         self::assertStringContainsString('namespace Pnlx\\Func\\Example;', $functions);
         self::assertStringContainsString("function_exists('Pnlx\\\\Func\\\\Example\\\\example_add')", $functions);
 
-        // The workspace itself contains the lock, pathmap, and per-package bridge.
+        // The workspace itself contains the lock and pathmap.
         self::assertFileExists(self::$workspace->projectRoot . '/@pnlx/pnlx-pathmap.json');
-        self::assertFileExists(self::$workspace->installedPackageRoot . '/bridge');
+    }
+
+    public function testNativeReflectionHelpersDetectGeneratedClassesAndFunctions(): void
+    {
+        require_once self::$workspace->projectRoot . '/@pnlx/autoload.php';
+
+        self::assertTrue(\Pnlx\Util\is_native_class(self::exampleClass()));
+        self::assertTrue(\Pnlx\Util\is_native_function([self::exampleClass(), 'example_add']));
+        self::assertTrue(\Pnlx\Util\is_native_function(self::exampleClass() . '::example_add'));
+        self::assertTrue(\Pnlx\Util\is_native_function('Pnlx\\Func\\Example\\example_add'));
+
+        self::assertFalse(\Pnlx\Util\is_native_class(self::class));
+        self::assertFalse(\Pnlx\Util\is_native_function('strlen'));
+        self::assertFalse(\Pnlx\Util\is_native_function('Pnlx\\Func\\Example\\missing'));
     }
 
     public function testInstallGeneratesPnlJsonAndLockfile(): void
@@ -194,7 +206,6 @@ class RuntimeTest extends TestCase
             'const.php',
             'function.aliases.php',
             'example.ffi.php',
-            'example.bridge.rs',
         ];
 
         $updating = getenv('UPDATE_GOLDEN') === '1';
@@ -238,10 +249,10 @@ class RuntimeTest extends TestCase
             $content
         );
 
-        // The bridge PATH (absolute, in a random temp workspace) and HASH (content
-        // hash) are machine/run-specific, so blank their baked constant values.
+        // The native library PATH (absolute, in a random temp workspace), HASH,
+        // and generated boot token are machine/run-specific, so blank them.
         $normalized = preg_replace(
-            "/(public const string (?:PATH|HASH) = ')[^']*(';)/",
+            "/((?:public|protected) const string (?:PATH|HASH|PNLX_BOOT_TOKEN) = ')[^']*(';)/",
             '${1}<normalized>${2}',
             $normalized ?? $content
         );
@@ -249,7 +260,7 @@ class RuntimeTest extends TestCase
         return $normalized ?? $content;
     }
 
-    public function testRuntimeLoadsExampleThroughCompiledBridge(): void
+    public function testRuntimeLoadsExampleThroughDynamicFfi(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
         $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
@@ -257,28 +268,28 @@ class RuntimeTest extends TestCase
 
         // The entity is pure static; returns are wrapped value objects.
         $version = $cls::example_version();
-        self::assertInstanceOf(\Pnlx\Helpers\String_::class, $version);
+        self::assertInstanceOf(\Pnlx\Types\String_::class, $version);
         self::assertSame('1.2.3', (string) $version);
 
         // A dynamic (variable) method name dispatches identically.
         $fn = 'example_version';
         $dynamicVersion = $cls::$fn();
-        self::assertInstanceOf(\Pnlx\Helpers\String_::class, $dynamicVersion);
+        self::assertInstanceOf(\Pnlx\Types\String_::class, $dynamicVersion);
         self::assertSame('1.2.3', (string) $dynamicVersion);
 
         // Parameters accept a plain PHP int; returns come back wrapped.
         $sum = $cls::example_add(2, 3);
-        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $sum);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $sum);
         self::assertSame(5, $sum->toInt());
 
         // The generated camelCase alias is also a static method.
         $aliased = $cls::exampleAdd(2, 3);
-        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $aliased);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $aliased);
         self::assertSame(5, $aliased->toInt());
 
         // A wrapped integer can be passed straight back in as an argument.
-        $wrapped = $cls::example_add(new \Pnlx\Helpers\Int_(2), new \Pnlx\Helpers\Int_(3));
-        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $wrapped);
+        $wrapped = $cls::example_add(new \Pnlx\Types\Int_(2), new \Pnlx\Types\Int_(3));
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $wrapped);
         self::assertSame(5, $wrapped->toInt());
     }
 
@@ -290,7 +301,7 @@ class RuntimeTest extends TestCase
         // EXAMPLE_TWICE(N) -> example_add(N, N), delegating to the static entity.
         self::assertTrue(function_exists('Pnlx\\Func\\Example\\EXAMPLE_TWICE'));
         $twice = \Pnlx\Func\Example\EXAMPLE_TWICE(21);
-        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $twice);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $twice);
         self::assertSame(42, $twice->toInt());
 
         // EXAMPLE_MISSING(X) calls a C function this library does not define, so it
@@ -310,7 +321,7 @@ class RuntimeTest extends TestCase
         self::assertFalse(function_exists('example_add'));
         self::assertTrue(function_exists('Pnlx\\Func\\Example\\example_add'));
         $fnResult = \Pnlx\Func\Example\example_add(2, 3);
-        self::assertInstanceOf(\Pnlx\Helpers\AnySizeInteger::class, $fnResult);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $fnResult);
         self::assertSame(5, $fnResult->toInt());
         self::assertStringContainsString(
             "require_once __DIR__ . '/packages/example/example/1.2.3/src/generated/index.php';",
@@ -334,25 +345,25 @@ class RuntimeTest extends TestCase
         self::assertTrue($GLOBALS['pnlx_test_postload_entity_booted'] ?? false);
     }
 
-    public function testRuntimeReturnsBridgeInfoByClass(): void
+    public function testRuntimeReturnsNativeLibraryInfoByClass(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
         $info = $runtime->loadManifest(self::EXAMPLE_CLASS);
 
         self::assertSame('example/example', $info->name());
         self::assertSame('1.2.3', $info->version());
-        self::assertSame(hash_file('sha256', self::$workspace->bridgeLibraryPath), $info->hash());
-        self::assertSame(self::$workspace->bridgeLibraryPath, $info->path());
+        self::assertSame(hash_file('sha256', self::$workspace->nativeLibraryPath), $info->hash());
+        self::assertSame(self::$workspace->nativeLibraryPath, $info->path());
 
         // The same metadata is baked into the entity as build-time constants
-        // (HASH/PATH stamped in after the bridge was compiled).
+        // (HASH/PATH stamped in after the native library was resolved).
         $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
         $entity = new \ReflectionClass(self::exampleClass());
         self::assertSame('example/example', $entity->getConstant('NAME'));
         self::assertSame('1.2.3', $entity->getConstant('VERSION'));
-        self::assertSame(self::$workspace->bridgeLibraryPath, $entity->getConstant('PATH'));
+        self::assertSame(self::$workspace->nativeLibraryPath, $entity->getConstant('PATH'));
         self::assertSame(
-            hash_file('sha256', self::$workspace->bridgeLibraryPath),
+            hash_file('sha256', self::$workspace->nativeLibraryPath),
             $entity->getConstant('HASH')
         );
     }
@@ -395,55 +406,22 @@ class RuntimeTest extends TestCase
         self::assertSame('example_add', $raw->name);
     }
 
-    public function testRuntimeProvidesAllocatorAndStaticUtil(): void
+    public function testStaticUtilHelpers(): void
     {
-        $runtime = new Runtime(self::$workspace->projectRoot);
-        $buffer = $runtime->allocator()->voidPointerArray(1);
-
-        self::assertInstanceOf(\FFI\CData::class, $buffer);
-        // Typed allocation via FFI::new returns FFI\CData.
-        self::assertInstanceOf(
-            \FFI\CData::class,
-            $runtime->allocator()->make(\Pnlx\FFI\AllocationType::Int64)
-        );
-        self::assertSame('int64_t', \Pnlx\FFI\AllocationType::Int64->cType());
         self::assertSame('ok', \Pnlx\Util::cString('ok'));
         // \Pnlx\Util\is_null() falls back to PHP's is_null for non-CData values.
         self::assertTrue(\Pnlx\Util\is_null(null));
         self::assertFalse(\Pnlx\Util\is_null('not cdata'));
     }
 
-    public function testPnlxBuildRebuildsInstalledBridge(): void
+    public function testInstallRecordsNativeLibraryInPathmap(): void
     {
-        unlink(self::$workspace->bridgeLibraryPath);
-
-        self::$workspace->rebuildBridges(['example', 'example/example']);
-
-        self::assertFileExists(self::$workspace->bridgeLibraryPath);
-        self::assertSame(
-            hash_file('sha256', self::$workspace->bridgeLibraryPath),
-            self::$workspace->pathmapBridge('example')['sha256']
-        );
-    }
-
-    public function testGeneratedRustBridgeCanCallExampleLibrary(): void
-    {
-        self::$workspace->runBridgeCheck(
-            self::$workspace->installedPackageRoot . '/src/generated/example.bridge.rs'
-        );
-    }
-
-    public function testInstallRecordsCompiledBridgeInPathmap(): void
-    {
-        $bridge = self::$workspace->pathmapBridge('example');
-
-        self::assertSame(
-            '@pnlx/packages/example/example/1.2.3/bridge/example.bridge.rs',
-            $bridge['source']
-        );
-        self::assertSame(
-            hash_file('sha256', self::$workspace->bridgeLibraryPath),
-            $bridge['sha256']
-        );
+        $pathmap = self::$workspace->pathmap();
+        $requires = $pathmap['requires'] ?? null;
+        self::assertIsArray($requires);
+        $native = $requires['example'] ?? null;
+        self::assertIsArray($native);
+        self::assertSame(self::$workspace->nativeLibraryPath, $native['path']);
+        self::assertSame(hash_file('sha256', self::$workspace->nativeLibraryPath), $native['sha256']);
     }
 }

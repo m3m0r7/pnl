@@ -113,23 +113,16 @@ pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
         &manifest_path,
     )?;
     crate::generate::generate_ide_helper_php(&workspace.join("ide-helper.php"))?;
-    // The SDK runtime (incl. the Pnlx\Helpers type layer) and support library
-    // only change with the pnl version, so copy them once per workspace.
+    // Keep the self-contained SDK runtime in sync with the generating binary.
     write_runtime_assets(root)?;
     Ok(())
 }
 
-/// Copy the SDK runtime tree and support library into `@pnlx/runtime/`, but only
-/// when they are not already present for this pnl version. A `.pnl-version`
-/// marker records the version that wrote them, so a multi-extension install (or
-/// a repeat install on the same toolchain) copies once instead of every call.
+/// Copy the SDK runtime tree and support library into `@pnlx/runtime/`.
 fn write_runtime_assets(root: &Path) -> Result<()> {
     let runtime_dir = pnlx_workspace_dir(root).join("runtime");
     let marker = runtime_dir.join(".pnl-version");
     let version = env!("CARGO_PKG_VERSION");
-    if fs::read_to_string(&marker).is_ok_and(|recorded| recorded == version) {
-        return Ok(());
-    }
 
     write_sdk_runtime(root)?;
     write_support_library(root)?;
@@ -326,17 +319,6 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-pub(super) fn relative_to_root(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
-}
-
-pub(super) fn json_string(path: &Path) -> String {
-    serde_json::to_string(&path.display().to_string()).expect("path string is serializable")
 }
 
 pub(super) fn absolutize(root: &Path, path: &Path) -> PathBuf {

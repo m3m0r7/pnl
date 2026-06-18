@@ -40,9 +40,6 @@ pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
 # Validate the project after installing.
 pnl validate
 
-# Rebuild the installed libusb bridge.
-pnlx build libusb
-
 # Run the libusb sample from the PHP Usage section.
 php <libusb-example.php>
 ```

@@ -42,9 +42,6 @@ vendor/bin/pnl install libusb
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libsdl
-
-# インストール後に bridge を再ビルド。
-pnlx build
 ```
 
 ### libusb：バージョン・エラー名・デバイス数を表示する
@@ -64,9 +61,9 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// メタ情報はビルド時の情報としてエンティティに定数で焼き込まれています。
+// メタ情報はインストール時の情報としてエンティティに定数で焼き込まれています。
 printf("extension: %s %s\n", Libusb::NAME, Libusb::VERSION);
-printf("bridge: %s\n", Libusb::PATH);
+printf("native library: %s\n", Libusb::PATH);
 printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
 printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 
@@ -75,22 +72,6 @@ $result = Libusb::libusbInit(null);
 printf("libusb_init: %d (%s)\n", $result, Libusb::libusbErrorName($result));
 
 if ($result === 0) {
-    // 生の FFI::new() を使わずに void *[1] を確保します。
-    $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
-
-    // libusb がデバイス一覧のポインタを $deviceList[0] に書き込みます。
-    $deviceCount = Libusb::libusbGetDeviceList(null, $deviceList);
-
-    if ($deviceCount < 0) {
-        // 負の値は libusb のエラーコードです。
-        printf("device count: failed (%s)\n", Libusb::libusbErrorName($deviceCount));
-    } else {
-        printf("device count: %d\n", $deviceCount);
-
-        // libusb_get_device_list() が返したデバイス一覧を解放します。
-        Libusb::libusbFreeDeviceList($deviceList[0], 1);
-    }
-
     // 既定の libusb コンテキストを終了します。
     Libusb::libusbExit(null);
     echo "libusb_exit: ok\n";
@@ -101,13 +82,57 @@ if ($result === 0) {
 
 ```text
 extension: libusb/libusb 1.0.29
-bridge: /path/to/project/@pnlx/packages/libusb/libusb/1.0.27/bridge/libusb_bridge.dylib
+native library: /opt/homebrew/lib/libusb-1.0.dylib
 error name for 0: LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
 strerror for 0: Success
 libusb_init: 0 (LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED)
-device count: 6
 libusb_exit: ok
 ```
+
+### ポインタ・構造体・出力引数
+
+生成されたバインディングは C のポインタ/値の区別をそのまま PHP に写します。アロケータを手で管理する必要はありません。
+
+- **ポインタ引数（`T *`）は参照渡し**です。渡したものが呼び出しによって書き換えられて返ります。スカラー出力（`int *`）は変数（または `\Pnlx\Types\Int_`）を渡して後で読み、文字列出力（`char **`）は PHP 文字列で、ハンドル出力（`T **`）はラップされたハンドルで返ります。
+
+  ```php
+  $major = 0; $minor = 0; $rev = 0;
+  Libgit2::git_libgit2_version($major, $minor, $rev); // int* 出力引数
+  echo "libgit2 {$major}.{$minor}.{$rev}\n";
+
+  $library = null;
+  Libfreetype::FT_Init_FreeType($library);            // FT_Library* → ハンドルが書き戻る
+  Libfreetype::FT_Done_FreeType($library);
+  ```
+
+- **自分で確保する構造体は `new` で生成**します。各パッケージは構造体型を `\Pnlx\<Pkg>\Types\<struct>` に公開し、`new` がライブラリ自身の FFI スコープで確保、C API が期待するポインタに減衰します。
+
+  ```php
+  use Pnlx\Libconfig\Types\config_t;
+
+  $cfg = new config_t();
+  Libconfig::config_init($cfg);
+  Libconfig::config_read_string($cfg, 'answer = 42;');
+  Libconfig::config_destroy($cfg);
+  ```
+
+- **書き込み可能な `char *` バッファも参照渡し**です。文字列で事前にサイズを確保し、書き込まれたバイトを読み戻します。
+
+  ```php
+  $out = str_repeat("\0", 37);
+  Libuuid::uuid_unparse($uuid, $out);   // char* 出力バッファ
+  echo rtrim($out, "\0") . "\n";
+  ```
+
+- **エクスポートされた C グローバル（データシンボル）** はフラットなマーカークラスとして公開され、`::class` をそのまま関数に渡すと透過的に解決されます。
+
+  ```php
+  use Pnlx\Liboniguruma\OnigDefaultSyntax;
+
+  $opts = Liboniguruma::onig_get_syntax_options(OnigDefaultSyntax::class);
+  ```
+
+スカラー値型は `\Pnlx\Types\*`（`Int_`・`Float_`・`String_` など）にあります。`features.use_php_scalars_in_params`/`use_php_scalars_in_return` を有効にすると素の PHP スカラーをそのまま受け渡しでき、無効なときはこれらの型でラップされて届きます。
 
 ### SDL：ウィンドウを開く（オブジェクトのメソッド版）
 

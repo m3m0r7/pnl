@@ -56,6 +56,34 @@ pub fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// Whether `current` is covered by a package's declared `platforms`. A declared
+/// entry matches when its `os` and `arch` equal the current ones and its `libc`
+/// is either unspecified (any C library) or equal to the current `libc`. An
+/// empty `platforms` list imposes no restriction.
+pub fn platform_supported(
+    platforms: &[PlatformRequirement],
+    current: &PlatformRequirement,
+) -> bool {
+    platforms.is_empty()
+        || platforms.iter().any(|p| {
+            p.os == current.os
+                && p.arch == current.arch
+                && match (&p.libc, &current.libc) {
+                    (Some(declared), Some(actual)) => declared == actual,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+        })
+}
+
+/// Human-readable platform, e.g. `linux/aarch64 (musl)`.
+pub fn describe_platform(p: &PlatformRequirement) -> String {
+    match &p.libc {
+        Some(libc) => format!("{}/{} ({libc})", p.os, p.arch),
+        None => format!("{}/{}", p.os, p.arch),
+    }
+}
+
 fn current_libc() -> Option<String> {
     if std::env::consts::OS != "linux" {
         return None;
@@ -99,4 +127,53 @@ fn generated_host() -> String {
             (!host.is_empty()).then_some(host)
         })
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(os: &str, arch: &str, libc: Option<&str>) -> PlatformRequirement {
+        PlatformRequirement {
+            os: os.to_owned(),
+            arch: arch.to_owned(),
+            libc: libc.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn libc_distinguishes_musl_from_glibc() {
+        let glibc_only = [req("linux", "aarch64", Some("glibc"))];
+        assert!(platform_supported(
+            &glibc_only,
+            &req("linux", "aarch64", Some("glibc"))
+        ));
+        // Alpine/musl is not covered by a glibc-only package.
+        assert!(!platform_supported(
+            &glibc_only,
+            &req("linux", "aarch64", Some("musl"))
+        ));
+    }
+
+    #[test]
+    fn unspecified_libc_matches_any_and_arch_os_must_match() {
+        let any_linux = [req("linux", "aarch64", None)];
+        assert!(platform_supported(
+            &any_linux,
+            &req("linux", "aarch64", Some("musl"))
+        ));
+        assert!(!platform_supported(
+            &any_linux,
+            &req("linux", "x86_64", Some("musl"))
+        ));
+        assert!(!platform_supported(
+            &any_linux,
+            &req("darwin", "aarch64", None)
+        ));
+        // No declared platforms => unrestricted.
+        assert!(platform_supported(
+            &[],
+            &req("linux", "x86_64", Some("musl"))
+        ));
+    }
 }

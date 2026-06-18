@@ -14,8 +14,6 @@ class RuntimeWorkspace
 
     public readonly string $nativeLibraryPath;
 
-    public string $bridgeLibraryPath;
-
     private string $repoRoot;
 
     private function __construct()
@@ -35,7 +33,6 @@ class RuntimeWorkspace
         $workspace->writeProjectManifest();
         $workspace->installPackage();
         $workspace->writeGeneratedHooks();
-        $workspace->bridgeLibraryPath = $workspace->resolveBridgeLibraryPath();
 
         return $workspace;
     }
@@ -45,63 +42,6 @@ class RuntimeWorkspace
         if (is_dir($this->projectRoot)) {
             Filesystem::removeDirectory($this->projectRoot);
         }
-    }
-
-    public function runBridgeCheck(string $bridgeSource): void
-    {
-        $check = $this->projectRoot . '/bridge-check.rs';
-        $binary = $this->projectRoot . '/bridge-check';
-
-        file_put_contents($check, sprintf(
-            <<<'RS'
-include!(%s);
-
-fn main() {
-    unsafe {
-        assert_eq!(bridge::pnlx_bridge_example_add(2, 3), 5);
-    }
-}
-RS,
-            json_encode($bridgeSource, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)
-        ));
-
-        $this->runner($this->projectRoot)->run([
-            'rustc',
-            $check,
-            '-L',
-            'native=' . dirname($this->nativeLibraryPath),
-            '-l',
-            'dylib=example',
-            '-o',
-            $binary,
-        ]);
-
-        $this->runner($this->projectRoot)->run([$binary], $this->nativeLibraryEnvironment());
-    }
-
-    public function rebuildBridge(string $package): void
-    {
-        $this->rebuildBridges([$package]);
-    }
-
-    /**
-     * @param list<string> $packages
-     */
-    public function rebuildBridges(array $packages): void
-    {
-        $this->runner($this->projectRoot)->run([
-            'cargo',
-            'run',
-            '--manifest-path',
-            $this->repoRoot . '/Cargo.toml',
-            '--bin',
-            'pnlx',
-            '--',
-            'build',
-            ...$packages,
-        ]);
-
-        $this->bridgeLibraryPath = $this->resolveBridgeLibraryPath();
     }
 
     /**
@@ -134,22 +74,6 @@ RS,
 
         /** @var array<string, mixed> $extension */
         return $extension;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    public function pathmapBridge(string $name): array
-    {
-        $pathmap = $this->pathmap();
-        $bridges = $pathmap['bridges'] ?? null;
-        $bridge = is_array($bridges) ? ($bridges[$name] ?? null) : null;
-        if (!is_array($bridge)) {
-            throw new \RuntimeException(sprintf('Bridge %s is missing from pathmap.', $name));
-        }
-
-        /** @var array<string, mixed> $bridge */
-        return $bridge;
     }
 
     private function copyPackageFixture(): void
@@ -231,45 +155,6 @@ PHP);
 $GLOBALS['pnlx_test_postload_ran'] = true;
 $GLOBALS['pnlx_test_postload_entity_booted'] = \Pnlx\Example\Example::NAME === 'example/example';
 PHP);
-    }
-
-    private function resolveBridgeLibraryPath(): string
-    {
-        $pathmap = $this->pathmap();
-        $bridges = $pathmap['bridges'] ?? null;
-        $example = is_array($bridges) ? ($bridges['example'] ?? null) : null;
-        $library = is_array($example) ? ($example['library'] ?? null) : null;
-        if (!is_string($library) || $library === '') {
-            throw new \RuntimeException('Example bridge library is missing from pathmap.');
-        }
-
-        $path = realpath($this->absolutePath($library));
-        if ($path === false) {
-            throw new \RuntimeException('Example bridge library does not exist.');
-        }
-
-        return $path;
-    }
-
-    private function absolutePath(string $path): string
-    {
-        if (str_starts_with($path, '/')) {
-            return $path;
-        }
-
-        return $this->projectRoot . '/' . $path;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private function nativeLibraryEnvironment(): array
-    {
-        return [
-            'DYLD_LIBRARY_PATH' => dirname($this->nativeLibraryPath),
-            'LD_LIBRARY_PATH' => dirname($this->nativeLibraryPath),
-            'PATH' => getenv('PATH') ?: '',
-        ];
     }
 
     private function runner(string $cwd): CommandRunner

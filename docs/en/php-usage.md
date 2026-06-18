@@ -48,9 +48,6 @@ First, install the sample packages:
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libnfc
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libsdl
-
-# Rebuild the bridges after installing.
-pnlx build
 ```
 
 ### libusb: version, error name, and device count
@@ -70,9 +67,9 @@ require_once __DIR__ . '/@pnlx/autoload.php';
 
 use Pnlx\Libusb\Libusb;
 
-// Metadata is build-time information baked into the entity as constants.
+// Metadata is install-time information baked into the entity as constants.
 printf("extension: %s %s\n", Libusb::NAME, Libusb::VERSION);
-printf("bridge: %s\n", Libusb::PATH);
+printf("native library: %s\n", Libusb::PATH);
 printf("error name for 0: %s\n", Libusb::libusb_error_name(0));
 printf("strerror for 0: %s\n", Libusb::libusbStrerror(0));
 
@@ -81,22 +78,6 @@ $result = Libusb::libusbInit(null);
 printf("libusb_init: %d (%s)\n", $result, Libusb::libusbErrorName($result));
 
 if ($result === 0) {
-    // Allocate void *[1] without exposing raw FFI::new() to user code.
-    $deviceList = (new \Pnlx\FFI\Allocator())->voidPointerArray(1);
-
-    // libusb writes the device-list pointer into $deviceList[0].
-    $deviceCount = Libusb::libusbGetDeviceList(null, $deviceList);
-
-    if ($deviceCount < 0) {
-        // Negative values are libusb error codes.
-        printf("device count: failed (%s)\n", Libusb::libusbErrorName($deviceCount));
-    } else {
-        printf("device count: %d\n", $deviceCount);
-
-        // Release the device list returned by libusb_get_device_list().
-        Libusb::libusbFreeDeviceList($deviceList[0], 1);
-    }
-
     // Shut down the default libusb context.
     Libusb::libusbExit(null);
     echo "libusb_exit: ok\n";
@@ -107,13 +88,67 @@ Example output:
 
 ```text
 extension: libusb/libusb 1.0.29
-bridge: /path/to/project/@pnlx/packages/libusb/libusb/1.0.27/bridge/libusb_bridge.dylib
+native library: /opt/homebrew/lib/libusb-1.0.dylib
 error name for 0: LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED
 strerror for 0: Success
 libusb_init: 0 (LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED)
-device count: 6
 libusb_exit: ok
 ```
+
+### Pointers, structs, and out-parameters
+
+The generated bindings map C's pointer/value distinction onto PHP directly — there
+is no allocator to manage by hand:
+
+- **A pointer parameter (`T *`) is a by-reference parameter.** Whatever you pass back
+  comes out written by the call. For a scalar out (`int *`), pass a variable (or a
+  `\Pnlx\Types\Int_`) and read it afterwards; for a string out (`char **`) you get a
+  PHP string; for a handle out (`T **`) you get a wrapped handle:
+
+  ```php
+  $major = 0; $minor = 0; $rev = 0;
+  Libgit2::git_libgit2_version($major, $minor, $rev); // int* out-parameters
+  echo "libgit2 {$major}.{$minor}.{$rev}\n";
+
+  $library = null;
+  Libfreetype::FT_Init_FreeType($library);            // FT_Library* → handle written back
+  Libfreetype::FT_Done_FreeType($library);
+  ```
+
+- **A struct you own is allocated with `new`.** Each package exposes its struct types
+  under `\Pnlx\<Pkg>\Types\<struct>`; `new` allocates it in the library's own FFI
+  scope, and it decays to the pointer the C API expects:
+
+  ```php
+  use Pnlx\Libconfig\Types\config_t;
+
+  $cfg = new config_t();
+  Libconfig::config_init($cfg);
+  Libconfig::config_read_string($cfg, 'answer = 42;');
+  Libconfig::config_destroy($cfg);
+  ```
+
+- **A writable `char *` buffer is passed by reference too.** Pre-size it with a string
+  and read the written bytes back:
+
+  ```php
+  $out = str_repeat("\0", 37);
+  Libuuid::uuid_unparse($uuid, $out);   // char* out buffer
+  echo rtrim($out, "\0") . "\n";
+  ```
+
+- **Exported C globals (data symbols)** are surfaced as flat marker classes; pass the
+  `::class` straight to the function and it is resolved transparently:
+
+  ```php
+  use Pnlx\Liboniguruma\OnigDefaultSyntax;
+
+  $opts = Liboniguruma::onig_get_syntax_options(OnigDefaultSyntax::class);
+  ```
+
+Scalar value types live under `\Pnlx\Types\*` (`Int_`, `Float_`, `String_`, …). Under
+`features.use_php_scalars_in_params`/`use_php_scalars_in_return` plain PHP scalars are
+accepted and returned directly; otherwise they arrive wrapped in these types.
 
 ### SDL: open a window (object methods)
 

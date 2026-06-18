@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Pnlx\Exception;
 
 /**
- * Raised when the PHP FFI extension required to load native bridges is missing
+ * Raised when the PHP FFI extension required to load native libraries is missing
  * or disabled (`ffi.enable=0`).
  *
  * Specialises {@see ExtensionLoadException} so callers can distinguish an

@@ -15,13 +15,14 @@ At a minimum, you need the following:
 
 | Tool | Version | What it's for |
 | --- | --- | --- |
-| Rust | 1.85+ recommended | Uses Rust 2024 edition. `rustc` also compiles the bridge libraries. |
 | PHP CLI | 8.2+ recommended | The `ffi` extension must be loaded and `ffi.enable` must allow CLI FFI. |
 | Composer | 2.x | Installs PHPUnit, PHPStan, php-cs-fixer, and `cebe/php-openapi`. |
 | Git | 2.x | Needed for Git install sources. |
 | Make | any POSIX make | Used by the included `Makefile`. |
 | pkg-config | optional but recommended | Used to discover C library versions and include paths. |
 | C libraries | per package | The libusb/libnfc/SDL examples need the matching libraries and headers. |
+
+Rust is only needed when you build the `pnl`/`pnlx` binaries from source or work on this repository. Installing and using packages does not compile per-package Rust code.
 
 The environment currently validated locally:
 
@@ -35,7 +36,7 @@ pkg-config 2.5.1
 macOS/aarch64 with Homebrew libusb, libnfc, SDL2
 ```
 
-Whether PHP can use FFI is checked at runtime. If PHP cannot use FFI, the SDK raises an FFI-related exception before loading any bridge.
+Whether PHP can use FFI is checked at runtime. If PHP cannot use FFI, the SDK raises an FFI-related exception before loading any native library.
 
 
 ## Install Via Composer

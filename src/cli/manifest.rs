@@ -435,13 +435,6 @@ pub struct ResolvedHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResolvedBridge {
-    pub source: String,
-    pub library: String,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlxPathmap {
     pub schema_version: String,
     pub generated_at: String,
@@ -459,8 +452,6 @@ pub struct PnlxPathmap {
     pub manifest: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, ResolvedHeader>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub bridges: BTreeMap<String, ResolvedBridge>,
     pub requires: BTreeMap<String, ResolvedNativeLibrary>,
 }
 
@@ -473,7 +464,6 @@ impl PnlxPathmap {
             lock: String::new(),
             manifest: String::new(),
             headers: BTreeMap::new(),
-            bridges: BTreeMap::new(),
             requires: BTreeMap::new(),
         }
     }

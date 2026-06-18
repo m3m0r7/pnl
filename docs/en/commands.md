@@ -31,7 +31,6 @@
   - [`pnlx init`](#pnlx-init)
   - [`pnlx validate`](#pnlx-validate)
   - [`pnlx gen <target> [--library-key <key>]`](#pnlx-gen-target---library-key-key)
-  - [`pnlx build [vendor/package ...]`](#pnlx-build-vendorpackage-)
   - [`pnlx publish`](#pnlx-publish)
   - [`pnlx package`](#pnlx-package)
 
@@ -125,7 +124,7 @@ What gets created:
 
 ### `pnl install <source>`
 
-Installs the given extension. Specifically, it finds the C library and headers, generates the PHP/Rust wrappers, compiles the bridge, and updates `pnl.json`, the lockfile, the pathmap, and `@pnlx/autoload.php`.
+Installs the given extension. Specifically, it finds the C library and headers, generates the PHP wrappers, and updates `pnl.json`, the lockfile, the pathmap, and `@pnlx/autoload.php`.
 
 The source can be a URL, a local path, a **bare package name**, or a **distribution archive** (`.tar.gz`/`.tgz`/`.zip`, local or remote — it is downloaded if needed, extracted, and must contain a `pnlx.json`). You can pass **several sources at once** (`pnl install libusb libnfc`).
 
@@ -168,7 +167,6 @@ pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/index.php
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/functions.php
   ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/function.aliases.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/libusb.bridge.rs
   ✓ installed extension libusb/libusb
 
 added 1 extension in 1.42s
@@ -178,7 +176,6 @@ The main files produced:
 
 ```text
 @pnlx/packages/libusb/libusb/1.0.27/
-@pnlx/packages/libusb/libusb/1.0.27/bridge/libusb_bridge.dylib
 pnlx-lock.json
 @pnlx/pnlx-pathmap.json
 @pnlx/autoload.php
@@ -204,7 +201,7 @@ This command:
 
 - reads `pnlx-lock.json`,
 - reuses each recorded `source.url`,
-- and re-runs install, generation, bridge compilation, and pathmap updates.
+- and re-runs install, generation, and pathmap updates.
 
 ### `pnl uninstall <vendor/package>`
 
@@ -441,7 +438,7 @@ pnl purge cache
 
 ## pnlx Commands
 
-`pnlx` is the tool for *authoring* library packages. If you're only using libraries, you may rarely touch anything beyond `pnlx build`.
+`pnlx` is the tool for *authoring* library packages. If you're only using libraries, you may rarely need it directly.
 
 ### `pnlx help`
 
@@ -509,7 +506,7 @@ pnlx workspace is valid
 
 ### `pnlx gen <target> [--library-key <key>]`
 
-Generates the PHP/Rust wrappers and friends under `src/generated` for an extension package.
+Generates the PHP FFI definitions, wrappers, and friends under `src/generated` for an extension package.
 
 ```sh
 # Clone the package repository for authoring.
@@ -518,7 +515,7 @@ git clone https://github.com/m3m0r7/pnl-packages.git
 # Move into the libusb package folder.
 cd pnl-packages/packages/libusb
 
-# Generate the FFI definitions, classes, aliases, entrypoint, and bridge Rust.
+# Generate the FFI definitions, classes, aliases, and entrypoint.
 pnlx gen libusb
 ```
 
@@ -530,7 +527,6 @@ src/generated/Libusb.php
 src/generated/LibusbContext.php
 src/generated/index.php
 src/generated/function.aliases.php
-src/generated/libusb.bridge.rs
 ```
 
 This command:
@@ -538,7 +534,7 @@ This command:
 - reads `pnlx.json`,
 - resolves headers from `@pnlx/pnlx-pathmap.json` when run inside an installed project,
 - falls back to the package's `headers` entries when the pathmap has none,
-- and generates PHP classes, PHPDoc'd wrapper methods, aliases, FFI definitions, the entrypoint, and the Rust bridge.
+- and generates PHP classes, PHPDoc'd wrapper methods, aliases, FFI definitions, and the entrypoint.
 
 When a single package needs multiple C libraries and the target name alone is ambiguous, use `--library-key`:
 
@@ -546,38 +542,6 @@ When a single package needs multiple C libraries and the target name alone is am
 # Make the target's C library explicit.
 pnlx gen libfoo --library-key libfoo-2.0
 ```
-
-### `pnlx build [vendor/package ...]`
-
-Rebuilds the compiled Rust bridges for installed packages.
-
-```sh
-# Build every installed bridge.
-pnlx build
-
-# Build by short name when it's unambiguous.
-pnlx build libusb
-
-# Build several at once.
-pnlx build libusb libnfc libsdl
-
-# Build by full vendor/package name.
-pnlx build libusb/libusb
-```
-
-Example output:
-
-```text
-built 3 bridge(s)
-```
-
-This command:
-
-- reads `pnlx-lock.json`,
-- reads C library paths from `@pnlx/pnlx-pathmap.json`,
-- compiles the installed `src/generated/*.bridge.rs` with `rustc --crate-type cdylib`,
-- writes the resulting libraries under `@pnlx/packages/<vendor>/<package>/<version>/bridge/`,
-- and updates the `bridges` entries in `@pnlx/pnlx-pathmap.json`.
 
 ### `pnlx publish`
 

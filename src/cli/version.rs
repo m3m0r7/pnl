@@ -17,6 +17,25 @@
 use anyhow::{Result, anyhow, bail};
 use semver::{Version, VersionReq};
 
+/// Pad a short upstream version to canonical `major.minor.patch` semver, leaving an
+/// already-three-part version (and any `-pre`/`+build` suffix) untouched. Package
+/// manifests may declare a two-part upstream version — e.g. pcre2 `10.43` — and
+/// pinning that verbatim as `=10.43` would fail pnl's own three-part schema, so it
+/// is canonicalized at ingestion before it reaches the lockfile or `pnl.json`.
+pub fn to_canonical_semver(version: &str) -> String {
+    let core_end = version.find(['-', '+']).unwrap_or(version.len());
+    let core = &version[..core_end];
+    // Three-part (or longer) cores are left as-is; only pad a bare `major`/`major.minor`.
+    if core.matches('.').count() >= 2 {
+        return version.to_owned();
+    }
+    let mut parts: Vec<&str> = core.split('.').collect();
+    while parts.len() < 3 {
+        parts.push("0");
+    }
+    format!("{}{}", parts.join("."), &version[core_end..])
+}
+
 #[derive(Debug, Clone)]
 pub enum VersionConstraint {
     Comparator(VersionReq),
@@ -199,6 +218,18 @@ mod tests {
         VersionConstraint::parse(constraint)
             .unwrap()
             .matches(&Version::parse(version).unwrap())
+    }
+
+    #[test]
+    fn canonicalizes_short_versions_to_three_parts() {
+        assert_eq!(to_canonical_semver("10.43"), "10.43.0");
+        assert_eq!(to_canonical_semver("10"), "10.0.0");
+        assert_eq!(to_canonical_semver("1.2.3"), "1.2.3");
+        // Already-three-part (or longer) cores and pre-release/build suffixes are kept.
+        assert_eq!(to_canonical_semver("1.2.3-rc1"), "1.2.3-rc1");
+        assert_eq!(to_canonical_semver("0.2-beta"), "0.2.0-beta");
+        // The canonical form parses and pins cleanly as an exact constraint.
+        assert!(VersionConstraint::parse(&format!("={}", to_canonical_semver("10.43"))).is_ok());
     }
 
     #[test]

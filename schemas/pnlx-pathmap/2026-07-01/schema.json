@@ -40,12 +40,6 @@
               "$ref": "#/components/schemas/resolvedHeader"
             }
           },
-          "bridges": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/resolvedBridge"
-            }
-          },
           "requires": {
             "type": "object",
             "additionalProperties": {
@@ -151,28 +145,6 @@
         ],
         "properties": {
           "path": {
-            "type": "string",
-            "minLength": 1
-          },
-          "sha256": {
-            "$ref": "#/components/schemas/sha256"
-          }
-        }
-      },
-      "resolvedBridge": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "source",
-          "library",
-          "sha256"
-        ],
-        "properties": {
-          "source": {
-            "type": "string",
-            "minLength": 1
-          },
-          "library": {
             "type": "string",
             "minLength": 1
           },

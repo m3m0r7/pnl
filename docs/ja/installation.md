@@ -15,13 +15,14 @@
 
 | ツール | 必要なバージョン | 用途 |
 | --- | --- | --- |
-| Rust | 1.85 以上を推奨 | Rust 2024 edition を使用。bridge のコンパイル（`rustc`）にも使います。 |
 | PHP CLI | 8.2 以上を推奨 | `ffi` 拡張が有効で、`ffi.enable` が CLI での FFI を許可している必要があります。 |
 | Composer | 2.x | PHPUnit、PHPStan、php-cs-fixer、`cebe/php-openapi` を導入します。 |
 | Git | 2.x | Git からインストールする場合に必要です。 |
 | Make | POSIX 互換の make | 同梱の `Makefile` で使います。 |
 | pkg-config | 任意（あると便利） | C ライブラリのバージョンや include パスの探索に使います。 |
 | C ライブラリ本体 | ライブラリごと | libusb / libnfc / SDL の例には、対応するライブラリとヘッダーが必要です。 |
+
+Rust が必要なのは、`pnl` / `pnlx` バイナリをソースからビルドする場合、またはこのリポジトリ自体を開発・テストする場合だけです。パッケージのインストールと利用では、パッケージごとの Rust コードはコンパイルしません。
 
 現在動作確認しているローカル環境は次のとおりです。
 
@@ -35,7 +36,7 @@ pkg-config 2.5.1
 macOS/aarch64（Homebrew で libusb, libnfc, SDL2 を導入）
 ```
 
-PHP の FFI が使えるかどうかは実行時にチェックされます。もし PHP が FFI を使えない設定だと、bridge を読み込む前に SDK が FFI 関連の例外を投げます。
+PHP の FFI が使えるかどうかは実行時にチェックされます。もし PHP が FFI を使えない設定だと、ネイティブライブラリを読み込む前に SDK が FFI 関連の例外を投げます。
 
 
 ## Composer でのインストール

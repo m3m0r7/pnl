@@ -14,7 +14,7 @@ use Pnlx\Exception\ExtensionLoadException;
  * declared in `pnl.json`), reads each `pnlx.json` via the
  * {@see WorkspaceRepositoryInterface}, and returns the matching
  * {@see ExtensionDefinition}. Resolved definitions are memoised. Collaborates
- * with {@see Runtime} which uses it to load entrypoints and native bridges.
+ * with {@see Runtime} which uses it to load entrypoints and native libraries.
  */
 class ExtensionRegistry implements ExtensionRegistryInterface
 {
