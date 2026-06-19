@@ -416,6 +416,34 @@ class RuntimeTest extends TestCase
         self::assertFalse(\Pnlx\Util\is_null('not cdata'));
     }
 
+    /**
+     * Every generated `char *` return is routed through cStringOrNull(), so a C
+     * function returning NULL (getenv() of an unset name, strstr() with no match,
+     * idn2_check_version() below the requested version) surfaces as PHP null
+     * instead of dereferencing the null pointer and fataling.
+     */
+    public function testCStringOrNullMapsNullPointerToNull(): void
+    {
+        $scope = \FFI::cdef('');
+
+        // A live `char *` reads back as the string.
+        $buffer = $scope->new('char[3]');
+        if (!$buffer instanceof \FFI\CData) {
+            self::fail('Unable to allocate a char buffer.');
+        }
+        \FFI::memcpy($buffer, "hi\0", 3);
+        $livePtr = $scope->cast('char *', \FFI::addr($buffer));
+        self::assertSame('hi', \Pnlx\Util::cStringOrNull($livePtr));
+
+        // A NULL `char *` becomes null rather than a fatal FFI::string(NULL).
+        $nullPtr = $scope->new('char *');
+        self::assertNull(\Pnlx\Util::cStringOrNull($nullPtr));
+
+        // A plain PHP string passes through; PHP null stays null.
+        self::assertSame('ok', \Pnlx\Util::cStringOrNull('ok'));
+        self::assertNull(\Pnlx\Util::cStringOrNull(null));
+    }
+
     public function testInstallRecordsNativeLibraryInPathmap(): void
     {
         $pathmap = self::$workspace->pathmap();

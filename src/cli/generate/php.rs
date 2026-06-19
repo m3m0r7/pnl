@@ -221,7 +221,9 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             name,
             raw_name: signature.native_symbol().to_owned(),
             has_out_params: params.iter().any(|param| param.native_pointer),
-            nullable_return: matches!(kind, ValueKind::Pointer(_)),
+            // A `char *` return is nullable too: a NULL pointer becomes PHP null
+            // (see Util::cStringOrNull), so the union must admit null.
+            nullable_return: matches!(kind, ValueKind::Pointer(_) | ValueKind::Str),
             params,
             variadic: signature.variadic,
             is_void: matches!(kind, ValueKind::Void),

@@ -41,4 +41,33 @@ class Util
 
         return $charPointer instanceof CData ? FFI::string($charPointer) : '';
     }
+
+    /**
+     * Like {@see cString()}, but a NULL `char *` becomes PHP null instead of
+     * dereferencing a null pointer. Many C functions return NULL to mean "absent"
+     * (getenv() of an unset name, strstr()/strchr() with no match,
+     * idn2_check_version() below the requested version), so every generated
+     * `char *` return is routed through this and the value can be nullable.
+     *
+     * @param mixed $value A PHP string, an {@see CData} pointer (possibly NULL), or null.
+     */
+    public static function cStringOrNull(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        if ($value instanceof CData) {
+            try {
+                // FFI::isNull() only accepts a pointer CData; a char * always is one.
+                if (FFI::isNull($value)) {
+                    return null;
+                }
+            } catch (\Throwable) {
+                // Not a pointer — let cString() handle (or reject) it below.
+            }
+        }
+
+        return self::cString($value);
+    }
 }
