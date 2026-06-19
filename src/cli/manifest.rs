@@ -54,6 +54,10 @@ fn default_output_dir() -> String {
     crate::config::DEFAULT_OUTPUT_DIR.to_owned()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlManifest {
     pub schema_version: String,
@@ -72,7 +76,7 @@ pub struct PnlManifest {
     pub extensions: BTreeMap<String, ExtensionRequirement>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PnlFeatures {
     pub use_functions: bool,
     /// Expose raw `\FFI\CData` alongside the generated wrapper in entity
@@ -81,8 +85,8 @@ pub struct PnlFeatures {
     pub allow_cdata: bool,
     /// Accept a raw PHP scalar (not only a generated wrapper) as a generated
     /// method argument. When false, passing a raw scalar throws at runtime.
-    /// Defaults to false.
-    #[serde(default)]
+    /// Defaults to true.
+    #[serde(default = "default_true")]
     pub use_php_scalars_in_params: bool,
     /// Return PHP native `int`/`float`/`string` for scalars that fit losslessly
     /// (the `scalar/<Class>.php` entity variant) instead of the generated value
@@ -94,6 +98,18 @@ pub struct PnlFeatures {
     /// and unsigned constants stay wrapped. Defaults to false.
     #[serde(default)]
     pub use_php_scalars_in_const: bool,
+}
+
+impl Default for PnlFeatures {
+    fn default() -> Self {
+        Self {
+            use_functions: false,
+            allow_cdata: false,
+            use_php_scalars_in_params: true,
+            use_php_scalars_in_return: false,
+            use_php_scalars_in_const: false,
+        }
+    }
 }
 
 /// Per-project overrides for the built-in service endpoints (see `config.toml`).

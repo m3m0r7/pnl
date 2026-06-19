@@ -110,7 +110,7 @@ What each field means:
 | `output_dir` | string | no | Directory (relative to the project root) for generated workspace files — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`. |
 | `features.use_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. Required whenever a `features` object is present (the object itself is optional). |
 | `features.allow_cdata` | boolean | no | When `true`, generated method/function parameters also accept a raw `\FFI\CData` alongside the wrapper types — useful when interoperating with hand-written FFI code. |
-| `features.use_php_scalars_in_params` | boolean | no | When `true`, methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false` (the default), a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
+| `features.use_php_scalars_in_params` | boolean | no | When `true` (the default), methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false`, a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
 | `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Types\*` wrapper. |
 | `config` | object | no | Per-project overrides for the endpoints baked into the binary (see below). Omit it to use the built-in defaults. |
 | `extensions` | object | yes | The extensions you want, keyed by `vendor/package`. `pnl install` adds entries here automatically. |

@@ -49,8 +49,6 @@ pub(crate) struct InstallOptions {
     pub enable_use_functions: bool,
     /// Persist `features.allow_cdata = true` into pnl.json.
     pub enable_allow_cdata: bool,
-    /// Persist `features.use_php_scalars_in_params = true` into pnl.json.
-    pub enable_use_php_scalars_in_params: bool,
     /// Persist `features.use_php_scalars_in_return = true` into pnl.json.
     pub enable_use_php_scalars_in_return: bool,
     /// Persist `features.use_php_scalars_in_const = true` into pnl.json.
@@ -96,10 +94,6 @@ fn apply_feature_flags(manifest: &mut PnlManifest, options: &InstallOptions) -> 
     }
     if options.enable_allow_cdata && !manifest.features.allow_cdata {
         manifest.features.allow_cdata = true;
-        changed = true;
-    }
-    if options.enable_use_php_scalars_in_params && !manifest.features.use_php_scalars_in_params {
-        manifest.features.use_php_scalars_in_params = true;
         changed = true;
     }
     if options.enable_use_php_scalars_in_return && !manifest.features.use_php_scalars_in_return {

@@ -83,10 +83,6 @@ enum Command {
         /// `\FFI\CData` in generated signatures).
         #[arg(long)]
         enable_allow_cdata: bool,
-        /// Persist `features.use_php_scalars_in_params = true` into pnl.json
-        /// (generated methods accept a raw PHP scalar argument, not only a wrapper).
-        #[arg(long)]
-        enable_use_php_scalars_in_params: bool,
         /// Persist `features.use_php_scalars_in_return = true` into pnl.json
         /// (generated methods return PHP native int/float/string for scalars that fit).
         #[arg(long)]
@@ -276,7 +272,6 @@ pub fn run() -> Result<()> {
             allow_install_script_hash,
             enable_use_functions,
             enable_allow_cdata,
-            enable_use_php_scalars_in_params,
             enable_use_php_scalars_in_return,
             enable_use_php_scalars_in_const,
             force,
@@ -291,7 +286,6 @@ pub fn run() -> Result<()> {
                 allowed_install_script_hashes: allow_install_script_hash,
                 enable_use_functions,
                 enable_allow_cdata,
-                enable_use_php_scalars_in_params,
                 enable_use_php_scalars_in_return,
                 enable_use_php_scalars_in_const,
                 force,

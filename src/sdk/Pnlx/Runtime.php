@@ -100,7 +100,7 @@ class Runtime implements RuntimeInterface
      */
     public static function useScalarsInParams(?string $projectRoot = null): bool
     {
-        return self::feature('use_php_scalars_in_params', $projectRoot);
+        return self::feature('use_php_scalars_in_params', $projectRoot, true);
     }
 
     /**
@@ -123,13 +123,17 @@ class Runtime implements RuntimeInterface
     }
 
     /** Read a boolean `features.*` flag from `pnl.json` without a full runtime. */
-    private static function feature(string $name, ?string $projectRoot): bool
+    private static function feature(string $name, ?string $projectRoot, bool $default = false): bool
     {
         $config = new RuntimeConfig($projectRoot ?? self::$activeProjectRoot);
         $manifest = (new WorkspaceRepository($config, new JsonReader()))->pnlManifest();
         $features = $manifest['features'] ?? [];
 
-        return is_array($features) && ($features[$name] ?? false) === true;
+        if (!is_array($features) || !array_key_exists($name, $features)) {
+            return $default;
+        }
+
+        return $features[$name] === true;
     }
 
     /**

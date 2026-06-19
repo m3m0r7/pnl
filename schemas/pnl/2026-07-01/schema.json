@@ -70,7 +70,8 @@
             "type": "boolean"
           },
           "use_php_scalars_in_params": {
-            "type": "boolean"
+            "type": "boolean",
+            "default": true
           },
           "use_php_scalars_in_return": {
             "type": "boolean"

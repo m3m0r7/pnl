@@ -110,7 +110,7 @@ project-root/
 | `output_dir` | 文字列 | いいえ | 生成物（ロック・パスマップ・インストール済みパッケージ・autoload）の出力先（プロジェクトルートからの相対）。既定は `@pnlx`。 |
 | `features.use_functions` | 真偽値 | はい | `true` にすると、C 関数名の PHP 関数を `\Pnlx\Func` 名前空間配下に生成します。`features` オブジェクトを書く場合は必須です（オブジェクト自体は省略可能）。 |
 | `features.allow_cdata` | 真偽値 | いいえ | `true` にすると、生成されるメソッド/関数の引数がラッパー型に加えて生の `\FFI\CData` も受け付けます。手書きの FFI コードと連携するときに便利です。 |
-| `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true` にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false`（既定）の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
+| `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true`（既定）にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false` の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
 | `features.use_php_scalars_in_return` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
 | `config` | オブジェクト | いいえ | バイナリに埋め込まれた既定エンドポイントのプロジェクト単位の上書き（下記参照）。省略すると既定値を使います。 |
 | `extensions` | オブジェクト | はい | 入れたい拡張を `vendor/package` をキーにして並べます。`pnl install` がここに自動で追記します。 |
