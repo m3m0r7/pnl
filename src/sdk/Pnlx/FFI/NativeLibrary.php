@@ -90,7 +90,7 @@ class NativeLibrary
         // present (e.g. gsl needs cblas, which it does not itself link).
         $loaded = [];
         foreach (array_merge($dependencyLibraries, [$libraryPath]) as $path) {
-            if (!is_string($path) || $path === '' || !is_file($path)) {
+            if ($path === '' || !is_file($path)) {
                 continue;
             }
             try {

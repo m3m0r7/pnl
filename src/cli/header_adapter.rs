@@ -222,8 +222,10 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
         &defined_names,
     )?;
     let constants = header_constants(&collected, prefix, &options.definitions);
-    let constant_names: BTreeSet<String> =
-        constants.iter().map(|constant| constant.name.clone()).collect();
+    let constant_names: BTreeSet<String> = constants
+        .iter()
+        .map(|constant| constant.name.clone())
+        .collect();
     Ok(HeaderArtifacts {
         cdef: render(&collected, options.exported_symbols.as_ref()),
         macro_functions: macro_functions(&collected, prefix, &constant_names, options),
@@ -281,6 +283,7 @@ fn data_symbols(
 /// libclang reports. Enum constants, reserved/compiler macros, and any macro the
 /// header `#define`s itself (include guards, value macros) are never neutralised,
 /// so only genuinely-external macros are stubbed out.
+#[allow(clippy::too_many_arguments)]
 fn parse_with_neutralized_macros(
     index: &Index<'_>,
     workspace: &Workspace,
@@ -1696,10 +1699,18 @@ fn header_constants(
 
     // Owned enumerators, then #included ones (the owned win on a name clash).
     for (name, value) in &collected.enum_constants {
-        emit(name, &ConstValue::Int(*value as i128, IntKind::Int), &mut constants);
+        emit(
+            name,
+            &ConstValue::Int(*value as i128, IntKind::Int),
+            &mut constants,
+        );
     }
     for (name, value) in &collected.pool_enum_constants {
-        emit(name, &ConstValue::Int(*value as i128, IntKind::Int), &mut constants);
+        emit(
+            name,
+            &ConstValue::Int(*value as i128, IntKind::Int),
+            &mut constants,
+        );
     }
 
     // Object-like macros in source order: evaluate against the environment built so
@@ -1863,7 +1874,9 @@ struct ConstParser<'a> {
 
 impl ConstParser<'_> {
     fn peek_spelling(&self) -> Option<&str> {
-        self.tokens.get(self.pos).map(|(_, spelling)| spelling.as_str())
+        self.tokens
+            .get(self.pos)
+            .map(|(_, spelling)| spelling.as_str())
     }
 
     fn parse_ternary(&mut self) -> Option<ConstValue> {
@@ -2035,8 +2048,12 @@ fn apply_binary(op: &str, lhs: ConstValue, rhs: ConstValue) -> Option<ConstValue
         (ConstValue::Float(x, kx), ConstValue::Float(y, ky)) => {
             apply_float_binary(op, x, y, kx.combine(ky))
         }
-        (ConstValue::Float(x, kx), ConstValue::Int(y, _)) => apply_float_binary(op, x, y as f64, kx),
-        (ConstValue::Int(x, _), ConstValue::Float(y, ky)) => apply_float_binary(op, x as f64, y, ky),
+        (ConstValue::Float(x, kx), ConstValue::Int(y, _)) => {
+            apply_float_binary(op, x, y as f64, kx)
+        }
+        (ConstValue::Int(x, _), ConstValue::Float(y, ky)) => {
+            apply_float_binary(op, x as f64, y, ky)
+        }
         // Strings only combine by juxtaposition (handled in parse_string); any
         // operator on a string is not a constant we can render.
         _ => None,
@@ -2273,9 +2290,13 @@ fn definition_const_value(definition: &crate::manifest::ResolvedDefinition) -> O
     use crate::manifest::DefinitionType;
     Some(match definition.definition_type {
         DefinitionType::Int => ConstValue::Int(definition.value.parse().ok()?, IntKind::Int),
-        DefinitionType::Float => ConstValue::Float(definition.value.parse().ok()?, FloatKind::Double),
+        DefinitionType::Float => {
+            ConstValue::Float(definition.value.parse().ok()?, FloatKind::Double)
+        }
         // A preprocessor boolean is the `int` 0/1 it expands to.
-        DefinitionType::Boolean => ConstValue::Int(i128::from(definition.value == "1"), IntKind::Int),
+        DefinitionType::Boolean => {
+            ConstValue::Int(i128::from(definition.value == "1"), IntKind::Int)
+        }
         DefinitionType::String => ConstValue::Str(format!(
             "\"{}\"",
             definition
@@ -2365,7 +2386,9 @@ fn macro_symbol_aliases(
         .map(|macro_def| (macro_def.name.clone(), macro_def.tokens.as_slice()))
         .collect();
     for (name, tokens) in &definition_tokens {
-        object_macros.entry(name.clone()).or_insert(tokens.as_slice());
+        object_macros
+            .entry(name.clone())
+            .or_insert(tokens.as_slice());
     }
     let mut aliases = Vec::new();
     for macro_def in &collected.macros {
@@ -4596,7 +4619,10 @@ mod tests {
         assert_eq!(wrapped("EX_FLAG_B"), Some("new \\Pnlx\\Types\\Int_(2)"));
         assert_eq!(wrapped("EX_FLAGS"), Some("new \\Pnlx\\Types\\Int_(3)"));
         // `0x2FFF0000` = 805240832; `EX_POS_DISPLAY(0)` folds to the same value.
-        assert_eq!(wrapped("EX_POS_MASK"), Some("new \\Pnlx\\Types\\Int_(805240832)"));
+        assert_eq!(
+            wrapped("EX_POS_MASK"),
+            Some("new \\Pnlx\\Types\\Int_(805240832)")
+        );
         assert_eq!(
             wrapped("EX_POS_CENTERED"),
             Some("new \\Pnlx\\Types\\Int_(805240832)")
@@ -4606,7 +4632,10 @@ mod tests {
         assert_eq!(wrapped("EX_RATIO"), Some("new \\Pnlx\\Types\\Float_(1.5)"));
 
         // Strings wrap in `String_`; C-adjacent literals/macros are joined with `.`.
-        assert_eq!(wrapped("EX_NAME"), Some("new \\Pnlx\\Types\\String_(\"example\")"));
+        assert_eq!(
+            wrapped("EX_NAME"),
+            Some("new \\Pnlx\\Types\\String_(\"example\")")
+        );
         assert_eq!(
             wrapped("EX_TITLE"),
             Some("new \\Pnlx\\Types\\String_(\"lib \" . \"example\" . \" v\")")
@@ -4671,7 +4700,9 @@ mod tests {
         // must be dropped rather than emitted as `const X = 1.2.3;`.
         let constants = artifacts(HEADER).constants;
         assert!(
-            !constants.iter().any(|constant| constant.name == "EX_BAD_VERSION"),
+            !constants
+                .iter()
+                .any(|constant| constant.name == "EX_BAD_VERSION"),
             "{constants:?}"
         );
     }
@@ -5013,7 +5044,9 @@ mod tests {
         )
         .constants;
         assert!(
-            !constants.iter().any(|constant| constant.name == "EX_PRERELEASE"),
+            !constants
+                .iter()
+                .any(|constant| constant.name == "EX_PRERELEASE"),
             "{constants:?}"
         );
         assert!(

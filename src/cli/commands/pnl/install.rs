@@ -969,8 +969,12 @@ fn install_local_extension(
 
     // Install this package's own files first, so dependency packages can be placed
     // *inside* its subtree without the file copy clobbering them.
-    let installed_extension_root =
-        install_extension_files(&packages_root, extension_root, &extension.name, &extension.version)?;
+    let installed_extension_root = install_extension_files(
+        &packages_root,
+        extension_root,
+        &extension.name,
+        &extension.version,
+    )?;
 
     // Dependency packages install nested under this package's own directory.
     let previous_packages_root = state
@@ -1032,8 +1036,10 @@ fn install_local_extension(
     // Map a (recursive) dependency package's C functions to its entity class, so a
     // function-like macro that calls one resolves to that class instead of becoming
     // a thrower. The dependencies were installed (and locked) above.
-    let dependency_functions =
-        collect_dependency_functions(&installed_extension_root.join("packages"), &dependency_package_names);
+    let dependency_functions = collect_dependency_functions(
+        &installed_extension_root.join("packages"),
+        &dependency_package_names,
+    );
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
         // Stamp the first-install time, preserving it across reinstalls so the
@@ -1113,39 +1119,39 @@ fn install_local_extension(
     // `LockedExtension.dependencies`, not as its own top-level lock entity (so two
     // parents can pin different versions). Only top-level installs are locked here.
     if !is_dependency {
-    let (source, dist) = source.lock_source(&extension, &content_hash);
-    lock.extensions.insert(
-        extension.name.clone(),
-        LockedExtension {
-            version: extension.version.clone(),
-            constraint: format!("={}", extension.version),
-            source,
-            dist,
-            classes: entity_class_fqn(&extension).into_iter().collect(),
-            // Dependency packages (name -> resolved version), used for recursive
-            // function mapping. Co-load libraries are recorded separately below.
-            dependencies: dependency_package_names
-                .iter()
-                .map(|name| {
-                    let version = lock
-                        .extensions
-                        .get(name)
-                        .map(|locked| locked.version.clone())
-                        .unwrap_or_else(|| "*".to_owned());
-                    (name.clone(), version)
-                })
-                .collect(),
-            requires: locked_requires,
-            // Resolved co-load libraries (name -> path), so a reinstall and the
-            // runtime know exactly which extra `.so` to load alongside this package.
-            libraries: dependency_libraries.clone(),
-            definitions: resolved_definitions
-                .iter()
-                .map(|definition| (definition.name.clone(), definition.value.clone()))
-                .collect(),
-        },
-    );
-    write_json(&pnl_lock_path(root), &lock)?;
+        let (source, dist) = source.lock_source(&extension, &content_hash);
+        lock.extensions.insert(
+            extension.name.clone(),
+            LockedExtension {
+                version: extension.version.clone(),
+                constraint: format!("={}", extension.version),
+                source,
+                dist,
+                classes: entity_class_fqn(&extension).into_iter().collect(),
+                // Dependency packages (name -> resolved version), used for recursive
+                // function mapping. Co-load libraries are recorded separately below.
+                dependencies: dependency_package_names
+                    .iter()
+                    .map(|name| {
+                        let version = lock
+                            .extensions
+                            .get(name)
+                            .map(|locked| locked.version.clone())
+                            .unwrap_or_else(|| "*".to_owned());
+                        (name.clone(), version)
+                    })
+                    .collect(),
+                requires: locked_requires,
+                // Resolved co-load libraries (name -> path), so a reinstall and the
+                // runtime know exactly which extra `.so` to load alongside this package.
+                libraries: dependency_libraries.clone(),
+                definitions: resolved_definitions
+                    .iter()
+                    .map(|definition| (definition.name.clone(), definition.value.clone()))
+                    .collect(),
+            },
+        );
+        write_json(&pnl_lock_path(root), &lock)?;
     }
 
     write_pathmap(root, &pathmap)?;
@@ -1425,12 +1431,7 @@ fn collect_dependency_functions_in(
             .iter()
             .flat_map(|entry| entry.package_names.iter().cloned())
             .collect();
-        collect_dependency_functions_in(
-            &version_dir.join("packages"),
-            &nested_names,
-            map,
-            seen,
-        );
+        collect_dependency_functions_in(&version_dir.join("packages"), &nested_names, map, seen);
     }
 }
 
@@ -1498,7 +1499,9 @@ mod tests {
         resolve_install_source, split_version_pin,
     };
 
-    fn int_definition(default: Option<serde_json::Value>) -> Vec<crate::manifest::RequireDefinition> {
+    fn int_definition(
+        default: Option<serde_json::Value>,
+    ) -> Vec<crate::manifest::RequireDefinition> {
         vec![crate::manifest::RequireDefinition {
             name: "WIDTH".to_owned(),
             description: String::new(),
@@ -1542,7 +1545,10 @@ mod tests {
             &std::collections::BTreeMap::new(),
             &interaction,
         );
-        assert!(result.is_err(), "expected an error for an unresolvable definition");
+        assert!(
+            result.is_err(),
+            "expected an error for an unresolvable definition"
+        );
     }
 
     #[test]
@@ -1572,7 +1578,12 @@ mod tests {
         let names: Vec<String> = manifest
             .dependencies_for_current_arch()
             .iter()
-            .flat_map(|entry| entry.library_names.iter().map(|name| name.name().to_owned()))
+            .flat_map(|entry| {
+                entry
+                    .library_names
+                    .iter()
+                    .map(|name| name.name().to_owned())
+            })
             .collect();
         assert!(names.contains(&"libfoo.so".to_owned()), "{names:?}");
         assert!(names.contains(&"libbar.so".to_owned()), "{names:?}");

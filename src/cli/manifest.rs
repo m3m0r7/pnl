@@ -433,9 +433,7 @@ impl PnlxManifest {
         let arch = crate::platform::current_platform_requirement().arch;
         self.dependencies
             .iter()
-            .filter(|(key, _)| {
-                key.as_str() == arch || matches!(key.as_str(), "*" | "any" | "all")
-            })
+            .filter(|(key, _)| key.as_str() == arch || matches!(key.as_str(), "*" | "any" | "all"))
             .flat_map(|(_, entries)| entries.iter())
             .collect()
     }

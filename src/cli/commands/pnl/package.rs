@@ -391,7 +391,11 @@ struct InstalledPackage {
 
 fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
     let mut packages = Vec::new();
-    collect_packages_in(root, &pnlx_workspace_dir(root).join("packages"), &mut packages)?;
+    collect_packages_in(
+        root,
+        &pnlx_workspace_dir(root).join("packages"),
+        &mut packages,
+    )?;
     packages.sort_by(|a, b| a.entrypoint.cmp(&b.entrypoint));
     Ok(packages)
 }
@@ -410,7 +414,8 @@ fn collect_packages_in(
     for vendor in fs::read_dir(packages_root)
         .with_context(|| format!("failed to read {}", packages_root.display()))?
     {
-        let vendor = vendor.with_context(|| format!("failed to read {}", packages_root.display()))?;
+        let vendor =
+            vendor.with_context(|| format!("failed to read {}", packages_root.display()))?;
         if !vendor.path().is_dir() {
             continue;
         }
@@ -474,8 +479,10 @@ mod tests {
 
     fn write_package(version_dir: &Path) {
         std::fs::create_dir_all(version_dir).unwrap();
-        let mut manifest = crate::manifest::PnlxManifest::default();
-        manifest.entrypoint = "index.php".to_owned();
+        let manifest = crate::manifest::PnlxManifest {
+            entrypoint: "index.php".to_owned(),
+            ..crate::manifest::PnlxManifest::default()
+        };
         crate::io::write_json(
             &version_dir.join(crate::config::PNLX_MANIFEST_FILE),
             &manifest,
