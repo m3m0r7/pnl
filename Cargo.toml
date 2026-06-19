@@ -1,6 +1,6 @@
 [package]
 name = "pnl"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 
 [lib]
@@ -65,3 +65,13 @@ toml = "0.8.19"
 [dev-dependencies]
 insta = "1.47.2"
 tempfile = "3.23.0"
+
+# The `clang` crate's `SourceRange::tokenize` passes libclang's token buffer to
+# `slice::from_raw_parts`; for a range that yields zero tokens libclang returns a
+# null pointer with count 0, which trips Rust's debug-only unsafe-precondition
+# (non-null) check and aborts (a crate bug). Some real headers (brotli's
+# encode.h/decode.h) hit this. Release builds skip the check; disabling debug
+# assertions for just this dependency makes debug builds and `cargo test` behave
+# the same, so parsing those headers no longer crashes.
+[profile.dev.package.clang]
+debug-assertions = false

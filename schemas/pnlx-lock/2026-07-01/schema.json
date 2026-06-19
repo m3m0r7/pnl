@@ -207,17 +207,26 @@
           },
           "dependencies": {
             "type": "object",
-            "x-propertyNames": {
-              "$ref": "#/components/schemas/packageName"
-            },
             "additionalProperties": {
-              "$ref": "#/components/schemas/semver"
+              "type": "string"
             }
           },
           "requires": {
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/lockedNativeLibrary"
+            }
+          },
+          "libraries": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "definitions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
             }
           }
         }

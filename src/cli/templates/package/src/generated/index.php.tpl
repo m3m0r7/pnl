@@ -24,7 +24,9 @@ require_once __DIR__ . '/{{CLASS}}Context.php';
 require_once __DIR__ . '/{{CLASS}}Exception.php';
 
 // Object-like #define constants from the C header, as namespaced PHP consts.
-require_once __DIR__ . '/const.php';
+// `use_php_scalars_in_const` selects the scalar/ variant: plain int/float/string
+// for losslessly representable values (typed/unsigned values stay wrapped).
+require_once __DIR__ . '/' . (\Pnlx\Runtime::useScalarsInConst() ? 'scalar/' : '') . 'const.php';
 
 // Function-like C macros as PHP functions under \Pnlx\Func\<Class> (always loaded).
 require_once __DIR__ . '/macro.functions.php';

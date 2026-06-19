@@ -49,6 +49,15 @@ abstract class AbstractExtension
     public const string PATH = '';
 
     /**
+     * Extra shared libraries to co-load alongside this package's own, so its calls
+     * into them resolve (a package's `dependencies` `library_names`, e.g. gsl ->
+     * cblas). Each is an absolute path baked in at install time. Empty by default.
+     *
+     * @var list<string>
+     */
+    public const array LIBRARIES = [];
+
+    /**
      * Loaded native library per concrete class.
      *
      * @var array<class-string, NativeLibrary>
@@ -145,6 +154,7 @@ abstract class AbstractExtension
             static::PATH,
             $directory . '/' . static::ALIASES_FILE,
             false,
+            static::LIBRARIES,
         );
 
         self::$initialized[static::class] = true;

@@ -167,9 +167,14 @@ pub fn validate_pnlx_manifest_values(manifest: &PnlxManifest) -> Result<()> {
     for requirement in manifest.requires.values() {
         validate_version_constraint(&requirement.version)?;
     }
-    for (name, requirement) in &manifest.dependencies {
-        validate_package_name(name)?;
-        validate_version_constraint(&requirement.version)?;
+    for entries in manifest.dependencies.values() {
+        for entry in entries {
+            for library in &entry.library_names {
+                validate_library_name(library.name())?;
+            }
+            // `package_names` may be bare names, `file://`, `git@`, or paths — they
+            // are resolved like an install target, so they are not constrained here.
+        }
     }
     for example in &manifest.examples {
         validate_relative_package_path("examples", example)?;

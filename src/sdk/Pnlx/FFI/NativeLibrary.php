@@ -21,12 +21,16 @@ use Throwable;
 class NativeLibrary
 {
     /**
-     * @param FFI                    $ffi     Handle bound to the native library.
-     * @param array<string, string>  $aliases Map of PHP-facing name => native symbol.
+     * @param FFI                    $ffi          Handle bound to the native library.
+     * @param array<string, string>  $aliases      Map of PHP-facing name => native symbol.
+     * @param list<FFI>              $dependencies Handles to co-loaded dependency
+     *                                             libraries, kept so they stay resident
+     *                                             for the lifetime of this library.
      */
     public function __construct(
         private readonly FFI $ffi,
         private readonly array $aliases,
+        private readonly array $dependencies = [],
     ) {
     }
 
@@ -37,8 +41,12 @@ class NativeLibrary
      * string passed to {@see FFI::cdef()}; both are produced by the pnl generator.
      *
      * @throws ExtensionLoadException When any input file is missing or returns the wrong type.
+     *
+     * @param list<string> $dependencyLibraries Absolute paths of extra shared
+     *        libraries to co-load first, so the package's calls into them resolve
+     *        (a `dependencies` `library_names` set, e.g. gsl -> cblas).
      */
-    public static function load(string $cdefPath, string $libraryPath, string $aliasesPath, bool $requireLibraryFile = true): self
+    public static function load(string $cdefPath, string $libraryPath, string $aliasesPath, bool $requireLibraryFile = true, array $dependencyLibraries = []): self
     {
         if (!is_file($cdefPath)) {
             throw new ExtensionLoadException(sprintf('CDEF file %s does not exist.', $cdefPath));
@@ -60,10 +68,43 @@ class NativeLibrary
             throw new ExtensionLoadException(sprintf('CDEF file %s must return a string.', $cdefPath));
         }
 
-        return new self(
-            FFI::cdef($cdef, $libraryPath),
-            self::normalizeAliases($aliases)
-        );
+        $normalizedAliases = self::normalizeAliases($aliases);
+
+        // The common case: a single library. Bind the cdef straight to it so its
+        // symbols resolve, matching the original behaviour exactly.
+        if ($dependencyLibraries === []) {
+            return new self(FFI::cdef($cdef, $libraryPath), $normalizedAliases);
+        }
+
+        // Multi-library: load every dependency and the package's own library into the
+        // global symbol table (an empty cdef dlopen()s with global visibility), then
+        // bind the one monolithic cdef with NO library so each declared function
+        // resolves against whichever loaded library exports it — exactly like a C
+        // program linked against several libraries. It stays a single FFI scope, so a
+        // value allocated for one library's call can be passed to another's. The
+        // handles are kept so the libraries are not unloaded.
+        //
+        // Dependencies load FIRST, then the package's own library, because a dynamic
+        // linker that resolves eagerly (musl/Alpine, and ELF with -z now) binds the
+        // package library's undefined symbols at load time — they must already be
+        // present (e.g. gsl needs cblas, which it does not itself link).
+        $loaded = [];
+        foreach (array_merge($dependencyLibraries, [$libraryPath]) as $path) {
+            if (!is_string($path) || $path === '' || !is_file($path)) {
+                continue;
+            }
+            try {
+                $loaded[] = FFI::cdef('', $path);
+            } catch (Throwable $e) {
+                throw new ExtensionLoadException(
+                    sprintf('Failed to co-load library %s.', $path),
+                    0,
+                    $e
+                );
+            }
+        }
+
+        return new self(FFI::cdef($cdef), $normalizedAliases, $loaded);
     }
 
     /**

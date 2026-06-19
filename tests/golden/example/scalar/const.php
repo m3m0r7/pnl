@@ -21,11 +21,11 @@ declare(strict_types=1);
 
 namespace Pnlx\Example;
 
-const EXAMPLE_MODE_OFF = new \Pnlx\Types\Int_(0);
-const EXAMPLE_MODE_ON = new \Pnlx\Types\Int_(1);
-const EXAMPLE_MODE_AUTO = new \Pnlx\Types\Int_(10);
-const EXAMPLE_VERSION_MAJOR = new \Pnlx\Types\Int_(1);
-const EXAMPLE_FLAG_NONE = new \Pnlx\Types\Int_(0);
-const EXAMPLE_FLAG_FAST = new \Pnlx\Types\Int_(1);
-const EXAMPLE_FLAG_SAFE = new \Pnlx\Types\Int_(2);
-const EXAMPLE_FLAGS_ALL = new \Pnlx\Types\Int_(3);
+const EXAMPLE_MODE_OFF = 0;
+const EXAMPLE_MODE_ON = 1;
+const EXAMPLE_MODE_AUTO = 10;
+const EXAMPLE_VERSION_MAJOR = 1;
+const EXAMPLE_FLAG_NONE = 0;
+const EXAMPLE_FLAG_FAST = 1;
+const EXAMPLE_FLAG_SAFE = 2;
+const EXAMPLE_FLAGS_ALL = 3;

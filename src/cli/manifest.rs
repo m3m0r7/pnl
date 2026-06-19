@@ -32,6 +32,24 @@ pub struct ExtensionRequirement {
     pub required: bool,
 }
 
+/// One entry in a package's per-architecture `dependencies`: extra shared
+/// libraries to co-load so the package's own symbols resolve. `library_names` are
+/// on-disk libraries resolved the same way as a native requirement (pkg-config /
+/// soname / multiarch). `package_names` are other pnl packages resolved and
+/// installed like an `install` target (bare name, `file://`, `git@`, …), whose
+/// own native library is then co-loaded. `library_names` and `package_names` may
+/// coexist; `repositories` overrides the registries used to resolve a bare
+/// `package_names` entry (defaulting to the workspace/config registries).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DependencyEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_names: Vec<LibraryName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
+}
+
 fn default_output_dir() -> String {
     crate::config::DEFAULT_OUTPUT_DIR.to_owned()
 }
@@ -71,6 +89,11 @@ pub struct PnlFeatures {
     /// wrappers (64-bit unsigned still wrapped). Defaults to false.
     #[serde(default)]
     pub use_php_scalars_in_return: bool,
+    /// Emit PHP-native scalars for `const.php` values PHP can represent losslessly
+    /// (the `scalar/const.php` variant) instead of `Pnlx\Types\*` wrappers; typed
+    /// and unsigned constants stay wrapped. Defaults to false.
+    #[serde(default)]
+    pub use_php_scalars_in_const: bool,
 }
 
 /// Per-project overrides for the built-in service endpoints (see `config.toml`).
@@ -199,6 +222,16 @@ pub struct LockedExtension {
     pub classes: Vec<String>,
     pub dependencies: BTreeMap<String, String>,
     pub requires: BTreeMap<String, LockedNativeLibrary>,
+    /// Resolved co-load libraries from the package's `dependencies` (`library_names`),
+    /// as `resolved name -> resolved path`, so a reinstall and the runtime know which
+    /// extra `.so` to load alongside this package. Empty for a single-library package.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub libraries: BTreeMap<String, String>,
+    /// Solved `require_definitions` (name -> chosen value as a string), recorded so a
+    /// reinstall preseeds the prompt with the prior choice and a non-interactive
+    /// install reproduces it without prompting. Empty for packages with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definitions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -298,6 +331,46 @@ pub struct PnlxHeader {
     pub sha256: String,
 }
 
+/// The C type of a `require_definitions` entry, driving input validation and how
+/// the solved value is rendered (as a `-D` for libclang and as a generated const).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DefinitionType {
+    Int,
+    Float,
+    String,
+    Boolean,
+}
+
+/// A build-time macro the package needs the *user* to define before its header is
+/// parsed (e.g. pcre2's `PCRE2_CODE_UNIT_WIDTH`, which the header itself does not
+/// define and which selects which symbol set is bound). `pnl install` prompts for
+/// it, records the solved value in `pnlx-lock.json`, passes it to libclang as a
+/// `-D`, and emits it as a generated constant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequireDefinition {
+    pub name: String,
+    /// What to enter and why, shown at the prompt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(rename = "type")]
+    pub definition_type: DefinitionType,
+    /// Used when the user enters nothing (interactive) or there is no prior solved
+    /// value (non-interactive). When absent and unresolved, install errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+/// A `require_definitions` entry resolved to a concrete value at install time,
+/// carried (with its type) to the header generator so it can pass the value to
+/// libclang as a `-D` and emit it as a generated constant. Runtime-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDefinition {
+    pub name: String,
+    pub value: String,
+    pub definition_type: DefinitionType,
+}
+
 /// One platform's native-dependency installation recipe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstallationEntry {
@@ -342,9 +415,30 @@ pub struct PnlxManifest {
     pub installation: BTreeMap<String, InstallationEntry>,
     #[serde(default)]
     pub headers: Vec<PnlxHeader>,
+    /// Build-time macros the user must supply before the headers parse (e.g. pcre2's
+    /// `PCRE2_CODE_UNIT_WIDTH`). Resolved at install time. Empty for most packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_definitions: Vec<RequireDefinition>,
     pub platforms: Vec<PlatformRequirement>,
     pub requires: BTreeMap<String, NativeRequirement>,
-    pub dependencies: BTreeMap<String, ExtensionRequirement>,
+    /// Extra libraries to co-load, keyed by architecture (`aarch64`, `x86_64`, or
+    /// `*`/`any` for all). Empty for a single-library package.
+    pub dependencies: BTreeMap<String, Vec<DependencyEntry>>,
+}
+
+impl PnlxManifest {
+    /// The dependency entries that apply to the current architecture: those keyed by
+    /// the running arch plus the wildcard keys (`*`/`any`/`all`).
+    pub fn dependencies_for_current_arch(&self) -> Vec<&DependencyEntry> {
+        let arch = crate::platform::current_platform_requirement().arch;
+        self.dependencies
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() == arch || matches!(key.as_str(), "*" | "any" | "all")
+            })
+            .flat_map(|(_, entries)| entries.iter())
+            .collect()
+    }
 }
 
 impl Default for PnlxManifest {
@@ -382,6 +476,7 @@ impl Default for PnlxManifest {
             self_build: None,
             installation: BTreeMap::new(),
             headers: Vec::new(),
+            require_definitions: Vec::new(),
             platforms: vec![current_platform_requirement()],
             requires,
             dependencies: BTreeMap::new(),

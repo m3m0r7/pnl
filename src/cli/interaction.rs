@@ -36,6 +36,42 @@ impl Interaction {
         }
         select_yes_no(question, default)
     }
+
+    /// Whether prompts can actually read interactive input: stdin is a TTY and the
+    /// caller asked for neither `--no-interaction` nor `--yes`. Callers that need a
+    /// typed value (not just yes/no) check this and fall back to a default otherwise,
+    /// so piped/CI installs never block.
+    pub fn can_prompt(&self) -> bool {
+        !self.no_interaction && !self.assume_yes && io::stdin().is_terminal()
+    }
+
+    /// Prompt for a free-text value on stderr, showing `description` and the current
+    /// `initial` value (used on an empty answer). Returns the trimmed input. Only
+    /// call when [`can_prompt`](Self::can_prompt) is true.
+    pub fn read_value(
+        &self,
+        label: &str,
+        description: &str,
+        initial: Option<&str>,
+    ) -> Result<String> {
+        use console::style;
+        use std::io::Write;
+
+        let mut err = io::stderr();
+        writeln!(err, "{} {label}", style("?").cyan().bold())?;
+        if !description.is_empty() {
+            writeln!(err, "{}", style(format!("  {description}")).dim())?;
+        }
+        match initial {
+            Some(value) => write!(err, "  {} ", style(format!("[{value}]:")).dim())?,
+            None => write!(err, "  > ")?,
+        }
+        err.flush()?;
+
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok(line.trim().to_owned())
+    }
 }
 
 /// An arrow-key Yes/No selector rendered on stderr (↑/↓ or y/n, Enter to

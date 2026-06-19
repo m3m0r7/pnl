@@ -7,7 +7,7 @@ use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_const_php, generate_context_php,
     generate_entity_php, generate_exception_php, generate_ffi_php_from_cdef,
     generate_functions_php, generate_index_php, generate_macro_functions_php,
-    generate_manifest_php, generate_symbols_php, generate_types_php, parse_function_signatures,
+    generate_manifest_php, generate_symbols_php, generate_types_php,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;
@@ -146,7 +146,35 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         extra_include_dirs: &[],
         dependency_functions: &std::collections::BTreeMap::new(),
         exported_symbols: None,
+        // Local `pnlx gen` resolves config-gated definitions from their declared
+        // defaults only (no prompting, no lockfile); install does the interactive
+        // resolution.
+        definitions: &resolve_definition_defaults(&manifest.require_definitions),
     })
+}
+
+/// Resolve `require_definitions` to their declared defaults (no prompt, no lock),
+/// for the local `pnlx gen` path. Entries without a default are skipped, so a
+/// header that truly needs a value still fails to parse — which is the right signal
+/// for a package author running `pnlx gen` without supplying one.
+fn resolve_definition_defaults(
+    definitions: &[crate::manifest::RequireDefinition],
+) -> Vec<crate::manifest::ResolvedDefinition> {
+    definitions
+        .iter()
+        .filter_map(|definition| {
+            let value = match definition.default.as_ref()? {
+                serde_json::Value::Bool(flag) => if *flag { "1" } else { "0" }.to_owned(),
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some(crate::manifest::ResolvedDefinition {
+                name: definition.name.clone(),
+                value,
+                definition_type: definition.definition_type,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,6 +189,7 @@ pub(crate) fn generate_installed_package_artifacts(
     function_prefix: Option<&str>,
     dependency_functions: &std::collections::BTreeMap<String, String>,
     exported_symbols: Option<&std::collections::BTreeSet<String>>,
+    definitions: &[crate::manifest::ResolvedDefinition],
 ) -> Result<()> {
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(package_leaf);
@@ -183,6 +212,7 @@ pub(crate) fn generate_installed_package_artifacts(
         extra_include_dirs,
         dependency_functions,
         exported_symbols,
+        definitions,
     })
 }
 
@@ -213,6 +243,9 @@ struct GenerateArtifacts<'a> {
     /// Symbols the resolved native library exports; when present, cdef function
     /// declarations are limited to these. `None` disables the filter.
     exported_symbols: Option<&'a std::collections::BTreeSet<String>>,
+    /// `require_definitions` resolved at install time, passed to libclang as `-D`s
+    /// and emitted as generated constants.
+    definitions: &'a [crate::manifest::ResolvedDefinition],
 }
 
 fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
@@ -223,38 +256,45 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         args.artifact_stem,
         crate::config::FFI_FILE_SUFFIX
     ));
-    let (cdef, constants, macro_functions, symbols, symbol_aliases) = if args.headers.is_empty() {
-        (
-            read_existing_ffi_cdef(&out)?,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-    } else {
-        let artifacts = cdef_from_header(
-            &read_headers(args.headers)?,
-            &HeaderAdapterOptions {
-                symbol_prefix: args
-                    .symbol_prefix
-                    .clone()
-                    .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
-                entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
-                dependency_functions: args.dependency_functions.clone(),
-                exported_symbols: args.exported_symbols.cloned(),
-                package_header_paths: args.headers.to_vec(),
-                extra_include_dirs: args.extra_include_dirs.to_vec(),
-            },
-        )?;
-        (
-            artifacts.cdef,
-            artifacts.constants,
-            artifacts.macro_functions,
-            artifacts.symbols,
-            artifacts.symbol_aliases,
-        )
-    };
-    let mut signatures = parse_function_signatures(&cdef);
+    let (cdef, constants, macro_functions, symbols, symbol_aliases, unsupported_functions) =
+        if args.headers.is_empty() {
+            (
+                read_existing_ffi_cdef(&out)?,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            let artifacts = cdef_from_header(
+                &read_headers(args.headers)?,
+                &HeaderAdapterOptions {
+                    symbol_prefix: args
+                        .symbol_prefix
+                        .clone()
+                        .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
+                    entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
+                    dependency_functions: args.dependency_functions.clone(),
+                    exported_symbols: args.exported_symbols.cloned(),
+                    package_header_paths: args.headers.to_vec(),
+                    extra_include_dirs: args.extra_include_dirs.to_vec(),
+                    definitions: args.definitions.to_vec(),
+                },
+            )?;
+            (
+                artifacts.cdef,
+                artifacts.constants,
+                artifacts.macro_functions,
+                artifacts.symbols,
+                artifacts.symbol_aliases,
+                artifacts.unsupported_functions,
+            )
+        };
+    // Unsupported (`static inline`) functions become throwing stub methods; they are
+    // parsed alongside the cdef for faithful types but never put into the FFI cdef.
+    let mut signatures =
+        crate::generate::parse_signatures_with_unsupported(&cdef, &unsupported_functions);
     crate::generate::apply_symbol_aliases(&mut signatures, &symbol_aliases);
     generate_ffi_php_from_cdef(&cdef, &out)?;
     let ffi_file = out
@@ -311,11 +351,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
             )?;
         }
     }
-    generate_const_php(
-        &generated_dir.join("const.php"),
-        &template_options,
-        &constants,
-    )?;
+    generate_const_php(generated_dir, &template_options, &constants)?;
     generate_macro_functions_php(
         &generated_dir.join("macro.functions.php"),
         &template_options,

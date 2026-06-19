@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::archive::{extract_extension_archive, is_archive_source};
 use crate::commands::pnlx::{generate_installed_package_artifacts, read_existing_ffi_cdef};
@@ -11,8 +11,8 @@ use crate::generate::parse_function_signatures;
 use crate::git_source::{GitSource, install_git_source};
 use crate::io::{read_json, read_or_default, write_json};
 use crate::manifest::{
-    Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary, PnlManifest, PnlxManifest,
-    Repository, RepositoryType, Source,
+    DefinitionType, Dist, ExtensionRequirement, LockedExtension, LockedNativeLibrary, PnlManifest,
+    PnlxManifest, Repository, RepositoryType, RequireDefinition, ResolvedDefinition, Source,
 };
 use crate::platform::now;
 use crate::repository_index::{
@@ -26,8 +26,8 @@ use super::native::{
     generation_headers_from_resolved_header, resolve_header_for_native, resolve_native_library,
 };
 use super::package::{
-    absolutize, entity_class_fqn, file_url_for_path, install_extension_files,
-    installed_extension_dir, pnl_lock_path, read_lock_for_current_platform,
+    absolutize, entity_class_fqn, file_url_for_path, install_extension_files, package_dir_in,
+    pnl_lock_path, pnlx_workspace_dir, read_lock_for_current_platform,
     read_pathmap_for_current_platform, tree_sha256, write_pathmap, write_pnlx_autoload,
 };
 
@@ -53,6 +53,8 @@ pub(crate) struct InstallOptions {
     pub enable_use_php_scalars_in_params: bool,
     /// Persist `features.use_php_scalars_in_return = true` into pnl.json.
     pub enable_use_php_scalars_in_return: bool,
+    /// Persist `features.use_php_scalars_in_const = true` into pnl.json.
+    pub enable_use_php_scalars_in_const: bool,
     /// Reinstall even when the resolved content differs from the lockfile digest,
     /// overwriting the recorded sha256 instead of aborting.
     pub force: bool,
@@ -61,7 +63,27 @@ pub(crate) struct InstallOptions {
 #[derive(Debug, Default)]
 struct InstallState {
     stack: Vec<String>,
-    dependency_constraints: BTreeMap<String, Vec<String>>,
+    /// When set, the `packages/` directory the current install writes into — a
+    /// parent package's own subtree, for a dependency installed nested under it.
+    /// `None` for a top-level install (the workspace `@pnlx/packages`).
+    packages_root: Option<std::path::PathBuf>,
+}
+
+impl InstallState {
+    /// Whether the install in progress is a (nested) dependency rather than a
+    /// top-level target, so it is kept out of `pnl.json` and the top-level lock.
+    fn is_dependency(&self) -> bool {
+        self.packages_root.is_some()
+    }
+}
+
+/// The `packages/` directory the current install writes into: the parent package's
+/// subtree for a dependency, else the workspace `@pnlx/packages`.
+fn current_packages_root(root: &Path, state: &InstallState) -> std::path::PathBuf {
+    state
+        .packages_root
+        .clone()
+        .unwrap_or_else(|| pnlx_workspace_dir(root).join("packages"))
 }
 
 /// Apply `--enable-use-functions` / `--enable-allow-cdata` to the manifest,
@@ -84,7 +106,132 @@ fn apply_feature_flags(manifest: &mut PnlManifest, options: &InstallOptions) -> 
         manifest.features.use_php_scalars_in_return = true;
         changed = true;
     }
+    if options.enable_use_php_scalars_in_const && !manifest.features.use_php_scalars_in_const {
+        manifest.features.use_php_scalars_in_const = true;
+        changed = true;
+    }
     changed
+}
+
+/// Resolve a package's `require_definitions` to concrete values. Resolution order
+/// (per the lock-as-source-of-truth model): a value already recorded in the lock
+/// (`prior`) preseeds the prompt and is the value a non-interactive install uses;
+/// otherwise the declared `default`. An interactive install always prompts
+/// (preseeded). A non-interactive install with neither a prior value nor a default
+/// errors instead of guessing.
+fn resolve_require_definitions(
+    package: &str,
+    definitions: &[RequireDefinition],
+    prior: &BTreeMap<String, String>,
+    interaction: &crate::interaction::Interaction,
+) -> Result<Vec<ResolvedDefinition>> {
+    let mut resolved = Vec::new();
+    for definition in definitions {
+        let initial = prior
+            .get(&definition.name)
+            .cloned()
+            .or_else(|| definition.default.as_ref().map(definition_default_string));
+        let value = if interaction.can_prompt() {
+            prompt_definition(definition, initial.as_deref(), interaction)?
+        } else {
+            let value = initial.clone().ok_or_else(|| {
+                anyhow!(
+                    "{package} requires the build-time definition `{name}`, but no value \
+                     is available (no default, none recorded in pnlx-lock.json, and this \
+                     is a non-interactive install). Run install interactively or record a \
+                     value in the lockfile.",
+                    name = definition.name,
+                )
+            })?;
+            validate_definition_value(definition.definition_type, &value)
+                .map_err(|reason| anyhow!("invalid value for `{}`: {reason}", definition.name))?;
+            value
+        };
+        resolved.push(ResolvedDefinition {
+            name: definition.name.clone(),
+            value,
+            definition_type: definition.definition_type,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Prompt for one definition's value, re-asking until it validates. A `boolean`
+/// uses the Y/n selector; the other types read a typed line (empty keeps the
+/// preseeded `initial`).
+fn prompt_definition(
+    definition: &RequireDefinition,
+    initial: Option<&str>,
+    interaction: &crate::interaction::Interaction,
+) -> Result<String> {
+    if definition.definition_type == DefinitionType::Boolean {
+        let question = if definition.description.is_empty() {
+            definition.name.clone()
+        } else {
+            format!("{} — {}", definition.name, definition.description)
+        };
+        let yes = interaction.confirm(&question, matches!(initial, Some("1")))?;
+        return Ok(if yes { "1" } else { "0" }.to_owned());
+    }
+    loop {
+        let raw = interaction.read_value(&definition.name, &definition.description, initial)?;
+        let candidate = if raw.is_empty() {
+            initial.map(str::to_owned)
+        } else {
+            Some(normalize_definition_value(definition.definition_type, &raw))
+        };
+        let Some(value) = candidate else {
+            crate::ui::warn("a value is required");
+            continue;
+        };
+        match validate_definition_value(definition.definition_type, &value) {
+            Ok(()) => return Ok(value),
+            Err(reason) => crate::ui::warn(&reason),
+        }
+    }
+}
+
+/// A declared JSON default rendered as the string the solver carries (a boolean as
+/// `1`/`0`, a string verbatim, a number as its text).
+fn definition_default_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Bool(flag) => if *flag { "1" } else { "0" }.to_owned(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Normalise raw input to the canonical stored form (a boolean to `1`/`0`).
+fn normalize_definition_value(definition_type: DefinitionType, raw: &str) -> String {
+    if definition_type != DefinitionType::Boolean {
+        return raw.trim().to_owned();
+    }
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "y" | "yes" | "true" | "t" | "on" => "1".to_owned(),
+        "0" | "n" | "no" | "false" | "f" | "off" => "0".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// Validate a solved value against its declared type.
+fn validate_definition_value(
+    definition_type: DefinitionType,
+    value: &str,
+) -> std::result::Result<(), String> {
+    match definition_type {
+        DefinitionType::Int => value
+            .parse::<i128>()
+            .map(|_| ())
+            .map_err(|_| format!("`{value}` is not an integer")),
+        DefinitionType::Float => value
+            .parse::<f64>()
+            .map(|_| ())
+            .map_err(|_| format!("`{value}` is not a number")),
+        DefinitionType::String => Ok(()),
+        DefinitionType::Boolean => (value == "0" || value == "1")
+            .then_some(())
+            .ok_or_else(|| format!("`{value}` is not a boolean (enter y/n)")),
+    }
 }
 
 pub(super) fn install(root: &Path, targets: &[String], options: &InstallOptions) -> Result<()> {
@@ -813,19 +960,35 @@ fn install_local_extension(
 
     ensure_not_cyclic(state, &extension.name)?;
     state.stack.push(extension.name.clone());
-    install_extension_dependencies(root, manifest, &extension, options, state)?;
 
+    // A nested dependency install (writing into a parent's subtree) is private to
+    // that parent: it is not a top-level entity, so it stays out of `pnl.json` and
+    // the top-level lock, and each parent keeps its own (possibly different) version.
+    let is_dependency = state.is_dependency();
+    let packages_root = current_packages_root(root, state);
+
+    // Install this package's own files first, so dependency packages can be placed
+    // *inside* its subtree without the file copy clobbering them.
     let installed_extension_root =
-        install_extension_files(root, extension_root, &extension.name, &extension.version)?;
+        install_extension_files(&packages_root, extension_root, &extension.name, &extension.version)?;
 
-    manifest
-        .extensions
-        .entry(extension.name.clone())
-        .or_insert_with(|| ExtensionRequirement {
-            version: format!("={}", extension.version),
-            required: true,
-        });
-    write_json(&root.join(crate::config::PNL_MANIFEST_FILE), manifest)?;
+    // Dependency packages install nested under this package's own directory.
+    let previous_packages_root = state
+        .packages_root
+        .replace(installed_extension_root.join("packages"));
+    install_extension_dependencies(root, manifest, &extension, options, state)?;
+    state.packages_root = previous_packages_root;
+
+    if !is_dependency {
+        manifest
+            .extensions
+            .entry(extension.name.clone())
+            .or_insert_with(|| ExtensionRequirement {
+                version: format!("={}", extension.version),
+                required: true,
+            });
+        write_json(&root.join(crate::config::PNL_MANIFEST_FILE), manifest)?;
+    }
 
     // Offer to install the package's native dependencies (e.g. `brew install …`)
     // before we try to resolve them from disk.
@@ -837,14 +1000,40 @@ fn install_local_extension(
 
     let mut lock = read_lock_for_current_platform(root)?;
     lock.generated_at = now();
+    // Resolve the package's build-time `require_definitions`, preseeded from the
+    // prior solved values in the lock so a reinstall keeps the earlier choice and a
+    // non-interactive install reproduces it.
+    let prior_definitions = lock
+        .extensions
+        .get(&extension.name)
+        .map(|locked| locked.definitions.clone())
+        .unwrap_or_default();
+    let resolved_definitions = resolve_require_definitions(
+        &extension.name,
+        &extension.require_definitions,
+        &prior_definitions,
+        &options.interaction,
+    )?;
     let mut locked_requires = BTreeMap::new();
     let mut pathmap = read_pathmap_for_current_platform(root)?;
     pathmap.generated_at = now();
 
-    // Map a (recursive) dependency's C functions to its entity class, so a
-    // function-like macro that calls one resolves to that class instead of
-    // becoming a thrower. The dependencies were installed (and locked) above.
-    let dependency_functions = collect_dependency_functions(root, &extension.dependencies, &lock);
+    // The current architecture's dependency packages (to map their C functions) and
+    // co-load libraries (extra `.so` whose symbols the package's own calls resolve
+    // against, e.g. gsl -> cblas, brotli -> brotlicommon).
+    let dependency_arch_entries = extension.dependencies_for_current_arch();
+    let dependency_package_names: Vec<String> = dependency_arch_entries
+        .iter()
+        .flat_map(|entry| entry.package_names.iter().cloned())
+        .collect();
+    let dependency_libraries =
+        resolve_dependency_libraries(root, manifest, &dependency_arch_entries)?;
+
+    // Map a (recursive) dependency package's C functions to its entity class, so a
+    // function-like macro that calls one resolves to that class instead of becoming
+    // a thrower. The dependencies were installed (and locked) above.
+    let dependency_functions =
+        collect_dependency_functions(&installed_extension_root.join("packages"), &dependency_package_names);
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
         // Stamp the first-install time, preserving it across reinstalls so the
@@ -883,10 +1072,13 @@ fn install_local_extension(
         );
         let native_path = native.path.clone();
         let native_sha256 = native.sha256.clone();
-        // Limit the generated cdef to symbols the installed library actually
-        // exports, so version/build skew (a declared-but-absent function) does
-        // not fail the whole FFI load.
-        let exported = crate::commands::pnl::native::exported_symbols(&native_path);
+        // Limit the generated cdef to symbols the installed libraries actually
+        // export, so version/build skew (a declared-but-absent function) does not
+        // fail the whole FFI load. With co-load libraries the set is the *union* of
+        // the package's own library and every co-load library, so a function exported
+        // by a dependency (e.g. a second `.so` in the same package) is kept and stays
+        // callable through the one monolithic cdef.
+        let exported = exported_symbols_union(&native_path, &dependency_libraries);
         pathmap.requires.insert(key.clone(), native);
         pathmap.headers.insert(key.clone(), header);
         generate_installed_package_artifacts(
@@ -900,19 +1092,27 @@ fn install_local_extension(
             options.function_prefix.as_deref(),
             &dependency_functions,
             exported.as_ref(),
+            &resolved_definitions,
         )?;
         if let Some(fqcn) = entity_class_fqn(&extension) {
-            // Bake the resolved native library path + hash into the entity constants.
+            // Bake the resolved native library path + hash + co-load library paths
+            // into the entity constants.
             let class_name = fqcn.rsplit('\\').next().unwrap_or(&fqcn);
+            let library_paths: Vec<String> = dependency_libraries.values().cloned().collect();
             crate::generate::stamp_entity_native_library(
                 &installed_extension_root.join(crate::config::GENERATED_DIR),
                 class_name,
                 &native_path,
                 &native_sha256,
+                &library_paths,
             )?;
         }
     }
 
+    // A nested dependency is private to its parent: it is recorded in the parent's
+    // `LockedExtension.dependencies`, not as its own top-level lock entity (so two
+    // parents can pin different versions). Only top-level installs are locked here.
+    if !is_dependency {
     let (source, dist) = source.lock_source(&extension, &content_hash);
     lock.extensions.insert(
         extension.name.clone(),
@@ -922,16 +1122,32 @@ fn install_local_extension(
             source,
             dist,
             classes: entity_class_fqn(&extension).into_iter().collect(),
-            dependencies: extension
-                .dependencies
+            // Dependency packages (name -> resolved version), used for recursive
+            // function mapping. Co-load libraries are recorded separately below.
+            dependencies: dependency_package_names
                 .iter()
-                .map(|(name, requirement)| (name.clone(), requirement.version.clone()))
+                .map(|name| {
+                    let version = lock
+                        .extensions
+                        .get(name)
+                        .map(|locked| locked.version.clone())
+                        .unwrap_or_else(|| "*".to_owned());
+                    (name.clone(), version)
+                })
                 .collect(),
             requires: locked_requires,
+            // Resolved co-load libraries (name -> path), so a reinstall and the
+            // runtime know exactly which extra `.so` to load alongside this package.
+            libraries: dependency_libraries.clone(),
+            definitions: resolved_definitions
+                .iter()
+                .map(|definition| (definition.name.clone(), definition.value.clone()))
+                .collect(),
         },
     );
-
     write_json(&pnl_lock_path(root), &lock)?;
+    }
+
     write_pathmap(root, &pathmap)?;
     write_pnlx_autoload(root)?;
     crate::ui::success(&format!("installed extension {}", extension.name));
@@ -973,50 +1189,75 @@ fn install_extension_dependencies(
     options: &InstallOptions,
     state: &mut InstallState,
 ) -> Result<()> {
-    for (dependency, requirement) in &extension.dependencies {
-        let constraints = state
-            .dependency_constraints
-            .entry(dependency.clone())
-            .or_default();
-        if !constraints.contains(&requirement.version) {
-            constraints.push(requirement.version.clone());
+    // The `package_names` of the current architecture's dependency entries are other
+    // pnl packages to install and co-load. A bare name resolves through the
+    // registries (the entry's `repositories`, or the workspace/config defaults); a
+    // `file://`/`git@`/path entry resolves like an `install` target.
+    for entry in extension.dependencies_for_current_arch() {
+        let added = extend_manifest_repositories(manifest, &entry.repositories);
+        for package in &entry.package_names {
+            if installed_dependency_satisfies(root, package, "*").unwrap_or(false) {
+                crate::ui::info(&format!("dependency {package} already installed"));
+                continue;
+            }
+            crate::ui::step(&format!("installing dependency {package}"));
+            install_target(root, manifest, package, options, state)?;
         }
-        let constraint = combined_constraint(constraints);
-
-        if installed_dependency_satisfies(root, dependency, &constraint)? {
-            crate::ui::info(&format!(
-                "dependency {dependency} already satisfies {constraint}"
-            ));
-            continue;
-        }
-        crate::ui::step(&format!(
-            "installing dependency {dependency} {}",
-            constraint
-        ));
-        install_bare_name(
-            root,
-            manifest,
-            dependency,
-            Some(&constraint),
-            None,
-            None,
-            options,
-            state,
-        )?;
-        if !installed_dependency_satisfies(root, dependency, &constraint)? {
-            bail!("installed dependency {dependency} does not satisfy {constraint}");
-        }
+        truncate_manifest_repositories(manifest, added);
     }
     let _ = state.stack.pop();
     Ok(())
 }
 
-fn combined_constraint(constraints: &[String]) -> String {
-    constraints
-        .iter()
-        .map(|constraint| format!("({constraint})"))
-        .collect::<Vec<_>>()
-        .join(" & ")
+/// Append a dependency entry's `repositories` (URLs not already present) to the
+/// workspace manifest so a bare `package_names` entry resolves against them, and
+/// return how many were added (to undo afterwards).
+fn extend_manifest_repositories(manifest: &mut PnlManifest, repositories: &[String]) -> usize {
+    let mut added = 0;
+    for url in repositories {
+        if manifest.repositories.iter().any(|repo| &repo.url == url) {
+            continue;
+        }
+        manifest.repositories.push(Repository {
+            kind: repository_kind_for_url(url),
+            url: url.clone(),
+            key: None,
+            // Consulted before the built-in default (priority 0).
+            priority: Some(1),
+        });
+        added += 1;
+    }
+    added
+}
+
+/// Guess a repository's type from its URL scheme (a `git`/`.git` URL is Git, a
+/// `file://`/path is File, otherwise an HTTPS index).
+fn repository_kind_for_url(url: &str) -> RepositoryType {
+    if url.starts_with("git@") || url.ends_with(".git") || url.starts_with("git://") {
+        RepositoryType::Git
+    } else if url.starts_with("file://") || url.starts_with('/') || url.starts_with('.') {
+        RepositoryType::File
+    } else {
+        RepositoryType::Https
+    }
+}
+
+/// Undo the temporary repositories added by [`extend_manifest_repositories`].
+fn truncate_manifest_repositories(manifest: &mut PnlManifest, added: usize) {
+    let keep = manifest.repositories.len().saturating_sub(added);
+    manifest.repositories.truncate(keep);
+}
+
+/// Install a `package_names` entry. `install_one` already resolves a bare name (via
+/// the registries), a `file://`/path, or a `git@`/git URL.
+fn install_target(
+    root: &Path,
+    manifest: &mut PnlManifest,
+    target: &str,
+    options: &InstallOptions,
+    state: &mut InstallState,
+) -> Result<()> {
+    install_one(root, manifest, target, None, None, options, state, None)
 }
 
 fn installed_dependency_satisfies(root: &Path, package: &str, constraint: &str) -> Result<bool> {
@@ -1064,51 +1305,144 @@ impl ExtensionSource {
 /// `dependencies` (recursively, through the lockfile). Each installed dependency
 /// contributes its locked entity class for every C function in its generated
 /// cdef, so a function-like macro that calls one can render a static call to it.
-fn collect_dependency_functions(
+/// Resolve the current architecture's `library_names` dependency entries to extra
+/// shared libraries to co-load, as `resolved name -> resolved path`. Each group is
+/// resolved with the same path logic as a native requirement (pkg-config / soname /
+/// multiarch). `package_names` are handled by the package-install path, not here.
+fn resolve_dependency_libraries(
     root: &Path,
-    dependencies: &BTreeMap<String, ExtensionRequirement>,
-    lock: &crate::manifest::PnlLock,
+    manifest: &PnlManifest,
+    entries: &[&crate::manifest::DependencyEntry],
+) -> Result<BTreeMap<String, String>> {
+    let mut resolved = BTreeMap::new();
+    for entry in entries {
+        if entry.library_names.is_empty() {
+            continue;
+        }
+        let requirement = crate::manifest::NativeRequirement {
+            library_names: entry.library_names.clone(),
+            header_names: Vec::new(),
+            symbol_prefix: None,
+            library_url: None,
+            header_url: None,
+            header_inline: None,
+            version: ">=0.0.0".to_owned(),
+            required: true,
+        };
+        // The first real (non-virtual) name's stem is the pkg-config lookup key.
+        let key = entry
+            .library_names
+            .iter()
+            .find(|name| !name.is_virtual())
+            .map(|name| library_stem(name.name()))
+            .unwrap_or_default();
+        let native = resolve_native_library(root, manifest, &key, &requirement)?;
+        resolved.insert(native.resolved_name, native.path);
+    }
+    Ok(resolved)
+}
+
+/// The union of the symbols exported by the package's own library and every
+/// co-load dependency library, for the cdef's export filter. `None` (no filter)
+/// when the package's own exports can't be read, preserving the prior behaviour;
+/// an unreadable dependency just contributes nothing.
+fn exported_symbols_union(
+    primary_path: &str,
+    dependency_libraries: &BTreeMap<String, String>,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut union = crate::commands::pnl::native::exported_symbols(primary_path)?;
+    for path in dependency_libraries.values() {
+        if let Some(symbols) = crate::commands::pnl::native::exported_symbols(path) {
+            union.extend(symbols);
+        }
+    }
+    Some(union)
+}
+
+/// The pkg-config-style stem of a library file name (`libgslcblas.so.0` ->
+/// `gslcblas`): drop a leading `lib` and everything from the first `.`.
+fn library_stem(name: &str) -> String {
+    let base = name.split('.').next().unwrap_or(name);
+    base.strip_prefix("lib").unwrap_or(base).to_owned()
+}
+
+fn collect_dependency_functions(
+    packages_root: &Path,
+    package_names: &[String],
 ) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     let mut seen = std::collections::BTreeSet::new();
-    let mut stack: Vec<String> = dependencies.keys().cloned().collect();
+    collect_dependency_functions_in(packages_root, package_names, &mut map, &mut seen);
+    map
+}
 
-    while let Some(name) = stack.pop() {
+/// Walk the dependency packages nested under `packages_root`, mapping each one's C
+/// functions to its entity class, and recurse into each dependency's own nested
+/// dependencies. Resolved straight from the nested files (not the lock), since
+/// dependencies are private to their parent and not top-level lock entities.
+fn collect_dependency_functions_in(
+    packages_root: &Path,
+    package_names: &[String],
+    map: &mut BTreeMap<String, String>,
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    for name in package_names {
         if !seen.insert(name.clone()) {
             continue;
         }
-        let Some(locked) = lock.extensions.get(&name) else {
+        let Some(version_dir) = sole_installed_version_dir(packages_root, name) else {
             continue;
         };
-        // The dependency's entity class, made absolute for a static `::` call.
-        let Some(class) = locked.classes.first() else {
+        let Ok(manifest) =
+            read_json::<PnlxManifest>(&version_dir.join(crate::config::PNLX_MANIFEST_FILE))
+        else {
             continue;
         };
-        let fqcn = format!("\\{}", class.trim_start_matches('\\'));
-
-        let generated = installed_extension_dir(root, &name, &locked.version)
-            .join(crate::config::GENERATED_DIR);
-        if let Ok(entries) = std::fs::read_dir(&generated) {
-            for path in entries.flatten().map(|entry| entry.path()) {
-                if !path
-                    .file_name()
-                    .and_then(|file| file.to_str())
-                    .is_some_and(|file| file.ends_with(crate::config::FFI_FILE_SUFFIX))
-                {
-                    continue;
-                }
-                if let Ok(cdef) = read_existing_ffi_cdef(&path) {
-                    for signature in parse_function_signatures(&cdef) {
-                        map.entry(signature.name).or_insert_with(|| fqcn.clone());
+        if let Some(fqcn) = entity_class_fqn(&manifest) {
+            // The dependency's entity class, made absolute for a static `::` call.
+            let fqcn = format!("\\{}", fqcn.trim_start_matches('\\'));
+            let generated = version_dir.join(crate::config::GENERATED_DIR);
+            if let Ok(entries) = std::fs::read_dir(&generated) {
+                for path in entries.flatten().map(|entry| entry.path()) {
+                    if !path
+                        .file_name()
+                        .and_then(|file| file.to_str())
+                        .is_some_and(|file| file.ends_with(crate::config::FFI_FILE_SUFFIX))
+                    {
+                        continue;
+                    }
+                    if let Ok(cdef) = read_existing_ffi_cdef(&path) {
+                        for signature in parse_function_signatures(&cdef) {
+                            map.entry(signature.name).or_insert_with(|| fqcn.clone());
+                        }
                     }
                 }
             }
         }
-
-        // Recurse into the dependency's own dependencies (recorded in the lock).
-        stack.extend(locked.dependencies.keys().cloned());
+        // Recurse into the dependency's own nested dependency packages.
+        let nested_names: Vec<String> = manifest
+            .dependencies_for_current_arch()
+            .iter()
+            .flat_map(|entry| entry.package_names.iter().cloned())
+            .collect();
+        collect_dependency_functions_in(
+            &version_dir.join("packages"),
+            &nested_names,
+            map,
+            seen,
+        );
     }
-    map
+}
+
+/// The sole installed version directory of `package` under `packages_root` — each
+/// nested dependency has exactly one version installed.
+fn sole_installed_version_dir(packages_root: &Path, package: &str) -> Option<std::path::PathBuf> {
+    let package_dir = package_dir_in(packages_root, package);
+    std::fs::read_dir(&package_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.join(crate::config::PNLX_MANIFEST_FILE).is_file())
 }
 
 /// Reject an install whose content digest differs from a previously locked
@@ -1163,6 +1497,87 @@ mod tests {
         ExtensionSource, InstallSource, is_trusted_extension_source, path_from_file_url,
         resolve_install_source, split_version_pin,
     };
+
+    fn int_definition(default: Option<serde_json::Value>) -> Vec<crate::manifest::RequireDefinition> {
+        vec![crate::manifest::RequireDefinition {
+            name: "WIDTH".to_owned(),
+            description: String::new(),
+            definition_type: crate::manifest::DefinitionType::Int,
+            default,
+        }]
+    }
+
+    #[test]
+    fn require_definitions_use_default_when_non_interactive() {
+        let definitions = int_definition(Some(serde_json::json!(8)));
+        let interaction = crate::interaction::Interaction::new(true, false);
+        let resolved = super::resolve_require_definitions(
+            "vendor/pkg",
+            &definitions,
+            &std::collections::BTreeMap::new(),
+            &interaction,
+        )
+        .unwrap();
+        assert_eq!(resolved[0].value, "8");
+    }
+
+    #[test]
+    fn require_definitions_prefer_the_locked_value_over_the_default() {
+        let definitions = int_definition(Some(serde_json::json!(8)));
+        let prior = std::collections::BTreeMap::from([("WIDTH".to_owned(), "16".to_owned())]);
+        let interaction = crate::interaction::Interaction::new(true, false);
+        let resolved =
+            super::resolve_require_definitions("vendor/pkg", &definitions, &prior, &interaction)
+                .unwrap();
+        assert_eq!(resolved[0].value, "16");
+    }
+
+    #[test]
+    fn require_definitions_error_when_unresolvable_and_non_interactive() {
+        let definitions = int_definition(None);
+        let interaction = crate::interaction::Interaction::new(true, false);
+        let result = super::resolve_require_definitions(
+            "vendor/pkg",
+            &definitions,
+            &std::collections::BTreeMap::new(),
+            &interaction,
+        );
+        assert!(result.is_err(), "expected an error for an unresolvable definition");
+    }
+
+    #[test]
+    fn library_stem_drops_lib_prefix_and_version_suffix() {
+        assert_eq!(super::library_stem("libgslcblas.so.0"), "gslcblas");
+        assert_eq!(super::library_stem("libbrotlicommon.so"), "brotlicommon");
+        assert_eq!(super::library_stem("foo"), "foo");
+    }
+
+    #[test]
+    fn dependency_entries_match_current_arch_and_wildcard() {
+        use crate::manifest::{DependencyEntry, LibraryName};
+        let arch = crate::platform::current_platform_requirement().arch;
+        let entry = |name: &str| DependencyEntry {
+            library_names: vec![LibraryName::Plain(name.to_owned())],
+            ..Default::default()
+        };
+        let mut manifest = crate::manifest::PnlxManifest::default();
+        manifest.dependencies.insert(arch, vec![entry("libfoo.so")]);
+        manifest
+            .dependencies
+            .insert("any".to_owned(), vec![entry("libbar.so")]);
+        manifest
+            .dependencies
+            .insert("some-other-arch".to_owned(), vec![entry("libnope.so")]);
+
+        let names: Vec<String> = manifest
+            .dependencies_for_current_arch()
+            .iter()
+            .flat_map(|entry| entry.library_names.iter().map(|name| name.name().to_owned()))
+            .collect();
+        assert!(names.contains(&"libfoo.so".to_owned()), "{names:?}");
+        assert!(names.contains(&"libbar.so".to_owned()), "{names:?}");
+        assert!(!names.contains(&"libnope.so".to_owned()), "{names:?}");
+    }
 
     #[test]
     fn resolves_linux_installation_keys_from_os_release() {
@@ -1255,6 +1670,8 @@ mod tests {
                 classes: Vec::new(),
                 dependencies: BTreeMap::new(),
                 requires: BTreeMap::new(),
+                libraries: BTreeMap::new(),
+                definitions: BTreeMap::new(),
             },
         );
         crate::io::write_json(&super::pnl_lock_path(dir.path()), &lock).unwrap();

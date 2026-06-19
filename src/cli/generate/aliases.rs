@@ -16,6 +16,11 @@ struct AliasView {
 pub(super) fn render_aliases(signatures: &[FunctionSignature]) -> String {
     let mut aliases = BTreeMap::new();
     for signature in signatures {
+        // An unsupported (e.g. `static inline`) function has no real export to
+        // dispatch to — its method throws — so it gets no alias-map entry.
+        if signature.unsupported.is_some() {
+            continue;
+        }
         // The map resolves a public/ergonomic name to the exported C symbol, which
         // differs from the public name for symbol-version renames (ICU).
         let native = signature.native_symbol();

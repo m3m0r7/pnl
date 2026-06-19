@@ -17,3 +17,8 @@ enum example_mode {
 
 const char *example_version(void);
 int example_add(int left, int right);
+
+// A static inline helper has no exported symbol, so it cannot be bound through FFI;
+// it is surfaced as a throwing stub method (marked #[StaticInline]) instead of
+// being dropped.
+static inline int example_inline_double(int value) { return value * 2; }

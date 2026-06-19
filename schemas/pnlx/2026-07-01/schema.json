@@ -117,6 +117,35 @@
             },
             "uniqueItems": true
           },
+          "require_definitions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "type"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "int",
+                    "float",
+                    "string",
+                    "boolean"
+                  ]
+                },
+                "default": {}
+              }
+            }
+          },
           "platforms": {
             "type": "array",
             "items": {
@@ -134,11 +163,53 @@
           },
           "dependencies": {
             "type": "object",
-            "x-propertyNames": {
-              "$ref": "#/components/schemas/packageName"
-            },
             "additionalProperties": {
-              "$ref": "#/components/schemas/extensionRequirement"
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "library_names": {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "name"
+                          ],
+                          "properties": {
+                            "name": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "virtual": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "package_names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "repositories": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
             }
           }
         }

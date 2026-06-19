@@ -91,6 +91,11 @@ enum Command {
         /// (generated methods return PHP native int/float/string for scalars that fit).
         #[arg(long)]
         enable_use_php_scalars_in_return: bool,
+        /// Persist `features.use_php_scalars_in_const = true` into pnl.json
+        /// (const.php uses PHP native int/float/string for losslessly representable
+        /// values instead of `Pnlx\Types\*` wrappers).
+        #[arg(long)]
+        enable_use_php_scalars_in_const: bool,
         /// Reinstall even when the resolved content no longer matches the sha256
         /// recorded in the lockfile; the locked digest is overwritten.
         #[arg(long, short = 'f')]
@@ -273,6 +278,7 @@ pub fn run() -> Result<()> {
             enable_allow_cdata,
             enable_use_php_scalars_in_params,
             enable_use_php_scalars_in_return,
+            enable_use_php_scalars_in_const,
             force,
         } => install(
             Path::new("."),
@@ -287,6 +293,7 @@ pub fn run() -> Result<()> {
                 enable_allow_cdata,
                 enable_use_php_scalars_in_params,
                 enable_use_php_scalars_in_return,
+                enable_use_php_scalars_in_const,
                 force,
             },
         ),

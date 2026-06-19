@@ -103,6 +103,7 @@ class RuntimeTest extends TestCase
             'ExampleContext.php',
             'ExampleException.php',
             'const.php',
+            'scalar/const.php',
             'function.aliases.php',
             'example.ffi.php',
         ] as $file) {
@@ -204,6 +205,7 @@ class RuntimeTest extends TestCase
             'ExampleContext.php',
             'ExampleException.php',
             'const.php',
+            'scalar/const.php',
             'function.aliases.php',
             'example.ffi.php',
         ];

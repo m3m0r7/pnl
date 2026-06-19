@@ -48,6 +48,11 @@ pub struct HeaderAdapterOptions {
     /// `pango-features.h` — so their types and version-gate macros resolve (instead
     /// of being undefined, which drops `*_AVAILABLE_IN_*`-decorated functions).
     pub extra_include_dirs: Vec<PathBuf>,
+    /// `require_definitions` resolved at install time (e.g. pcre2's
+    /// `PCRE2_CODE_UNIT_WIDTH=8`). Each is passed to libclang as a `-D` (so a
+    /// config-gated header parses and its width-suffixed symbols are collected) and
+    /// emitted as a generated constant.
+    pub definitions: Vec<crate::manifest::ResolvedDefinition>,
 }
 
 /// A function-like macro turned into a PHP function (in `\Pnlx\Func\<Class>`).
@@ -66,8 +71,9 @@ pub struct MacroFunction {
 #[derive(Debug, Default)]
 pub struct HeaderArtifacts {
     pub cdef: String,
-    /// `(name, php_value_expression)` pairs, in source order, for `const.php`.
-    pub constants: Vec<(String, String)>,
+    /// The object-like `#define` (and enum) constants, in source order, for
+    /// `const.php` and its `scalar/` variant.
+    pub constants: Vec<Constant>,
     pub macro_functions: Vec<MacroFunction>,
     /// Exported data symbols (C globals), for generating per-symbol marker classes.
     pub symbols: Vec<DataSymbol>,
@@ -77,6 +83,20 @@ pub struct HeaderArtifacts {
     /// versioned symbol `u_errorName_74`; the generated method keeps the public name
     /// while dispatching to the versioned symbol the library actually exports.
     pub symbol_aliases: Vec<(String, String)>,
+    /// Functions that cannot be bound through FFI but are still surfaced as a
+    /// generated method that throws (today: `static inline`, which has no exported
+    /// symbol). Kept out of the cdef.
+    pub unsupported_functions: Vec<UnsupportedFunction>,
+}
+
+/// A function with no FFI binding, surfaced as a throwing stub method. `declaration`
+/// is the same `ret name(params);` form as a real function (so its signature/types
+/// render), and `reason` is an abstract category (e.g. `static inline`) used for the
+/// thrown message and the generated marker attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedFunction {
+    pub declaration: String,
+    pub reason: String,
 }
 
 /// One exported data symbol (a C global variable). `pointer` is true when the
@@ -87,6 +107,18 @@ pub struct HeaderArtifacts {
 pub struct DataSymbol {
     pub name: String,
     pub pointer: bool,
+}
+
+/// One emitted `const.php` constant, rendered in both forms the two const
+/// variants need: `wrapped` is a `\Pnlx\Types\*` object (the default), `scalar`
+/// is a bare PHP `int`/`float`/`string` when the value is losslessly
+/// representable (the `scalar/` variant) and falls back to the wrapped form for
+/// typed/unsigned values that must not be flattened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Constant {
+    pub name: String,
+    pub wrapped: String,
+    pub scalar: String,
 }
 
 /// Translate a C header into a normalised cdef suitable for PHP `FFI::cdef`,
@@ -161,6 +193,24 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
             include_dirs.push(dir.clone());
         }
     }
+    // `-D` flags for the user-resolved `require_definitions`, so a config-gated
+    // header (pcre2's `PCRE2_CODE_UNIT_WIDTH`) parses and its width-suffixed symbols
+    // resolve. A string definition is quoted; everything else is passed bare.
+    let define_args: Vec<String> = options
+        .definitions
+        .iter()
+        .map(|definition| match definition.definition_type {
+            crate::manifest::DefinitionType::String => {
+                format!("-D{}=\"{}\"", definition.name, definition.value)
+            }
+            _ => format!("-D{}={}", definition.name, definition.value),
+        })
+        .collect();
+    let defined_names: BTreeSet<String> = options
+        .definitions
+        .iter()
+        .map(|definition| definition.name.clone())
+        .collect();
     let collected = parse_with_neutralized_macros(
         &index,
         &workspace,
@@ -168,16 +218,35 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
         header,
         &owned_dirs,
         &include_dirs,
+        &define_args,
+        &defined_names,
     )?;
-    let constants = header_constants(&collected, prefix);
-    let constant_names: BTreeSet<String> = constants.iter().map(|(name, _)| name.clone()).collect();
+    let constants = header_constants(&collected, prefix, &options.definitions);
+    let constant_names: BTreeSet<String> =
+        constants.iter().map(|constant| constant.name.clone()).collect();
     Ok(HeaderArtifacts {
         cdef: render(&collected, options.exported_symbols.as_ref()),
         macro_functions: macro_functions(&collected, prefix, &constant_names, options),
         symbols: data_symbols(&collected, options.exported_symbols.as_ref()),
-        symbol_aliases: macro_symbol_aliases(&collected),
+        symbol_aliases: macro_symbol_aliases(&collected, &options.definitions),
+        unsupported_functions: unsupported_functions(&collected),
         constants,
     })
+}
+
+/// The unbindable functions (today: `static inline`) to surface as throwing stub
+/// methods. Like the cdef's real declarations they are package-owned; the
+/// exported-symbols filter does not apply (a `static inline` is, by definition, not
+/// an export).
+fn unsupported_functions(collected: &Collected) -> Vec<UnsupportedFunction> {
+    collected
+        .unsupported_functions
+        .iter()
+        .map(|(declaration, reason)| UnsupportedFunction {
+            declaration: declaration.clone(),
+            reason: reason.clone(),
+        })
+        .collect()
 }
 
 /// The exported data symbols to surface as marker classes, filtered by the
@@ -219,6 +288,8 @@ fn parse_with_neutralized_macros(
     header: &str,
     owned_dirs: &[PathBuf],
     include_dirs: &[PathBuf],
+    define_args: &[String],
+    defined_names: &BTreeSet<String>,
 ) -> Result<Collected> {
     let mut arguments = vec![
         "-x".to_owned(),
@@ -235,6 +306,9 @@ fn parse_with_neutralized_macros(
             .context("prelude path is not UTF-8")?
             .to_owned(),
     ];
+    // User-resolved `require_definitions`, so a config-gated header parses (pcre2's
+    // `#error` guard) and its conditioned declarations/types are collected.
+    arguments.extend(define_args.iter().cloned());
     // Add the package's own include roots so `#include <libxml/xmlstring.h>`
     // style directives inside the concatenated headers resolve to the real
     // sub-headers (otherwise types defined only there, e.g. `xmlChar`, are
@@ -258,8 +332,12 @@ fn parse_with_neutralized_macros(
     // A lenient first pass: enums parse even while ABI macros are undefined,
     // giving us the enum constants that must be excluded from neutralisation.
     let enum_constants = gather_enum_constants(&parse(header)?.get_entity());
+    // A user-resolved `require_definitions` macro (passed as a `-D`) must never be
+    // neutralised: an empty redefinition would override the `-D` value and flip the
+    // header's `#if` width gates, dropping the conditioned declarations.
     let mut defines: BTreeSet<String> = abi_macro_candidates(header)
         .difference(&enum_constants)
+        .filter(|name| !defined_names.contains(*name))
         .cloned()
         .collect();
     let mut opaque_types: BTreeMap<String, &'static str> = BTreeMap::new();
@@ -276,7 +354,7 @@ fn parse_with_neutralized_macros(
                     if opaque_types.insert(name, kind).is_none() {
                         discovered = true;
                     }
-                } else if defines.insert(name) {
+                } else if !defined_names.contains(&name) && defines.insert(name) {
                     discovered = true;
                 }
             }
@@ -520,6 +598,14 @@ struct Collected {
     typedef_names: BTreeSet<String>,
     typedefs: Vec<String>,
     functions: Vec<String>,
+    /// Functions that cannot be bound through FFI (today: `static inline`, which has
+    /// no exported symbol) but are still surfaced as a generated method that throws,
+    /// so the API is complete and calling one gives a clear error instead of a
+    /// "method not found". Each is a `(declaration, reason)`; the declaration is the
+    /// same `ret name(params);` form as `functions` but is never put in the cdef.
+    unsupported_functions: Vec<(String, String)>,
+    /// Names already collected as unsupported, to dedupe redeclarations.
+    unsupported_names: BTreeSet<String>,
     /// Exported global variables (`extern <type> <name>;`), so a PHP example can
     /// take their address through `NativeLibrary::addressOf()` for an API that wants
     /// a pointer to a global (oniguruma's `ONIG_ENCODING_UTF8` = `&OnigEncodingUTF8`).
@@ -875,17 +961,18 @@ fn collect_function(
     collected: &mut Collected,
     empty_macros: &BTreeSet<String>,
 ) {
-    if entity.is_variadic() {
-        return;
-    }
-    // `static inline` helpers have no exported symbol, so binding them through
-    // FFI would fail; only keep externally-linked functions.
-    if entity.get_linkage() != Some(Linkage::External) {
-        return;
-    }
     let Some(name) = entity.get_name() else {
         return;
     };
+    // A non-externally-linked function has no exported symbol to bind. `static inline`
+    // API helpers are common, though, so rather than drop them silently they are
+    // surfaced below as a throwing stub method (the API stays complete and calling one
+    // gives a clear error). A plain file-scope `static` function is genuinely internal
+    // and dropped.
+    let exported = entity.get_linkage() == Some(Linkage::External);
+    if !exported && !entity.is_inline_function() {
+        return;
+    }
     let return_type = entity
         .get_result_type()
         .map(|ty| ty.get_display_name())
@@ -927,20 +1014,37 @@ fn collect_function(
         })
         .collect::<Vec<_>>();
 
-    let params = if params.is_empty() {
+    let mut params = if params.is_empty() {
         "void".to_owned()
     } else {
         params.join(", ")
     };
+    // A variadic C function (`printf(const char *, ...)`) is bindable: PHP FFI can
+    // call it and the generated method forwards the extra arguments verbatim. Append
+    // the C ellipsis so the cdef declaration — and the signature parsed back from it —
+    // carry it, instead of dropping the whole declaration.
+    if entity.is_variadic() {
+        if params == "void" {
+            params = "...".to_owned();
+        } else {
+            params.push_str(", ...");
+        }
+    }
 
-    // Keep only the first declaration of a given name. A header may declare the same
-    // function twice (gmp's `__gmpz_size` appears with a named and an unnamed param);
-    // the spellings differ so `dedup()` can't merge them, and FFI rejects the
-    // redefinition. `insert` is false when the name was already collected.
-    if collected.function_names.insert(name.clone()) {
+    let declaration = format!("{}({});", declarator(&return_type, &name), params);
+    if exported {
+        // Keep only the first declaration of a given name. A header may declare the
+        // same function twice (gmp's `__gmpz_size` appears with a named and an unnamed
+        // param); the spellings differ so `dedup()` can't merge them, and FFI rejects
+        // the redefinition. `insert` is false when the name was already collected.
+        if collected.function_names.insert(name.clone()) {
+            collected.functions.push(declaration);
+        }
+    } else if collected.unsupported_names.insert(name.clone()) {
+        // `static inline`: a throwing stub, kept out of the cdef (no real symbol).
         collected
-            .functions
-            .push(format!("{}({});", declarator(&return_type, &name), params));
+            .unsupported_functions
+            .push((declaration, "static inline".to_owned()));
     }
 }
 
@@ -1530,38 +1634,82 @@ fn typedef_declaration(name: &str, underlying: &str) -> String {
 /// of it (e.g. `#define FOO (SOME_ENUM | 1)`). Anything untranslatable (casts,
 /// char literals, calls, unknown names) is silently dropped, and an enum value
 /// wins over any later macro of the same name.
-fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)> {
+fn header_constants(
+    collected: &Collected,
+    prefix: &str,
+    definitions: &[crate::manifest::ResolvedDefinition],
+) -> Vec<Constant> {
     let needle = prefix.to_ascii_lowercase();
+    // Every evaluated constant by name (including non-prefix ones), so a macro that
+    // references another constant resolves to its *value*. Folding the reference to
+    // a literal is what lets the wrapped form work: a wrapped constant is a
+    // `\Pnlx\Types\*` object that could not take part in PHP arithmetic.
+    let mut env: BTreeMap<String, ConstValue> = BTreeMap::new();
     let mut emitted = BTreeSet::new();
     let mut constants = Vec::new();
 
+    // Seed the resolved `require_definitions` so a macro that references one (pcre2's
+    // width-keyed expressions) resolves, and emit each as a typed constant.
+    for definition in definitions {
+        if let Some(value) = definition_const_value(definition) {
+            env.entry(definition.name.clone()).or_insert(value);
+        }
+    }
+
+    // Enumerators (owned and #included) are plain `int`s. Seed every one into the
+    // environment first so any macro can reference any enumerator regardless of
+    // source order.
+    for (name, value) in collected
+        .enum_constants
+        .iter()
+        .chain(&collected.pool_enum_constants)
+    {
+        env.entry(name.clone())
+            .or_insert(ConstValue::Int(*value as i128, IntKind::Int));
+    }
+
+    // The resolved definitions are emitted unconditionally (not prefix-filtered): the
+    // user asked for them, and the name (e.g. `PCRE2_CODE_UNIT_WIDTH`) need not match.
+    for definition in definitions {
+        if let Some(value) = definition_const_value(definition)
+            && emitted.insert(definition.name.clone())
+        {
+            let (wrapped, scalar) = render_const_value(&value);
+            constants.push(Constant {
+                name: definition.name.clone(),
+                wrapped,
+                scalar,
+            });
+        }
+    }
+
+    let mut emit = |name: &str, value: &ConstValue, constants: &mut Vec<Constant>| {
+        if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.to_owned()) {
+            let (wrapped, scalar) = render_const_value(value);
+            constants.push(Constant {
+                name: name.to_owned(),
+                wrapped,
+                scalar,
+            });
+        }
+    };
+
+    // Owned enumerators, then #included ones (the owned win on a name clash).
     for (name, value) in &collected.enum_constants {
-        if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.clone()) {
-            constants.push((name.clone(), value.to_string()));
-        }
+        emit(name, &ConstValue::Int(*value as i128, IntKind::Int), &mut constants);
     }
-
-    // Enumerators from #included headers, kept only when they match the symbol
-    // prefix (so unrelated system enums never appear). Emitted after the owned
-    // ones, which win on a name clash.
     for (name, value) in &collected.pool_enum_constants {
-        if name.to_ascii_lowercase().contains(&needle) && emitted.insert(name.clone()) {
-            constants.push((name.clone(), value.to_string()));
-        }
+        emit(name, &ConstValue::Int(*value as i128, IntKind::Int), &mut constants);
     }
 
+    // Object-like macros in source order: evaluate against the environment built so
+    // far, record the value for later references, and emit the prefix-matching ones.
     for macro_def in &collected.macros {
-        if !macro_def.name.to_ascii_lowercase().contains(&needle)
-            || emitted.contains(&macro_def.name)
-        {
+        let Some(value) = eval_const(&macro_def.tokens, &env, &collected.fn_macros, 0) else {
             continue;
-        }
-        if let Some(value) =
-            translate_macro_value(&macro_def.tokens, &emitted, &collected.fn_macros)
-        {
-            emitted.insert(macro_def.name.clone());
-            constants.push((macro_def.name.clone(), value));
-        }
+        };
+        emit(&macro_def.name, &value, &mut constants);
+        env.entry(macro_def.name.clone()).or_insert(value);
     }
 
     constants
@@ -1570,100 +1718,573 @@ fn header_constants(collected: &Collected, prefix: &str) -> Vec<(String, String)
 /// Bounds nested function-like-macro expansions.
 const MAX_MACRO_EXPANSION_DEPTH: usize = 16;
 
-/// Translate macro replacement tokens into a PHP constant expression, expanding
-/// any constant-argument calls to known function-like macros. Returns `None` on
-/// anything untranslatable.
-fn translate_macro_value(
-    tokens: &[Token],
-    emitted: &BTreeSet<String>,
-    fn_macros: &BTreeMap<String, RawFnMacro>,
-) -> Option<String> {
-    expand_tokens(tokens, emitted, fn_macros, 0)
+/// The C type of an integer constant (C11 6.4.4.1), on a target where `int` is
+/// 32-bit and `long`/`long long` are 64-bit. Drives the wrapper class and the
+/// scalar-variant decision.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntKind {
+    Int,
+    UInt,
+    Long,
+    ULong,
+    LongLong,
+    ULongLong,
 }
 
-/// Render a token stream as a PHP constant expression. Literals/operators pass
-/// through; an identifier resolves to an already-emitted constant; an
-/// identifier *called* with constant arguments (`DISPLAY(0)`) is expanded by
-/// substituting into the known function-like macro's body. Anything else (char
-/// literals, unknown names, calls to non-macro functions, excessive nesting)
-/// yields `None`.
-fn expand_tokens(
+impl IntKind {
+    fn unsigned(self) -> bool {
+        matches!(self, IntKind::UInt | IntKind::ULong | IntKind::ULongLong)
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            IntKind::Int | IntKind::UInt => 0,
+            IntKind::Long | IntKind::ULong => 1,
+            IntKind::LongLong | IntKind::ULongLong => 2,
+        }
+    }
+
+    fn of(rank: u8, unsigned: bool) -> IntKind {
+        match (rank, unsigned) {
+            (0, false) => IntKind::Int,
+            (0, true) => IntKind::UInt,
+            (1, false) => IntKind::Long,
+            (1, true) => IntKind::ULong,
+            (_, false) => IntKind::LongLong,
+            (_, true) => IntKind::ULongLong,
+        }
+    }
+
+    /// The result type of a binary integer operation, per the usual arithmetic
+    /// conversions (highest rank wins; unsigned is contagious).
+    fn combine(self, other: IntKind) -> IntKind {
+        IntKind::of(
+            self.rank().max(other.rank()),
+            self.unsigned() || other.unsigned(),
+        )
+    }
+
+    fn wrapper(self) -> &'static str {
+        match self {
+            IntKind::Int => "Int_",
+            IntKind::UInt => "UnsignedInt",
+            IntKind::Long => "Long",
+            IntKind::ULong => "UnsignedLong",
+            IntKind::LongLong => "LongLong",
+            IntKind::ULongLong => "UnsignedLongLong",
+        }
+    }
+}
+
+/// The C type of a floating constant: `double` by default, `float` for an `f`
+/// suffix, `long double` for an `l` suffix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FloatKind {
+    Float,
+    Double,
+    LongDouble,
+}
+
+impl FloatKind {
+    fn rank(self) -> u8 {
+        match self {
+            FloatKind::Float => 0,
+            FloatKind::Double => 1,
+            FloatKind::LongDouble => 2,
+        }
+    }
+
+    fn combine(self, other: FloatKind) -> FloatKind {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
+    fn wrapper(self) -> &'static str {
+        match self {
+            FloatKind::Float => "Float_",
+            FloatKind::Double => "Double",
+            FloatKind::LongDouble => "LongDouble",
+        }
+    }
+}
+
+/// A C constant expression evaluated to a typed value. The integer value is held
+/// in an `i128`, wide enough for the full `unsigned long long` range. `Str` holds
+/// a ready PHP string expression (one `"..."` literal, or several joined with `.`
+/// for C's adjacent-string concatenation).
+#[derive(Clone)]
+enum ConstValue {
+    Int(i128, IntKind),
+    Float(f64, FloatKind),
+    Str(String),
+}
+
+/// Evaluate a macro replacement's tokens to a typed constant, resolving
+/// references to already-known constants (`env`) and expanding constant-argument
+/// calls to function-like macros. Returns `None` for anything that is not a fully
+/// resolvable constant expression (casts, `sizeof`, unknown identifiers, calls to
+/// real C functions), so the constant is dropped rather than mis-rendered.
+fn eval_const(
     tokens: &[Token],
-    emitted: &BTreeSet<String>,
+    env: &BTreeMap<String, ConstValue>,
     fn_macros: &BTreeMap<String, RawFnMacro>,
     depth: usize,
-) -> Option<String> {
+) -> Option<ConstValue> {
     if depth > MAX_MACRO_EXPANSION_DEPTH {
         return None;
     }
-    let mut parts = Vec::new();
-    // C concatenates adjacent string literals (`"a" "b"`, or `"a" STR_MACRO`)
-    // with no operator between them; PHP needs an explicit `.`. Track whether the
-    // previous part was an operand so a following operand gets one inserted.
-    let mut prev_was_operand = false;
-    // Whether any real operand (literal/identifier/expansion) was emitted at all.
-    // A body that is only punctuation (`()`, mongoc's empty
-    // `#define MONGOC_PRERELEASE_VERSION ()`) would render as `( )`, which is not a
-    // PHP expression — drop the whole constant instead.
-    let mut has_operand = false;
-    let mut index = 0;
-    while index < tokens.len() {
-        let (kind, spelling) = &tokens[index];
+    let mut parser = ConstParser {
+        tokens,
+        pos: 0,
+        env,
+        fn_macros,
+        depth,
+    };
+    let value = parser.parse_ternary()?;
+    // A leftover token means the body is not a single constant expression (a stray
+    // cast, attribute, or trailing call) — drop it rather than emit a prefix of it.
+    if parser.pos != tokens.len() {
+        return None;
+    }
+    Some(value)
+}
+
+/// A recursive-descent (precedence-climbing) parser over a macro body's tokens.
+struct ConstParser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+    env: &'a BTreeMap<String, ConstValue>,
+    fn_macros: &'a BTreeMap<String, RawFnMacro>,
+    depth: usize,
+}
+
+impl ConstParser<'_> {
+    fn peek_spelling(&self) -> Option<&str> {
+        self.tokens.get(self.pos).map(|(_, spelling)| spelling.as_str())
+    }
+
+    fn parse_ternary(&mut self) -> Option<ConstValue> {
+        let condition = self.parse_binary(1)?;
+        if self.peek_spelling() == Some("?") {
+            self.pos += 1;
+            let then_value = self.parse_ternary()?;
+            if self.peek_spelling() != Some(":") {
+                return None;
+            }
+            self.pos += 1;
+            let else_value = self.parse_ternary()?;
+            return Some(if const_truthy(&condition)? {
+                then_value
+            } else {
+                else_value
+            });
+        }
+        Some(condition)
+    }
+
+    fn parse_binary(&mut self, min_bp: u8) -> Option<ConstValue> {
+        let mut lhs = self.parse_unary()?;
+        while let Some(bp) = self.peek_spelling().and_then(binary_binding_power) {
+            if bp < min_bp {
+                break;
+            }
+            let op = self.peek_spelling()?.to_owned();
+            self.pos += 1;
+            let rhs = self.parse_binary(bp + 1)?;
+            lhs = apply_binary(&op, lhs, rhs)?;
+        }
+        Some(lhs)
+    }
+
+    fn parse_unary(&mut self) -> Option<ConstValue> {
+        match self.peek_spelling() {
+            Some(op @ ("+" | "-" | "~" | "!")) => {
+                let op = op.to_owned();
+                self.pos += 1;
+                let operand = self.parse_unary()?;
+                apply_unary(&op, operand)
+            }
+            _ => self.parse_primary(),
+        }
+    }
+
+    fn parse_primary(&mut self) -> Option<ConstValue> {
+        let (kind, spelling) = self.tokens.get(self.pos)?.clone();
         match kind {
-            TokenKind::Literal => {
-                if prev_was_operand {
-                    parts.push(".".to_owned());
+            TokenKind::Punctuation if spelling == "(" => {
+                self.pos += 1;
+                let inner = self.parse_ternary()?;
+                if self.peek_spelling() != Some(")") {
+                    return None;
                 }
-                parts.push(translate_literal(spelling)?);
-                prev_was_operand = true;
-                has_operand = true;
-                index += 1;
+                self.pos += 1;
+                Some(inner)
             }
-            TokenKind::Punctuation if is_allowed_operator(spelling) => {
-                // A closing `)` ends a parenthesised operand; every other operator
-                // expects an operand next, so it never triggers concatenation.
-                prev_was_operand = spelling == ")";
-                parts.push(spelling.clone());
-                index += 1;
+            TokenKind::Literal if spelling.starts_with('"') => self.parse_string(),
+            TokenKind::Literal if spelling.starts_with('\'') => {
+                self.pos += 1;
+                parse_char_literal(&spelling)
             }
-            TokenKind::Identifier if tokens.get(index + 1).is_some_and(|(_, next)| next == "(") => {
-                let macro_def = fn_macros.get(spelling)?;
-                let (args, after) = parse_call_args(tokens, index + 1)?;
+            TokenKind::Literal => {
+                self.pos += 1;
+                parse_number_literal(&spelling)
+            }
+            // A function-like macro called with constant arguments: substitute and
+            // evaluate its body (`EX_POS_DISPLAY(0)` -> `(EX_POS_MASK | (0))`).
+            TokenKind::Identifier
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|(_, next)| next == "(") =>
+            {
+                let macro_def = self.fn_macros.get(&spelling)?;
+                let (args, after) = parse_call_args(self.tokens, self.pos + 1)?;
                 if args.len() != macro_def.params.len() {
                     return None;
                 }
                 let substituted = substitute_params(&macro_def.body, &macro_def.params, &args);
-                let expanded = expand_tokens(&substituted, emitted, fn_macros, depth + 1)?;
-                // A call that expands to nothing (an empty macro body) would emit
-                // `()`, which is not a PHP expression — drop the whole constant
-                // (glib's `G_GNUC_FUNCTION ""` + empty `__func__`-style macro).
-                if expanded.is_empty() {
-                    return None;
-                }
-                if prev_was_operand {
-                    parts.push(".".to_owned());
-                }
-                parts.push(format!("({expanded})"));
-                prev_was_operand = true;
-                has_operand = true;
-                index = after;
+                let value = eval_const(&substituted, self.env, self.fn_macros, self.depth + 1)?;
+                self.pos = after;
+                Some(value)
             }
-            TokenKind::Identifier if emitted.contains(spelling) => {
-                if prev_was_operand {
-                    parts.push(".".to_owned());
-                }
-                parts.push(spelling.clone());
-                prev_was_operand = true;
-                has_operand = true;
-                index += 1;
+            TokenKind::Identifier => {
+                let value = self.env.get(&spelling)?.clone();
+                self.pos += 1;
+                Some(value)
             }
-            _ => return None,
+            _ => None,
         }
     }
-    if !has_operand {
+
+    /// A string literal, joining C-adjacent string literals (and string-valued
+    /// constant references) with PHP's `.` operator.
+    fn parse_string(&mut self) -> Option<ConstValue> {
+        let mut parts = Vec::new();
+        while let Some((kind, spelling)) = self.tokens.get(self.pos) {
+            match kind {
+                TokenKind::Literal if spelling.starts_with('"') => {
+                    // A C string literal is emitted as a PHP double-quoted string
+                    // (the `\n`/`\t`/`\"` escapes match), but PHP also interpolates
+                    // `$name`/`{$...}`. A literal `$` in the C string (assimp's
+                    // `"$tex.file"`) must be escaped, or the generated `const`
+                    // becomes "invalid operations in a constant expression".
+                    parts.push(spelling.replace('$', "\\$"));
+                    self.pos += 1;
+                }
+                TokenKind::Identifier => match self.env.get(spelling) {
+                    Some(ConstValue::Str(expr)) => {
+                        parts.push(expr.clone());
+                        self.pos += 1;
+                    }
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(ConstValue::Str(parts.join(" . ")))
+    }
+}
+
+fn const_truthy(value: &ConstValue) -> Option<bool> {
+    match value {
+        ConstValue::Int(v, _) => Some(*v != 0),
+        ConstValue::Float(v, _) => Some(*v != 0.0),
+        ConstValue::Str(_) => None,
+    }
+}
+
+/// Left binding power of a binary operator (higher binds tighter); `None` for a
+/// token that is not a constant-expression binary operator.
+fn binary_binding_power(op: &str) -> Option<u8> {
+    Some(match op {
+        "||" => 1,
+        "&&" => 2,
+        "|" => 3,
+        "^" => 4,
+        "&" => 5,
+        "==" | "!=" => 6,
+        "<" | "<=" | ">" | ">=" => 7,
+        "<<" | ">>" => 8,
+        "+" | "-" => 9,
+        "*" | "/" | "%" => 10,
+        _ => return None,
+    })
+}
+
+fn apply_unary(op: &str, operand: ConstValue) -> Option<ConstValue> {
+    match (op, operand) {
+        ("+", value) => Some(value),
+        ("-", ConstValue::Int(v, k)) => Some(ConstValue::Int(v.checked_neg()?, k)),
+        ("-", ConstValue::Float(v, k)) => Some(ConstValue::Float(-v, k)),
+        ("~", ConstValue::Int(v, k)) => Some(ConstValue::Int(!v, k)),
+        ("!", ConstValue::Int(v, _)) => Some(ConstValue::Int((v == 0) as i128, IntKind::Int)),
+        ("!", ConstValue::Float(v, _)) => Some(ConstValue::Int((v == 0.0) as i128, IntKind::Int)),
+        _ => None,
+    }
+}
+
+fn apply_binary(op: &str, lhs: ConstValue, rhs: ConstValue) -> Option<ConstValue> {
+    match (lhs, rhs) {
+        (ConstValue::Int(x, kx), ConstValue::Int(y, ky)) => apply_int_binary(op, x, kx, y, ky),
+        (ConstValue::Float(x, kx), ConstValue::Float(y, ky)) => {
+            apply_float_binary(op, x, y, kx.combine(ky))
+        }
+        (ConstValue::Float(x, kx), ConstValue::Int(y, _)) => apply_float_binary(op, x, y as f64, kx),
+        (ConstValue::Int(x, _), ConstValue::Float(y, ky)) => apply_float_binary(op, x as f64, y, ky),
+        // Strings only combine by juxtaposition (handled in parse_string); any
+        // operator on a string is not a constant we can render.
+        _ => None,
+    }
+}
+
+fn apply_int_binary(op: &str, x: i128, kx: IntKind, y: i128, ky: IntKind) -> Option<ConstValue> {
+    let kind = kx.combine(ky);
+    let arith = |v: i128| Some(ConstValue::Int(v, kind));
+    let logic = |b: bool| Some(ConstValue::Int(b as i128, IntKind::Int));
+    match op {
+        "+" => arith(x.checked_add(y)?),
+        "-" => arith(x.checked_sub(y)?),
+        "*" => arith(x.checked_mul(y)?),
+        "/" => (y != 0).then(|| ConstValue::Int(x / y, kind)),
+        "%" => (y != 0).then(|| ConstValue::Int(x % y, kind)),
+        "<<" => arith(x.checked_shl(u32::try_from(y).ok()?)?),
+        ">>" => arith(x.checked_shr(u32::try_from(y).ok()?)?),
+        "&" => arith(x & y),
+        "|" => arith(x | y),
+        "^" => arith(x ^ y),
+        "<" => logic(x < y),
+        "<=" => logic(x <= y),
+        ">" => logic(x > y),
+        ">=" => logic(x >= y),
+        "==" => logic(x == y),
+        "!=" => logic(x != y),
+        "&&" => logic(x != 0 && y != 0),
+        "||" => logic(x != 0 || y != 0),
+        _ => None,
+    }
+}
+
+fn apply_float_binary(op: &str, x: f64, y: f64, kind: FloatKind) -> Option<ConstValue> {
+    let logic = |b: bool| Some(ConstValue::Int(b as i128, IntKind::Int));
+    match op {
+        "+" => Some(ConstValue::Float(x + y, kind)),
+        "-" => Some(ConstValue::Float(x - y, kind)),
+        "*" => Some(ConstValue::Float(x * y, kind)),
+        "/" => Some(ConstValue::Float(x / y, kind)),
+        "<" => logic(x < y),
+        "<=" => logic(x <= y),
+        ">" => logic(x > y),
+        ">=" => logic(x >= y),
+        "==" => logic(x == y),
+        "!=" => logic(x != y),
+        "&&" => logic(x != 0.0 && y != 0.0),
+        "||" => logic(x != 0.0 || y != 0.0),
+        // %, shifts and bitwise ops are not defined on floating operands.
+        _ => None,
+    }
+}
+
+/// A C character constant (`'A'`, `'\n'`) as its integer value; a multi-character
+/// or unrecognised-escape constant yields `None` (the constant is dropped).
+fn parse_char_literal(literal: &str) -> Option<ConstValue> {
+    let inner = literal.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut chars = inner.chars();
+    let value: i128 = match chars.next()? {
+        '\\' => match chars.next()? {
+            'n' => 10,
+            't' => 9,
+            'r' => 13,
+            '0' => 0,
+            '\\' => 92,
+            '\'' => 39,
+            '"' => 34,
+            'a' => 7,
+            'b' => 8,
+            'f' => 12,
+            'v' => 11,
+            _ => return None,
+        },
+        ch if ch.is_ascii() => ch as i128,
+        _ => return None,
+    };
+    // Reject a multi-character constant ('ab'), whose value is implementation-defined.
+    if chars.next().is_some() {
         return None;
     }
-    Some(parts.join(" "))
+    Some(ConstValue::Int(value, IntKind::Int))
+}
+
+/// A C numeric literal (`42`, `0x20`, `0b1010`, `3.14f`, `1e9`) as a typed value.
+fn parse_number_literal(literal: &str) -> Option<ConstValue> {
+    let lower = literal.to_ascii_lowercase();
+    if lower.starts_with("0x") || lower.starts_with("0b") {
+        return parse_int_literal(&lower);
+    }
+    // A decimal literal with a fraction or exponent is a floating constant.
+    let is_float = lower.contains('.') || (lower.contains('e') && !lower.ends_with('e'));
+    if is_float {
+        parse_float_literal(&lower)
+    } else {
+        parse_int_literal(&lower)
+    }
+}
+
+/// Parse a (lowercased) integer literal, choosing its C type from the suffix and
+/// magnitude. Returns `None` for a malformed literal (e.g. `1.2.3`).
+fn parse_int_literal(lower: &str) -> Option<ConstValue> {
+    let digits_end = lower
+        .rfind(|ch: char| ch != 'u' && ch != 'l')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let (body, suffix) = lower.split_at(digits_end);
+    if suffix.chars().any(|ch| ch != 'u' && ch != 'l') {
+        return None;
+    }
+    let has_u = suffix.contains('u');
+    let l_count = suffix.matches('l').count().min(2) as u8;
+
+    let (radix, digits, decimal) = if let Some(hex) = body.strip_prefix("0x") {
+        (16u32, hex, false)
+    } else if let Some(binary) = body.strip_prefix("0b") {
+        (2u32, binary, false)
+    } else if body.len() > 1 && body.starts_with('0') {
+        (8u32, &body[1..], false)
+    } else {
+        (10u32, body, true)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let value = u128::from_str_radix(digits, radix).ok()?;
+    let kind = classify_int(value, decimal, has_u, l_count);
+    Some(ConstValue::Int(value as i128, kind))
+}
+
+/// The C type of an integer constant (C11 6.4.4.1): the first type in the
+/// suffix's candidate list whose range holds `value`, on a 32-bit-`int` /
+/// 64-bit-`long` target.
+fn classify_int(value: u128, decimal: bool, has_u: bool, l_count: u8) -> IntKind {
+    const I32_MAX: u128 = i32::MAX as u128;
+    const U32_MAX: u128 = u32::MAX as u128;
+    const I64_MAX: u128 = i64::MAX as u128;
+    const U64_MAX: u128 = u64::MAX as u128;
+    let signed_max = |rank: u8| if rank == 0 { I32_MAX } else { I64_MAX };
+    let unsigned_max = |rank: u8| if rank == 0 { U32_MAX } else { U64_MAX };
+    for rank in l_count..=2 {
+        if !has_u && value <= signed_max(rank) {
+            return IntKind::of(rank, false);
+        }
+        // A decimal constant without a `u` suffix only becomes unsigned if it
+        // overflows every signed type; hex/octal may pick an unsigned type sooner.
+        if (has_u || !decimal) && value <= unsigned_max(rank) {
+            return IntKind::of(rank, true);
+        }
+    }
+    IntKind::ULongLong
+}
+
+/// Parse a (lowercased) floating literal, choosing `double`/`float`/`long double`
+/// from its suffix.
+fn parse_float_literal(lower: &str) -> Option<ConstValue> {
+    let (body, kind) = if let Some(rest) = lower.strip_suffix('f') {
+        (rest, FloatKind::Float)
+    } else if let Some(rest) = lower.strip_suffix('l') {
+        (rest, FloatKind::LongDouble)
+    } else {
+        (lower, FloatKind::Double)
+    };
+    // C permits a trailing dot (`1.`), which Rust's float parser rejects.
+    let body = if body.ends_with('.') {
+        format!("{body}0")
+    } else {
+        body.to_owned()
+    };
+    let value: f64 = body.parse().ok()?;
+    Some(ConstValue::Float(value, kind))
+}
+
+/// Render a constant's value as the two forms `const.php` needs: the wrapped
+/// `\Pnlx\Types\*` object (default), and the bare PHP scalar for the `scalar/`
+/// variant — used only for a plain `int`/`double`/string, with typed and unsigned
+/// values staying wrapped (mirroring `use_php_scalars_in_return`).
+fn render_const_value(value: &ConstValue) -> (String, String) {
+    match value {
+        ConstValue::Int(v, kind) => {
+            let wrapped = format!(
+                "new \\Pnlx\\Types\\{}({})",
+                kind.wrapper(),
+                int_constructor_arg(*v)
+            );
+            let scalar = if *kind == IntKind::Int {
+                v.to_string()
+            } else {
+                wrapped.clone()
+            };
+            (wrapped, scalar)
+        }
+        ConstValue::Float(v, kind) => {
+            let literal = float_literal_text(*v);
+            let wrapped = format!("new \\Pnlx\\Types\\{}({literal})", kind.wrapper());
+            let scalar = if *kind == FloatKind::Double {
+                literal
+            } else {
+                wrapped.clone()
+            };
+            (wrapped, scalar)
+        }
+        ConstValue::Str(expr) => (format!("new \\Pnlx\\Types\\String_({expr})"), expr.clone()),
+    }
+}
+
+/// The PHP literal handed to an integer wrapper's constructor: a plain `int` when
+/// the value fits PHP's signed 64-bit `int`, otherwise a decimal string the
+/// wrapper folds back to a 64-bit pattern (so an `unsigned long long` above
+/// `PHP_INT_MAX` survives losslessly).
+fn int_constructor_arg(value: i128) -> String {
+    if value == i64::MIN as i128 {
+        // PHP parses the literal `-9223372036854775808` by first reading the
+        // magnitude, which overflows `PHP_INT_MAX` and becomes a float; and the
+        // string form trips the wrapper's fold (negating the magnitude overflows
+        // too). `PHP_INT_MIN` is exactly `i64::MIN`, so emit it as an int expression.
+        "(-9223372036854775807 - 1)".to_owned()
+    } else if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
+        value.to_string()
+    } else {
+        format!("'{value}'")
+    }
+}
+
+/// A PHP float literal that always reads back as a float (Rust's `{:?}` keeps a
+/// `.0` on whole numbers and uses `e` notation where needed).
+fn float_literal_text(value: f64) -> String {
+    format!("{value:?}")
+}
+
+/// A resolved `require_definitions` value as a typed constant, by its declaration
+/// (an `int` width is an `int`, a `string` a string). `None` if the recorded value
+/// does not parse for its type (it was validated at install, so this is defensive).
+fn definition_const_value(definition: &crate::manifest::ResolvedDefinition) -> Option<ConstValue> {
+    use crate::manifest::DefinitionType;
+    Some(match definition.definition_type {
+        DefinitionType::Int => ConstValue::Int(definition.value.parse().ok()?, IntKind::Int),
+        DefinitionType::Float => ConstValue::Float(definition.value.parse().ok()?, FloatKind::Double),
+        // A preprocessor boolean is the `int` 0/1 it expands to.
+        DefinitionType::Boolean => ConstValue::Int(i128::from(definition.value == "1"), IntKind::Int),
+        DefinitionType::String => ConstValue::Str(format!(
+            "\"{}\"",
+            definition
+                .value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('$', "\\$")
+        )),
+    })
 }
 
 /// Parse a parenthesised, comma-separated argument list starting at the `(` at
@@ -1721,12 +2342,31 @@ fn substitute_params(body: &[Token], params: &[String], args: &[Vec<Token>]) -> 
 /// name while dispatching to the versioned symbol. Fully generic: any
 /// rename-via-macro scheme that token-pastes a version suffix is recovered, with
 /// no hard-coded macro names.
-fn macro_symbol_aliases(collected: &Collected) -> Vec<(String, String)> {
-    let object_macros: BTreeMap<String, &[Token]> = collected
+fn macro_symbol_aliases(
+    collected: &Collected,
+    definitions: &[crate::manifest::ResolvedDefinition],
+) -> Vec<(String, String)> {
+    // The resolved `require_definitions` as synthetic object-like macros, so an alias
+    // macro that token-pastes the value (pcre2's `PCRE2_SUFFIX(name)`, which expands
+    // through `PCRE2_CODE_UNIT_WIDTH`) reaches the real width-suffixed symbol — the
+    // `-D` value is invisible to this simplified expander otherwise.
+    let definition_tokens: Vec<(String, Vec<Token>)> = definitions
+        .iter()
+        .map(|definition| {
+            (
+                definition.name.clone(),
+                vec![(TokenKind::Literal, definition.value.clone())],
+            )
+        })
+        .collect();
+    let mut object_macros: BTreeMap<String, &[Token]> = collected
         .macros
         .iter()
         .map(|macro_def| (macro_def.name.clone(), macro_def.tokens.as_slice()))
         .collect();
+    for (name, tokens) in &definition_tokens {
+        object_macros.entry(name.clone()).or_insert(tokens.as_slice());
+    }
     let mut aliases = Vec::new();
     for macro_def in &collected.macros {
         // Seed the hide set with the macro's own name so a self-referential body
@@ -3571,10 +4211,102 @@ mod tests {
     }
 
     #[test]
-    fn drops_inline_and_variadic_functions() {
+    fn drops_inline_functions_but_keeps_variadic() {
         let cdef = cdef(HEADER);
+        // `static inline` has no exported symbol, so it stays out of the cdef.
         assert!(!cdef.contains("ex_helper"), "inline kept: {cdef}");
-        assert!(!cdef.contains("ex_printf"), "variadic kept: {cdef}");
+        // A variadic function is bindable through PHP FFI; keep it with the ellipsis
+        // so the generated method can forward the extra arguments.
+        assert!(
+            cdef.contains("int ex_printf(const char *fmt, ...);"),
+            "variadic dropped: {cdef}"
+        );
+    }
+
+    #[test]
+    fn applies_require_definitions_as_defines_and_constants() {
+        use crate::manifest::{DefinitionType, ResolvedDefinition};
+        // A declaration gated on the definition is only collected when the `-D`
+        // reaches libclang, so its presence proves the define took effect.
+        let header = "#if EX_WIDTH == 8\nint ex_width_fn(int x);\n#endif\nint ex_base(void);\n";
+        let artifacts = cdef_from_header(
+            header,
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                definitions: vec![ResolvedDefinition {
+                    name: "EX_WIDTH".to_owned(),
+                    value: "8".to_owned(),
+                    definition_type: DefinitionType::Int,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            artifacts.cdef.contains("int ex_width_fn(int x);"),
+            "width-gated decl missing (define not applied): {}",
+            artifacts.cdef
+        );
+        // The resolved definition is also emitted as a typed generated constant.
+        assert!(
+            artifacts
+                .constants
+                .iter()
+                .any(|constant| constant.name == "EX_WIDTH"
+                    && constant.wrapped == "new \\Pnlx\\Types\\Int_(8)"),
+            "{:?}",
+            artifacts.constants
+        );
+    }
+
+    #[test]
+    fn macro_symbol_alias_resolves_through_a_require_definition() {
+        use crate::manifest::{DefinitionType, ResolvedDefinition};
+        // The pcre2 pattern in miniature: the friendly name `ex_open` pastes a width
+        // that comes from a `-D` definition (`EX_WIDTH`), reaching the real
+        // width-suffixed export `ex_open_8`. The alias must be recovered even though
+        // the `-D` value is invisible to libclang's MacroDefinition cursors.
+        let header = "#define EX_GLUE2(a, b) a ## b\n\
+             #define EX_GLUE(a, b) EX_GLUE2(a, b)\n\
+             #define EX_SUFFIX(a) EX_GLUE(a, EX_WIDTH)\n\
+             #define ex_open EX_SUFFIX(ex_open_)\n\
+             int ex_open_8(int x);\n";
+        let artifacts = cdef_from_header(
+            header,
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                definitions: vec![ResolvedDefinition {
+                    name: "EX_WIDTH".to_owned(),
+                    value: "8".to_owned(),
+                    definition_type: DefinitionType::Int,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            artifacts
+                .symbol_aliases
+                .contains(&("ex_open".to_owned(), "ex_open_8".to_owned())),
+            "{:?}",
+            artifacts.symbol_aliases
+        );
+    }
+
+    #[test]
+    fn surfaces_static_inline_as_an_unsupported_stub() {
+        // A `static inline` function is not bound (no symbol) but is not dropped: it
+        // is surfaced as a throwing stub method with the `static inline` reason and a
+        // faithful declaration (so its signature/types render).
+        let unsupported = artifacts(HEADER).unsupported_functions;
+        let helper = unsupported
+            .iter()
+            .find(|function| function.declaration.contains("ex_helper"))
+            .expect("ex_helper should be an unsupported stub");
+        assert_eq!(helper.reason, "static inline");
+        assert_eq!(helper.declaration, "int ex_helper(int a);");
     }
 
     #[test]
@@ -3853,35 +4585,47 @@ mod tests {
     #[test]
     fn extracts_translatable_object_like_macros() {
         let constants = artifacts(HEADER).constants;
-        let lookup = |name: &str| {
-            constants
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
-        };
+        let find = |name: &str| constants.iter().find(|constant| constant.name == name);
+        let wrapped = |name: &str| find(name).map(|constant| constant.wrapped.as_str());
+        let scalar = |name: &str| find(name).map(|constant| constant.scalar.as_str());
 
-        // Integer, hex, shift, and a composite that references earlier constants.
-        assert_eq!(lookup("EX_FLAG_A"), Some("0x01"));
-        assert_eq!(lookup("EX_FLAG_B"), Some("( 1 << 1 )"));
-        assert_eq!(lookup("EX_FLAGS"), Some("( EX_FLAG_A | EX_FLAG_B )"));
-        assert_eq!(lookup("EX_NAME"), Some("\"example\""));
-        assert_eq!(lookup("EX_RATIO"), Some("1.5"));
+        // Values are evaluated at generation time and wrapped in a typed object:
+        // hex/shift expressions are folded, and a reference to an earlier constant is
+        // flattened to its value (a wrapped constant can't take part in PHP math).
+        assert_eq!(wrapped("EX_FLAG_A"), Some("new \\Pnlx\\Types\\Int_(1)"));
+        assert_eq!(wrapped("EX_FLAG_B"), Some("new \\Pnlx\\Types\\Int_(2)"));
+        assert_eq!(wrapped("EX_FLAGS"), Some("new \\Pnlx\\Types\\Int_(3)"));
+        // `0x2FFF0000` = 805240832; `EX_POS_DISPLAY(0)` folds to the same value.
+        assert_eq!(wrapped("EX_POS_MASK"), Some("new \\Pnlx\\Types\\Int_(805240832)"));
+        assert_eq!(
+            wrapped("EX_POS_CENTERED"),
+            Some("new \\Pnlx\\Types\\Int_(805240832)")
+        );
 
-        // C concatenates adjacent string literals/macros; PHP needs explicit `.`.
-        assert_eq!(lookup("EX_TITLE"), Some("\"lib \" . EX_NAME . \" v\""));
+        // `1.5f` carries the C `float` type, so it wraps in `Float_` (not `Double`).
+        assert_eq!(wrapped("EX_RATIO"), Some("new \\Pnlx\\Types\\Float_(1.5)"));
 
-        // Function-like macros are not emitted as constants themselves …
-        assert_eq!(lookup("EX_MAX"), None);
-        assert_eq!(lookup("EX_POS_DISPLAY"), None);
-        // … but an object-like macro that calls one with constant arguments is
-        // expanded by substituting the body (EX_POS_DISPLAY(0) → (MASK | (0))).
-        assert_eq!(lookup("EX_POS_MASK"), Some("0x2FFF0000"));
-        assert_eq!(lookup("EX_POS_CENTERED"), Some("(( EX_POS_MASK | ( 0 ) ))"));
+        // Strings wrap in `String_`; C-adjacent literals/macros are joined with `.`.
+        assert_eq!(wrapped("EX_NAME"), Some("new \\Pnlx\\Types\\String_(\"example\")"));
+        assert_eq!(
+            wrapped("EX_TITLE"),
+            Some("new \\Pnlx\\Types\\String_(\"lib \" . \"example\" . \" v\")")
+        );
 
-        // Enum constants are emitted too, with their evaluated integer values.
-        assert_eq!(lookup("EX_RED"), Some("0"));
-        assert_eq!(lookup("EX_GREEN"), Some("1"));
-        assert_eq!(lookup("EX_BLUE"), Some("2"));
+        // The scalar variant unwraps a plain `int`/string, but keeps `float`/typed
+        // values wrapped (an `f`-suffixed `float` is not a plain PHP scalar).
+        assert_eq!(scalar("EX_FLAG_A"), Some("1"));
+        assert_eq!(scalar("EX_NAME"), Some("\"example\""));
+        assert_eq!(scalar("EX_RATIO"), Some("new \\Pnlx\\Types\\Float_(1.5)"));
+
+        // Function-like macros are not emitted as constants themselves.
+        assert_eq!(find("EX_MAX").map(|_| ()), None);
+        assert_eq!(find("EX_POS_DISPLAY").map(|_| ()), None);
+
+        // Enum constants are emitted too, wrapped as `int`s.
+        assert_eq!(wrapped("EX_RED"), Some("new \\Pnlx\\Types\\Int_(0)"));
+        assert_eq!(wrapped("EX_GREEN"), Some("new \\Pnlx\\Types\\Int_(1)"));
+        assert_eq!(wrapped("EX_BLUE"), Some("new \\Pnlx\\Types\\Int_(2)"));
     }
 
     #[test]
@@ -3927,7 +4671,7 @@ mod tests {
         // must be dropped rather than emitted as `const X = 1.2.3;`.
         let constants = artifacts(HEADER).constants;
         assert!(
-            !constants.iter().any(|(name, _)| name == "EX_BAD_VERSION"),
+            !constants.iter().any(|constant| constant.name == "EX_BAD_VERSION"),
             "{constants:?}"
         );
     }
@@ -4269,13 +5013,12 @@ mod tests {
         )
         .constants;
         assert!(
-            !constants.iter().any(|(name, _)| name == "EX_PRERELEASE"),
+            !constants.iter().any(|constant| constant.name == "EX_PRERELEASE"),
             "{constants:?}"
         );
         assert!(
-            constants
-                .iter()
-                .any(|(name, value)| name == "EX_REAL" && value == "7"),
+            constants.iter().any(|constant| constant.name == "EX_REAL"
+                && constant.wrapped == "new \\Pnlx\\Types\\Int_(7)"),
             "{constants:?}"
         );
     }

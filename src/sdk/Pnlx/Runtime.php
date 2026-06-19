@@ -112,6 +112,16 @@ class Runtime implements RuntimeInterface
         return self::feature('use_php_scalars_in_return', $projectRoot);
     }
 
+    /**
+     * Whether `features.use_php_scalars_in_const` is on, i.e. `const.php` uses PHP
+     * native scalars for losslessly representable values (the `scalar/const.php`
+     * variant) instead of `Pnlx\Types\*` wrappers.
+     */
+    public static function useScalarsInConst(?string $projectRoot = null): bool
+    {
+        return self::feature('use_php_scalars_in_const', $projectRoot);
+    }
+
     /** Read a boolean `features.*` flag from `pnl.json` without a full runtime. */
     private static function feature(string $name, ?string $projectRoot): bool
     {

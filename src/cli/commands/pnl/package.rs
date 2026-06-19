@@ -25,12 +25,12 @@ pub(super) fn pnlx_pathmap_path(root: &Path) -> PathBuf {
 }
 
 pub(super) fn install_extension_files(
-    root: &Path,
+    packages_root: &Path,
     source: &Path,
     package: &str,
     version: &str,
 ) -> Result<PathBuf> {
-    let destination = installed_extension_dir(root, package, version);
+    let destination = extension_install_dir(packages_root, package, version);
     let parent = destination
         .parent()
         .with_context(|| format!("{} has no parent directory", destination.display()))?;
@@ -79,17 +79,23 @@ pub(super) fn install_extension_files(
 /// The directory holding every installed version of a package:
 /// `<workspace>/packages/<vendor>/<package>`.
 pub(super) fn installed_package_dir(root: &Path, package: &str) -> PathBuf {
-    let mut path = pnlx_workspace_dir(root).join("packages");
+    package_dir_in(&pnlx_workspace_dir(root).join("packages"), package)
+}
+
+/// The directory holding every installed version of a package inside a given
+/// `packages/` root (the workspace's, or a parent package's subtree for a
+/// dependency installed nested under it).
+pub(super) fn package_dir_in(packages_root: &Path, package: &str) -> PathBuf {
+    let mut path = packages_root.to_path_buf();
     for segment in package.split('/') {
         path.push(segment);
     }
     path
 }
 
-/// A specific installed version of a package:
-/// `<workspace>/packages/<vendor>/<package>/<version>`.
-pub(super) fn installed_extension_dir(root: &Path, package: &str, version: &str) -> PathBuf {
-    installed_package_dir(root, package).join(version)
+/// A specific installed version of a package inside a given `packages/` root.
+pub(super) fn extension_install_dir(packages_root: &Path, package: &str, version: &str) -> PathBuf {
+    package_dir_in(packages_root, package).join(version)
 }
 
 pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
@@ -384,21 +390,30 @@ struct InstalledPackage {
 }
 
 fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
-    let packages_root = pnlx_workspace_dir(root).join("packages");
-    if !packages_root.is_dir() {
-        return Ok(Vec::new());
-    }
-
     let mut packages = Vec::new();
-    for vendor in fs::read_dir(&packages_root)
+    collect_packages_in(root, &pnlx_workspace_dir(root).join("packages"), &mut packages)?;
+    packages.sort_by(|a, b| a.entrypoint.cmp(&b.entrypoint));
+    Ok(packages)
+}
+
+/// Walk a `packages/` directory, collecting every installed package's entrypoint
+/// and recursing into each version's own nested `packages/` (a package's private
+/// dependencies installed under it), so the autoloader covers nested dependencies.
+fn collect_packages_in(
+    root: &Path,
+    packages_root: &Path,
+    packages: &mut Vec<InstalledPackage>,
+) -> Result<()> {
+    if !packages_root.is_dir() {
+        return Ok(());
+    }
+    for vendor in fs::read_dir(packages_root)
         .with_context(|| format!("failed to read {}", packages_root.display()))?
     {
-        let vendor =
-            vendor.with_context(|| format!("failed to read {}", packages_root.display()))?;
+        let vendor = vendor.with_context(|| format!("failed to read {}", packages_root.display()))?;
         if !vendor.path().is_dir() {
             continue;
         }
-
         for package in fs::read_dir(vendor.path())
             .with_context(|| format!("failed to read {}", vendor.path().display()))?
         {
@@ -407,7 +422,6 @@ fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
             if !package.path().is_dir() {
                 continue;
             }
-
             // Each package holds one directory per installed version.
             for version in fs::read_dir(package.path())
                 .with_context(|| format!("failed to read {}", package.path().display()))?
@@ -415,23 +429,21 @@ fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
                 let version = version
                     .with_context(|| format!("failed to read {}", package.path().display()))?;
                 let manifest_path = version.path().join(crate::config::PNLX_MANIFEST_FILE);
-                if !manifest_path.is_file() {
-                    continue;
+                if manifest_path.is_file() {
+                    let manifest = read_json::<PnlxManifest>(&manifest_path)?;
+                    let entrypoint = version.path().join(&manifest.entrypoint);
+                    if entrypoint.is_file() {
+                        packages.push(InstalledPackage {
+                            entrypoint: relative_to_pnlx(root, &entrypoint),
+                        });
+                    }
                 }
-
-                let manifest = read_json::<PnlxManifest>(&manifest_path)?;
-                let entrypoint = version.path().join(&manifest.entrypoint);
-                if entrypoint.is_file() {
-                    packages.push(InstalledPackage {
-                        entrypoint: relative_to_pnlx(root, &entrypoint),
-                    });
-                }
+                // Recurse into this version's nested dependency packages.
+                collect_packages_in(root, &version.path().join("packages"), packages)?;
             }
         }
     }
-
-    packages.sort_by(|a, b| a.entrypoint.cmp(&b.entrypoint));
-    Ok(packages)
+    Ok(())
 }
 
 /// The fully qualified generated entity class name (namespace + `class_prefix` +
@@ -454,4 +466,40 @@ fn relative_to_pnlx(root: &Path, path: &Path) -> String {
 
 fn php_single_quoted_path(path: &str) -> String {
     path.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_package(version_dir: &Path) {
+        std::fs::create_dir_all(version_dir).unwrap();
+        let mut manifest = crate::manifest::PnlxManifest::default();
+        manifest.entrypoint = "index.php".to_owned();
+        crate::io::write_json(
+            &version_dir.join(crate::config::PNLX_MANIFEST_FILE),
+            &manifest,
+        )
+        .unwrap();
+        std::fs::write(version_dir.join("index.php"), "<?php\n").unwrap();
+    }
+
+    #[test]
+    fn collect_installed_packages_recurses_into_nested_dependencies() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let packages = pnlx_workspace_dir(root).join("packages");
+
+        // A top-level package and a dependency nested under its own subtree.
+        write_package(&packages.join("acme/parent/1.0.0"));
+        write_package(&packages.join("acme/parent/1.0.0/packages/acme/child/2.0.0"));
+
+        let found = collect_installed_packages(root).unwrap();
+        assert_eq!(
+            found.len(),
+            2,
+            "expected the parent and its nested child, found {}",
+            found.len()
+        );
+    }
 }

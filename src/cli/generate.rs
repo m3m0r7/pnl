@@ -119,9 +119,28 @@ pub fn generate_index_php(out: &Path, options: &PhpPackageTemplateOptions<'_>) -
 /// emitted as namespaced PHP `const`s (referenceable as `\<Namespace>\<NAME>`).
 /// `constants` is `(name, php_value_expression)` pairs in source order.
 pub fn generate_const_php(
+    generated_dir: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    constants: &[crate::header_adapter::Constant],
+) -> Result<()> {
+    // Two variants, picked at runtime by `index.php` from `use_php_scalars_in_const`
+    // (the same always-generate-both approach as the entity's `scalar/` variant):
+    // the default wraps every value in a `\Pnlx\Types\*`; `scalar/const.php` uses a
+    // bare PHP scalar where one represents the value losslessly.
+    write_const_variant(&generated_dir.join("const.php"), options, constants, false)?;
+    write_const_variant(
+        &generated_dir.join("scalar").join("const.php"),
+        options,
+        constants,
+        true,
+    )
+}
+
+fn write_const_variant(
     out: &Path,
     options: &PhpPackageTemplateOptions<'_>,
-    constants: &[(String, String)],
+    constants: &[crate::header_adapter::Constant],
+    scalars: bool,
 ) -> Result<()> {
     let mut context = generated_template_context();
     context.insert(
@@ -133,7 +152,14 @@ pub fn generate_const_php(
         Value::Array(
             constants
                 .iter()
-                .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+                .map(|constant| {
+                    let value = if scalars {
+                        &constant.scalar
+                    } else {
+                        &constant.wrapped
+                    };
+                    serde_json::json!({ "name": constant.name, "value": value })
+                })
                 .collect(),
         ),
     );
@@ -468,6 +494,7 @@ pub fn stamp_entity_native_library(
     class_name: &str,
     native_path: &str,
     native_hash: &str,
+    dependency_libraries: &[String],
 ) -> Result<()> {
     // The base entity and its three feature variants (cdata/, scalar/, cdata/scalar/).
     for variant in ["", "cdata", "scalar", "cdata/scalar"] {
@@ -481,6 +508,7 @@ pub fn stamp_entity_native_library(
             .with_context(|| format!("failed to read {}", file.display()))?;
         let content = set_string_const(&content, "PATH", &php_single_quoted(native_path));
         let content = set_string_const(&content, "HASH", &php_single_quoted(native_hash));
+        let content = set_array_const(&content, "LIBRARIES", dependency_libraries);
         let content = set_string_const(
             &content,
             "PNLX_BOOT_TOKEN",
@@ -493,6 +521,32 @@ pub fn stamp_entity_native_library(
 
 /// Replace the value of `<visibility> const string <name> = '<old>';` with
 /// `<value>` (already escaped). No-op if the constant is not found.
+/// Replace an `public const array <name> = [...];` value with a PHP array literal
+/// of the given strings (each single-quoted). Used to stamp the resolved co-load
+/// library paths into the generated entity.
+fn set_array_const(content: &str, name: &str, items: &[String]) -> String {
+    let prefix = format!("public const array {name} = ");
+    let Some(start) = content.find(&prefix) else {
+        return content.to_owned();
+    };
+    let value_start = start + prefix.len();
+    let Some(rel_end) = content[value_start..].find(';') else {
+        return content.to_owned();
+    };
+    let end = value_start + rel_end;
+    let literal = if items.is_empty() {
+        "[]".to_owned()
+    } else {
+        let joined = items
+            .iter()
+            .map(|item| format!("'{}'", php_single_quoted(item)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{joined}]")
+    };
+    format!("{}{literal}{}", &content[..value_start], &content[end..])
+}
+
 fn set_string_const(content: &str, name: &str, value: &str) -> String {
     for visibility in ["public", "protected"] {
         let prefix = format!("{visibility} const string {name} = '");
@@ -555,6 +609,10 @@ pub struct FunctionSignature {
     /// Set for symbol-version renames (ICU's `u_errorName` method dispatches to the
     /// versioned export `u_errorName_74`); `None` when the name *is* the symbol.
     pub(super) native_symbol: Option<String>,
+    /// When set, this function has no FFI binding and its generated method throws
+    /// with this reason (e.g. `static inline`) instead of dispatching. It is not in
+    /// the cdef and is excluded from the alias map and the global-functions API.
+    pub(super) unsupported: Option<String>,
 }
 
 impl FunctionSignature {
@@ -622,6 +680,39 @@ pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
         })
         .filter(|signature| seen.insert(signature.name.clone()))
         .collect()
+}
+
+/// Parse the cdef's function signatures and append the `unsupported` functions
+/// (which are NOT in the cdef, e.g. `static inline`), tagging each so its generated
+/// method throws instead of dispatching. The unsupported declarations are parsed
+/// alongside the cdef so their parameter/return types resolve against the same
+/// typedefs and the stub gets a faithful signature.
+pub fn parse_signatures_with_unsupported(
+    cdef: &str,
+    unsupported: &[crate::header_adapter::UnsupportedFunction],
+) -> Vec<FunctionSignature> {
+    if unsupported.is_empty() {
+        return parse_function_signatures(cdef);
+    }
+    let reason_by_name: BTreeMap<String, String> = unsupported
+        .iter()
+        .filter_map(|function| {
+            parse_function_signature(&function.declaration)
+                .map(|signature| (signature.name, function.reason.clone()))
+        })
+        .collect();
+    let declarations = unsupported
+        .iter()
+        .map(|function| function.declaration.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut signatures = parse_function_signatures(&format!("{cdef}\n{declarations}"));
+    for signature in &mut signatures {
+        if let Some(reason) = reason_by_name.get(&signature.name) {
+            signature.unsupported = Some(reason.clone());
+        }
+    }
+    signatures
 }
 
 /// All `typedef <underlying> <name>;` pairs in the cdef (excluding
@@ -888,6 +979,7 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         params,
         variadic,
         native_symbol: None,
+        unsupported: None,
     })
 }
 
@@ -1099,15 +1191,26 @@ double demo_scale(double value, int factor);\n";
         let entity = generated.join("Demo.php");
         fs::write(
             &entity,
-            "<?php\nclass Demo {\n    protected const string PNLX_BOOT_TOKEN = '';\n    public const string PATH = '';\n    public const string HASH = '';\n}\n",
+            "<?php\nclass Demo {\n    protected const string PNLX_BOOT_TOKEN = '';\n    public const string PATH = '';\n    public const string HASH = '';\n    public const array LIBRARIES = [];\n}\n",
         )
         .unwrap();
 
-        stamp_entity_native_library(generated, "Demo", "/usr/lib/libdemo.dylib", "abc123").unwrap();
+        stamp_entity_native_library(
+            generated,
+            "Demo",
+            "/usr/lib/libdemo.dylib",
+            "abc123",
+            &["/usr/lib/libcblas.so".to_owned()],
+        )
+        .unwrap();
 
         let stamped = fs::read_to_string(entity).unwrap();
         assert!(stamped.contains("protected const string PNLX_BOOT_TOKEN = '__pnlx_boot_abc123';"));
         assert!(stamped.contains("public const string HASH = 'abc123';"));
+        assert!(
+            stamped.contains("public const array LIBRARIES = ['/usr/lib/libcblas.so'];"),
+            "{stamped}"
+        );
     }
 
     #[test]

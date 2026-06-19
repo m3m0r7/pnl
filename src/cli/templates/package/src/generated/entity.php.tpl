@@ -54,5 +54,9 @@ class {{CLASS}} extends \Pnlx\Extension\AbstractExtension
 
     public const string HASH = '{{NATIVE_HASH}}';
 
+    // Extra shared libraries co-loaded alongside this one (the package's
+    // `dependencies` `library_names`), as absolute paths stamped in at install time.
+    public const array LIBRARIES = [];
+
 {{METHODS}}
 }

@@ -87,6 +87,13 @@ struct MethodView {
     /// Whether any parameter is a scalar-pointer out/in-out param, so the call is
     /// routed through `OutParameterMarshaller::call` (allocate holder, write back).
     has_out_params: bool,
+    /// When set, the method has no FFI binding (e.g. a `static inline` with no
+    /// exported symbol): its body throws with this reason and it carries the
+    /// matching marker attribute, instead of dispatching.
+    unsupported_reason: Option<String>,
+    /// The PHP attribute marking why the method is unsupported (e.g. `StaticInline`),
+    /// derived from `unsupported_reason`.
+    unsupported_attribute: Option<String>,
 }
 
 /// A generated global helper function. It dispatches to whichever entity variant
@@ -172,6 +179,11 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
     let mut functions = Vec::new();
     let mut emitted = BTreeSet::new();
     for signature in options.signatures {
+        // An unsupported (`static inline`) function has no FFI binding to delegate
+        // to; its throwing stub lives only as an entity method, not a global function.
+        if signature.unsupported.is_some() {
+            continue;
+        }
         if !emitted.insert(signature.name.clone()) {
             continue;
         }
@@ -380,7 +392,22 @@ fn method_view(
         cast,
         new_class,
         has_out_params,
+        unsupported_reason: signature.unsupported.clone(),
+        unsupported_attribute: signature.unsupported.as_deref().map(unsupported_attribute),
     }
+}
+
+/// The fully-qualified marker attribute for an unsupported-function reason, built
+/// in Rust because its leading backslash must not sit next to a `{{ }}` placeholder
+/// (Handlebars treats `\{{` as an escape and would drop the backslash). Abstract
+/// (no per-library knowledge): `static inline` -> `StaticInline`; any other reason
+/// falls back to a generic marker so the API stays self-describing.
+fn unsupported_attribute(reason: &str) -> String {
+    let class = match reason {
+        "static inline" => "StaticInline",
+        _ => "Unsupported",
+    };
+    format!("\\Pnlx\\Attribute\\{class}")
 }
 
 /// Build the structured parameter views the template renders into accepted-type
