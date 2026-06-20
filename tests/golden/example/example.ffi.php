@@ -79,5 +79,6 @@ struct timeval { long tv_sec; int tv_usec; };
 
 const char *example_version(void);
 int example_add(int left, int right);
+int example_apply(int value, int (*callback)(int));
 
 CDEF;

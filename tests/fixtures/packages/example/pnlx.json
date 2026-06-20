@@ -37,7 +37,7 @@
     {
       "name": "example",
       "path": "include/example.h",
-      "sha256": "787b9dd6187847cd1289232b14cbdcb362dca7dee9f67a8a4f989a4de600e194"
+      "sha256": "97827cacb2517043005761f3f73e8d0661f5e0f42fdc90bf59be4953c4f6fdde"
     }
   ],
   "requires": {

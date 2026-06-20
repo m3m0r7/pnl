@@ -943,6 +943,102 @@ fn is_function_pointer_entity(argument: &Entity<'_>) -> bool {
     }
 }
 
+/// The C spelling of a builtin scalar (or `void`), taken from its `TypeKind` so the
+/// rendered text never carries a typedef name or libclang display junk. Returns
+/// `None` for anything that is not a plain arithmetic/void type (enums, aggregates),
+/// which a caller treats as "not cleanly renderable".
+fn builtin_scalar_spelling(kind: TypeKind) -> Option<&'static str> {
+    Some(match kind {
+        TypeKind::Void => "void",
+        TypeKind::Bool => "_Bool",
+        TypeKind::CharS | TypeKind::CharU => "char",
+        TypeKind::SChar => "signed char",
+        TypeKind::UChar => "unsigned char",
+        TypeKind::Short => "short",
+        TypeKind::UShort => "unsigned short",
+        TypeKind::Int => "int",
+        TypeKind::UInt => "unsigned int",
+        TypeKind::Long => "long",
+        TypeKind::ULong => "unsigned long",
+        TypeKind::LongLong => "long long",
+        TypeKind::ULongLong => "unsigned long long",
+        TypeKind::Float => "float",
+        TypeKind::Double => "double",
+        TypeKind::LongDouble => "long double",
+        _ => return None,
+    })
+}
+
+/// Spelling of one component (the return type or an argument) of a callback's C
+/// signature.
+///
+/// A POINTER component keeps its real, spelled type (`const point *`, `const char
+/// *`) so the PHP closure receives a typed `\FFI\CData` it can read directly without
+/// a cast — the package already emits the struct/typedef, so the type resolves; a
+/// type referenced *only* through a callback is backfilled by [`missing_function_types`]
+/// so the cdef still loads. It degrades to an opaque `void *` only when the spelling
+/// carries syntax the cdef can't place inside a function-pointer declarator: a nested
+/// function pointer's parentheses, an array, or an anonymous aggregate with no name.
+///
+/// A BY-VALUE component must be a plain scalar/`void` (kept at its exact width via
+/// [`builtin_scalar_spelling`]); `None` means it is a by-value aggregate/enum with no
+/// clean rendering, so the whole parameter falls back to an opaque `void *`.
+fn fnptr_component_spelling(ty: &clang::Type<'_>) -> Option<String> {
+    if ty.get_canonical_type().get_pointee_type().is_some() {
+        let display = ty.get_display_name();
+        if display.contains('(')
+            || display.contains('[')
+            || display.contains("unnamed")
+            || display.contains("anonymous")
+        {
+            return Some("void *".to_owned());
+        }
+        return Some(display);
+    }
+    builtin_scalar_spelling(ty.get_canonical_type().get_kind()).map(str::to_owned)
+}
+
+/// Render a single-level function-pointer parameter as a real C function-pointer
+/// type (`RET (*)(ARGS)`, with the `(*)` left empty for [`declarator`] to weave the
+/// parameter name into). Emitting the genuine type — instead of collapsing it to an
+/// opaque `void *` — is what lets PHP FFI build a callback trampoline so a PHP
+/// `callable` can be passed (verified on PHP 8.5: a closure is accepted for a
+/// function-pointer parameter but rejected for a `void *`).
+///
+/// Returns `None` (caller falls back to `void *`, the prior behavior, no regression)
+/// when the type is not exactly one pointer to a function prototype (e.g. gmp's
+/// pointer-to-function-pointer) or when any component is a by-value aggregate/enum
+/// [`fnptr_component_spelling`] won't normalize.
+fn function_pointer_param_type(argument: &Entity<'_>) -> Option<String> {
+    let canonical = argument.get_type()?.get_canonical_type();
+    if canonical.get_kind() != TypeKind::Pointer {
+        return None;
+    }
+    let function = canonical.get_pointee_type()?;
+    if !matches!(
+        function.get_kind(),
+        TypeKind::FunctionPrototype | TypeKind::FunctionNoPrototype
+    ) {
+        return None;
+    }
+    let return_type = fnptr_component_spelling(&function.get_result_type()?)?;
+    let mut parts = function
+        .get_argument_types()
+        .unwrap_or_default()
+        .iter()
+        .map(fnptr_component_spelling)
+        .collect::<Option<Vec<_>>>()?;
+    if function.is_variadic() {
+        parts.push("...".to_owned());
+    }
+    let arguments = if parts.is_empty() {
+        "void".to_owned()
+    } else {
+        parts.join(", ")
+    };
+    Some(format!("{return_type} (*)({arguments})"))
+}
+
 /// Rewrite an array parameter declarator to the equivalent pointer (`T name[N]`
 /// is `T *name` in C). PHP FFI can't size an array of an incomplete struct
 /// (libtiff's `const TIFFFieldInfo arg1[]`), and a fixed byte array param
@@ -1001,11 +1097,16 @@ fn collect_function(
         .enumerate()
         .map(|(index, argument)| {
             let param_name = argument.get_name().unwrap_or_else(|| format!("arg{index}"));
-            // A function-pointer parameter (`int (*cb)(void *)`) has no PHP callable
-            // mapping and its source spelling reconstructs badly; treat it as an
-            // opaque `void *` (callbacks are passed as raw FFI pointers).
+            // A function-pointer parameter (`int (*cb)(void *)`) is rendered as a
+            // real C function-pointer type so PHP FFI can build a callback trampoline
+            // and the generated wrapper can accept a PHP `callable`. When it can't be
+            // reconstructed cleanly (pointer-to-function-pointer, by-value aggregate
+            // arguments) it falls back to an opaque `void *`, the prior behavior.
             if is_function_pointer_entity(argument) {
-                return format!("void *{param_name}");
+                return match function_pointer_param_type(argument) {
+                    Some(pointer_type) => declarator(&pointer_type, &param_name),
+                    None => format!("void *{param_name}"),
+                };
             }
             let type_name = argument
                 .get_type()
@@ -3526,13 +3627,17 @@ fn missing_function_types(
 ) -> BTreeMap<String, MissingTypeKind> {
     let known = known_type_names(collected);
     let mut missing = BTreeMap::new();
-    let mut scan = |fragment: &str| {
+    // `allow_plain_lowercase` is set only when scanning a function-pointer parameter's
+    // component types, which are pure type positions (the generator renders them with
+    // no parameter names) — so an all-lowercase token there is a real type, not a
+    // dropped parameter name, and is safe to backfill.
+    let mut scan = |fragment: &str, allow_plain_lowercase: bool| {
         for (start, token) in identifier_spans(fragment) {
             if is_c_keyword(token)
                 || known.contains(token)
                 || resolved_names.contains(token)
                 || collected.function_names.contains(token)
-                || !looks_like_external_type_name(token)
+                || (!allow_plain_lowercase && !looks_like_external_type_name(token))
             {
                 continue;
             }
@@ -3569,16 +3674,66 @@ fn missing_function_types(
             if type_part.contains('(') || type_part.contains(')') {
                 continue;
             }
-            scan(&type_part);
+            scan(&type_part, false);
+        }
+        // A type named only inside a function-pointer *parameter* (the callback's own
+        // return/argument types) sits in parentheses, so `function_type_parts` skips
+        // it. Scan those components directly so a struct/typedef reached only through a
+        // callback signature is still backfilled and the cdef keeps loading.
+        for component in callback_component_types(function) {
+            scan(&component, true);
         }
     }
     // Also scan typedefs, so a type referenced only inside a function-pointer
     // typedef (mbedtls's `mbedtls_x509_buf` in a callback signature) is backfilled.
     // The typedef's own name is already in `known` (collected.typedef_names).
     for typedef in typedefs {
-        scan(typedef);
+        scan(typedef, false);
     }
     missing
+}
+
+/// The component types inside every function-pointer parameter of a cdef function
+/// declaration — the callback's own return type and argument types. These live
+/// inside the parameter's parentheses, so the top-level [`function_type_parts`] scan
+/// never sees them. The generator renders these components with no parameter names,
+/// so each returned string is a bare type (`const point *`, `int`).
+fn callback_component_types(function: &str) -> Vec<String> {
+    let Some(open) = function.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = function.rfind(')') else {
+        return Vec::new();
+    };
+    let mut components = Vec::new();
+    for param in split_comma_separated(&function[open + 1..close]) {
+        // A function-pointer parameter is `RET (*name)(ARGS)`; the `(*` opens its
+        // declarator. Anything without it is an ordinary parameter handled elsewhere.
+        let Some(star) = param.find("(*") else {
+            continue;
+        };
+        let return_type = param[..star].trim();
+        if !return_type.is_empty() && return_type != "void" {
+            components.push(return_type.to_owned());
+        }
+        // Skip the `(*name)` declarator group, then read the argument list that
+        // follows it.
+        let after_declarator = &param[star..];
+        let Some(declarator_close) = after_declarator.find(')') else {
+            continue;
+        };
+        let rest = &after_declarator[declarator_close + 1..];
+        let (Some(args_open), Some(args_close)) = (rest.find('('), rest.rfind(')')) else {
+            continue;
+        };
+        for argument in split_comma_separated(&rest[args_open + 1..args_close]) {
+            let argument = argument.trim();
+            if !argument.is_empty() && argument != "void" && argument != "..." {
+                components.push(argument.to_owned());
+            }
+        }
+    }
+    components
 }
 
 /// The function name in a cdef declaration like `int foo(int a);` — the
@@ -4231,6 +4386,76 @@ mod tests {
         assert!(cdef.contains("int ex_add(int left, int right);"), "{cdef}");
         assert!(cdef.contains("const char *ex_version(void);"), "{cdef}");
         assert!(cdef.contains("void ex_set_callback("), "{cdef}");
+    }
+
+    #[test]
+    fn renders_function_pointer_parameters_as_real_callbacks() {
+        // A function-pointer parameter is emitted as a genuine C function-pointer
+        // type (not an opaque `void *`) so PHP FFI can build a callback trampoline,
+        // and each component keeps its real, spelled type so the closure receives a
+        // typed CData.
+        let inline_cb = cdef(
+            "int ex_walk(int (*visit)(int item));\n\
+             void ex_sort(int *base, int n, int (*cmp)(const void *a, const void *b));\n",
+        );
+        assert!(
+            inline_cb.contains("int ex_walk(int (*visit)(int));"),
+            "inline scalar callback not rendered: {inline_cb}"
+        );
+        assert!(
+            inline_cb.contains("int (*cmp)(const void *, const void *)"),
+            "callback pointer args should keep their real spelling: {inline_cb}"
+        );
+        // A callback reached through a typedef is expanded the same way.
+        let typedef_cb = cdef(
+            "typedef void (*ex_cb)(int code, void *user);\n\
+             void ex_on(ex_cb cb, void *user);\n",
+        );
+        assert!(
+            typedef_cb.contains("void ex_on(void (*cb)(int, void *), void *user);"),
+            "typedef'd callback not expanded: {typedef_cb}"
+        );
+        // A callback argument of a package-defined struct keeps the real struct type
+        // (the closure gets a typed CData), and the struct definition is present.
+        let struct_cb = cdef(
+            "typedef struct ex_point { int x; int y; } ex_point;\n\
+             int ex_each(int (*cb)(const ex_point *pt));\n",
+        );
+        assert!(
+            struct_cb.contains("int (*cb)(const struct ex_point *)"),
+            "defined struct callback arg should keep its type: {struct_cb}"
+        );
+        // A pointer-to-function-pointer can't be a PHP callable, so it falls back to
+        // the opaque `void *` rendering (no regression).
+        let nested_cb = cdef("void ex_slot(void (**slot)(int));\n");
+        assert!(
+            nested_cb.contains("void ex_slot(void *slot);"),
+            "pointer-to-function-pointer should stay opaque: {nested_cb}"
+        );
+    }
+
+    #[test]
+    fn extracts_callback_component_types_for_backfill() {
+        use super::callback_component_types;
+        // The return type and each argument type inside a function-pointer parameter
+        // are surfaced so a type reached only through a callback can be backfilled.
+        assert_eq!(
+            callback_component_types(
+                "int ex_each(int value, struct ex_node *(*cb)(const ex_point *, int));"
+            ),
+            vec![
+                "struct ex_node *".to_owned(),
+                "const ex_point *".to_owned(),
+                "int".to_owned(),
+            ]
+        );
+        // An ordinary (non-callback) parameter contributes no components, and a
+        // `void` argument list is skipped.
+        assert!(callback_component_types("int ex_add(int a, int b);").is_empty());
+        assert_eq!(
+            callback_component_types("void ex_on(void (*cb)(void));"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

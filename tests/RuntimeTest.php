@@ -295,6 +295,26 @@ class RuntimeTest extends TestCase
         self::assertSame(5, $wrapped->toInt());
     }
 
+    public function testRuntimePassesPhpCallableAsCCallback(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+
+        // A C function-pointer parameter is generated as a `callable` argument. The
+        // PHP closure is passed straight through to PHP FFI, which builds a C callback
+        // trampoline; the native example_apply invokes it synchronously and returns
+        // its result plus one (20 * 2 + 1).
+        $result = $cls::example_apply(20, static fn (int $value): int => $value * 2);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $result);
+        self::assertSame(41, $result->toInt());
+
+        // A plain callable (a named function) is accepted by the `callable` hint too.
+        $result = $cls::example_apply(5, 'Pnlx\\Tests\\example_callback_increment');
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $result);
+        self::assertSame(7, $result->toInt());
+    }
+
     public function testFunctionLikeMacrosBecomePhpFunctions(): void
     {
         $runtime = new Runtime(self::$workspace->projectRoot);
@@ -454,4 +474,14 @@ class RuntimeTest extends TestCase
         self::assertSame(self::$workspace->nativeLibraryPath, $native['path']);
         self::assertSame(hash_file('sha256', self::$workspace->nativeLibraryPath), $native['sha256']);
     }
+}
+
+/**
+ * A named callable target for {@see RuntimeTest::testRuntimePassesPhpCallableAsCCallback()};
+ * proves a plain function name (not only a closure) satisfies the generated
+ * `callable` parameter and reaches the native callback.
+ */
+function example_callback_increment(int $value): int
+{
+    return $value + 1;
 }

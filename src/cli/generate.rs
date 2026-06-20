@@ -655,6 +655,11 @@ pub fn apply_symbol_aliases(signatures: &mut Vec<FunctionSignature>, aliases: &[
 pub(super) struct FunctionParam {
     pub(super) name: String,
     pub(super) type_name: String,
+    /// A C function-pointer parameter (`int (*cb)(int)`). Its `type_name` stays
+    /// `void *` so it still marshals as a pointer, but the generated wrapper types
+    /// it as a PHP `callable` (PHP FFI accepts a closure for a function-pointer
+    /// argument).
+    pub(super) callback: bool,
 }
 
 pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
@@ -1075,12 +1080,14 @@ fn parse_param(param: &str, index: usize) -> FunctionParam {
         return FunctionParam {
             name: sanitize_php_param_name(&name, index),
             type_name,
+            callback: false,
         };
     }
 
     FunctionParam {
         name: format!("arg{index}"),
         type_name: param.to_owned(),
+        callback: false,
     }
 }
 
@@ -1092,6 +1099,7 @@ fn parse_function_pointer_param(param: &str, index: usize) -> Option<FunctionPar
     Some(FunctionParam {
         name: sanitize_php_param_name(name, index),
         type_name: "void *".to_owned(),
+        callback: true,
     })
 }
 
@@ -1249,7 +1257,8 @@ void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, co
             signatures[0].params,
             vec![FunctionParam {
                 name: "format".to_owned(),
-                type_name: "const char *".to_owned()
+                type_name: "const char *".to_owned(),
+                callback: false,
             }]
         );
         assert_eq!(signatures[1].name, "qsort");
@@ -1258,7 +1267,8 @@ void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, co
             signatures[1].params[3],
             FunctionParam {
                 name: "compar".to_owned(),
-                type_name: "void *".to_owned()
+                type_name: "void *".to_owned(),
+                callback: true,
             }
         );
     }

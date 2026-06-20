@@ -36,6 +36,10 @@ struct ParamView {
     /// A single-level `void *` parameter, whose accepted-type union also admits a
     /// PHP `string` (PHP FFI passes the string's bytes as the pointer).
     void_pointer: bool,
+    /// A C function-pointer parameter: the wrapper types it as a PHP `callable` (a
+    /// closure/function name PHP FFI turns into a C callback). Mutually exclusive
+    /// with the other type flags.
+    callback: bool,
     cdata: bool,
     /// Whether this is a by-reference out/in-out pointer parameter (`int *`,
     /// `char **`, `T **`), rendered with `#[NativePointer(...)]` and `&$name`.
@@ -431,6 +435,7 @@ fn param_views(
                 is_pointer: false,
                 pointer_class: None,
                 void_pointer: false,
+                callback: false,
                 cdata: allow_cdata,
                 native_pointer: false,
                 np_element: String::new(),
@@ -439,6 +444,13 @@ fn param_views(
                 np_wrap: None,
                 default_null: false,
             };
+            // A C function-pointer parameter accepts a PHP `callable`; it still
+            // marshals as a pointer (its `type_name` is `void *`), so it skips the
+            // pointer/scalar type classification below.
+            if param.callback {
+                view.callback = true;
+                return view;
+            }
             // A non-const `char *` is a writable byte buffer the call fills in: a
             // by-reference out-parameter the caller pre-sizes (it takes precedence
             // over the `const char *` string-input classification below).

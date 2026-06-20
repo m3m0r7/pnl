@@ -18,6 +18,11 @@ enum example_mode {
 const char *example_version(void);
 int example_add(int left, int right);
 
+// A function-pointer parameter is rendered as a real C callback type (not an opaque
+// void *) so a PHP `callable` can be passed; example_apply invokes the callback
+// synchronously and returns its result plus one.
+int example_apply(int value, int (*callback)(int));
+
 // A static inline helper has no exported symbol, so it cannot be bound through FFI;
 // it is surfaced as a throwing stub method (marked #[StaticInline]) instead of
 // being dropped.

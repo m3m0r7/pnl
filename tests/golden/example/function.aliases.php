@@ -21,11 +21,15 @@ declare(strict_types=1);
 
 return [
     'ExampleAdd' => 'example_add',
+    'ExampleApply' => 'example_apply',
     'ExampleVersion' => 'example_version',
     'exampleAdd' => 'example_add',
+    'exampleApply' => 'example_apply',
     'exampleVersion' => 'example_version',
     'example_add' => 'example_add',
+    'example_apply' => 'example_apply',
     'example_version' => 'example_version',
     'exampleadd' => 'example_add',
+    'exampleapply' => 'example_apply',
     'exampleversion' => 'example_version',
 ];
