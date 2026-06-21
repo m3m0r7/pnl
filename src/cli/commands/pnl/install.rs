@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::archive::{extract_extension_archive, is_archive_source};
-use crate::commands::pnlx::{generate_installed_package_artifacts, read_existing_ffi_cdef};
+use crate::commands::pnlx::{
+    generate_installed_package_artifacts, manifest_requires_libclang, read_existing_ffi_cdef,
+};
 use crate::fetch::{fetch_asset, is_remote_source};
 use crate::generate::parse_function_signatures;
 use crate::git_source::{GitSource, install_git_source};
@@ -912,6 +914,14 @@ fn install_local_extension(
             crate::platform::describe_platform(&current),
             supported
         );
+    }
+
+    // Fail fast with an actionable, platform-specific message before installing
+    // dependencies and resolving native-library headers when libclang — the one hard
+    // requirement for generating this package's bindings — is missing. Packages whose
+    // requirements all use the curated verbatim-header path need no parse and skip it.
+    if manifest_requires_libclang(&extension) {
+        crate::header_adapter::ensure_libclang_available()?;
     }
 
     // Enforce an `@<version>` pin or a lockfile restore against the resolved version.

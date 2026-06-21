@@ -120,6 +120,12 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         .clone()
         .map(Ok)
         .unwrap_or_else(|| resolve_library_key(target, package_leaf, &manifest))?;
+    // Fail fast with an actionable, platform-specific message before resolving and
+    // reading headers when libclang — the one hard requirement for this path — is
+    // missing. Skipped for the curated verbatim-header libraries that need no parse.
+    if library_requires_libclang(&manifest, &library_key) {
+        crate::header_adapter::ensure_libclang_available()?;
+    }
     let headers =
         if let Some(headers) = resolve_headers_from_pathmap(root, &library_key, &manifest)? {
             headers
@@ -175,6 +181,26 @@ fn resolve_definition_defaults(
             })
         })
         .collect()
+}
+
+/// The symbol prefix the generator will actually use for `library_key`: the
+/// requirement's declared prefix, else one derived from the key. An empty prefix is
+/// the curated verbatim-header path (e.g. libc) that emits a cdef without libclang;
+/// anything non-empty means libclang is required to read the C headers.
+pub(crate) fn library_requires_libclang(manifest: &PnlxManifest, library_key: &str) -> bool {
+    !symbol_prefix_for_library(manifest, library_key)
+        .unwrap_or_else(|| symbol_prefix_from_library_key(library_key))
+        .trim()
+        .is_empty()
+}
+
+/// Whether generating any of this package's bindings will invoke libclang — used to
+/// preflight the toolchain before downloading dependencies and native-library headers.
+pub(crate) fn manifest_requires_libclang(manifest: &PnlxManifest) -> bool {
+    manifest
+        .requires
+        .keys()
+        .any(|key| library_requires_libclang(manifest, key))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -441,4 +467,28 @@ fn publish_pnlx(root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod libclang_gate_tests {
+    use super::*;
+
+    #[test]
+    fn requires_libclang_when_a_requirement_derives_a_symbol_prefix() {
+        // The default manifest's `native` requirement has no explicit prefix, so the
+        // generator derives one from the key — meaning libclang is needed to parse it.
+        let manifest = PnlxManifest::default();
+        assert!(manifest_requires_libclang(&manifest));
+        assert!(library_requires_libclang(&manifest, "native"));
+    }
+
+    #[test]
+    fn skips_libclang_for_an_empty_prefix_verbatim_header() {
+        // An explicit empty prefix is the curated verbatim-header path (e.g. libc):
+        // the cdef is emitted without libclang, so the preflight must not fire.
+        let mut manifest = PnlxManifest::default();
+        manifest.requires.get_mut("native").unwrap().symbol_prefix = Some(String::new());
+        assert!(!library_requires_libclang(&manifest, "native"));
+        assert!(!manifest_requires_libclang(&manifest));
+    }
 }

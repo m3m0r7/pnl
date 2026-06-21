@@ -143,10 +143,20 @@ pub struct EnumDef {
 /// Whether libclang can be loaded right now — used by `pnl -i` to report toolchain
 /// readiness without attempting a full header parse.
 pub fn libclang_available() -> bool {
+    ensure_libclang_available().is_ok()
+}
+
+/// Preflight that libclang can be loaded, returning the actionable, platform-specific
+/// message on failure. Used to fail fast — before any download or native-library
+/// resolution — when the one hard requirement for reading C headers is missing.
+/// `cdef_from_header` still loads its own instance for the actual parse.
+pub fn ensure_libclang_available() -> Result<()> {
     let _guard = CLANG_GUARD
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    Clang::new().is_ok()
+    Clang::new()
+        .map(|_| ())
+        .map_err(|err| anyhow!("{}", libclang_unavailable_message(&err)))
 }
 
 /// An actionable, platform-specific error for when libclang cannot be loaded.
