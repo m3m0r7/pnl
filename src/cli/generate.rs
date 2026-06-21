@@ -1142,12 +1142,12 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         || !line.contains('(')
         || line.starts_with("typedef ")
         // Struct/enum/union definitions and aggregates carry braces; never a
-        // plain function prototype.
+        // plain function prototype. (A bare `struct foo;`/`struct foo bar;` has no
+        // `(`, and a definition has `{}`, so those are already excluded — but a
+        // function RETURNING a struct pointer, `struct archive *archive_read_new(…)`,
+        // also begins with `struct ` and MUST still parse, so don't reject on that.)
         || line.contains('{')
         || line.contains('}')
-        || line.starts_with("struct ")
-        || line.starts_with("union ")
-        || line.starts_with("enum ")
     {
         return None;
     }

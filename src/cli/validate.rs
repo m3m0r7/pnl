@@ -269,14 +269,21 @@ pub fn normalize_semver(version: &str) -> Result<semver::Version> {
         None => (version, ""),
     };
 
-    let mut parts = core.split('.').collect::<Vec<_>>();
-    if parts.is_empty()
-        || parts
-            .iter()
+    if core.is_empty()
+        || core
+            .split('.')
             .any(|part| part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()))
     {
         bail!("invalid semantic version: {version}");
     }
+    // Strip per-component leading zeros: real libraries publish calendar-style
+    // pkg-config versions (poppler's `26.01.0`) that are all-digits but invalid
+    // semver. Canonicalize each component to its bare integer form.
+    let mut parts = core
+        .split('.')
+        .map(|part| part.trim_start_matches('0'))
+        .map(|part| if part.is_empty() { "0" } else { part })
+        .collect::<Vec<_>>();
     while parts.len() < 3 {
         parts.push("0");
     }
@@ -326,5 +333,30 @@ pub fn sanitize_package_segment(value: &str) -> Result<String> {
         Ok(normalized)
     } else {
         bail!("invalid package segment: {value}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_semver;
+
+    #[test]
+    fn normalizes_partial_and_overlong_versions() {
+        // Padded up to three components.
+        assert_eq!(normalize_semver("1.5").unwrap().to_string(), "1.5.0");
+        assert_eq!(normalize_semver("74").unwrap().to_string(), "74.0.0");
+        // Already canonical is unchanged.
+        assert_eq!(normalize_semver("8.7.1").unwrap().to_string(), "8.7.1");
+        // Four-component pkg-config versions (e.g. z3's `4.15.4.0`) are truncated
+        // to a lock-safe `major.minor.patch`.
+        assert_eq!(normalize_semver("4.15.4.0").unwrap().to_string(), "4.15.4");
+        assert_eq!(normalize_semver("1.2.3.4.5").unwrap().to_string(), "1.2.3");
+        // Calendar-style components with leading zeros (poppler's `26.01.0`) are
+        // canonicalized to bare integers.
+        assert_eq!(normalize_semver("26.01.0").unwrap().to_string(), "26.1.0");
+        assert_eq!(normalize_semver("1.05").unwrap().to_string(), "1.5.0");
+        assert_eq!(normalize_semver("00.00.00").unwrap().to_string(), "0.0.0");
+        // Non-numeric components are rejected.
+        assert!(normalize_semver("1.x").is_err());
     }
 }

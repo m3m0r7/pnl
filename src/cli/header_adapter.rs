@@ -222,6 +222,19 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
 
     let owned_dirs = owned_package_dirs(&options.package_header_paths);
     let mut include_dirs = include_search_dirs(&options.package_header_paths);
+    // The original headers are inlined into a temp `header.h`, so libclang can no
+    // longer resolve their sibling quote-includes (`#include "unitypes.h"`)
+    // relative to the original location. Add each resolved header's own directory
+    // so those siblings resolve — they frequently define the very macros/types the
+    // API declarations depend on (libunistring's `_UC_ATTRIBUTE_CONST` and `ucs4_t`
+    // live in unitypes.h next to unictype.h; without it every `uc_is_*` decl drops).
+    for path in &options.package_header_paths {
+        if let Some(parent) = path.parent().map(Path::to_path_buf)
+            && !include_dirs.contains(&parent)
+        {
+            include_dirs.push(parent);
+        }
+    }
     // The pkg-config `--cflags` dirs (libdir configs etc.) the compiler would see.
     for dir in &options.extra_include_dirs {
         if !include_dirs.contains(dir) {
@@ -712,7 +725,17 @@ fn entity_owned(entity: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf])
     if path.file_name() == main_header.file_name() {
         return true;
     }
-    owned_dirs.iter().any(|dir| path.starts_with(dir))
+    // A header can be reached through several symlink spellings of the same real
+    // directory: Homebrew exposes the same Cellar dir as `/opt/homebrew/include/<pkg>`,
+    // `/opt/homebrew/opt/<pkg>/include/<pkg>`, and the Cellar path itself, and
+    // libclang reports whichever `-I` spelling it used. Compare both the raw path
+    // and its symlink-resolved form against the (also symlink-augmented) owned
+    // dirs, so a sub-header declaration (jasper's `jas_getversion`) is recognised
+    // regardless of which spelling each side happens to use.
+    let canonical = std::fs::canonicalize(&path).ok();
+    owned_dirs.iter().any(|dir| {
+        path.starts_with(dir) || canonical.as_deref().is_some_and(|real| real.starts_with(dir))
+    })
 }
 
 /// Directories whose headers count as part of this package: each resolved
@@ -721,18 +744,32 @@ fn entity_owned(entity: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf])
 /// where libraries keep their split-out sub-headers.
 fn owned_package_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
+    // Add `dir` and, when it differs, its symlink-resolved real path. Homebrew
+    // exposes headers through `/opt/homebrew/include/<pkg>` symlinks into
+    // `…/Cellar/<pkg>/<ver>/include/<pkg>`, but libclang reports the canonical
+    // Cellar path for `#include`d sub-headers. Without the canonical variant,
+    // `entity_owned`'s `starts_with` check drops every sub-header declaration
+    // (e.g. jasper's `jas_getversion`, libfido2's `fido_strerr`).
+    let push = |dir: PathBuf, dirs: &mut Vec<PathBuf>| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir.clone());
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&dir)
+            && canonical != dir
+            && !dirs.contains(&canonical)
+        {
+            dirs.push(canonical);
+        }
+    };
     for path in paths {
         let Some(parent) = path.parent() else {
             continue;
         };
-        if !is_system_include_root(parent) && !dirs.contains(&parent.to_path_buf()) {
-            dirs.push(parent.to_path_buf());
+        if !is_system_include_root(parent) {
+            push(parent.to_path_buf(), &mut dirs);
         }
         if let Some(stem) = path.file_stem() {
-            let sub = parent.join(stem);
-            if !dirs.contains(&sub) {
-                dirs.push(sub);
-            }
+            push(parent.join(stem), &mut dirs);
         }
     }
     dirs
@@ -876,6 +913,34 @@ fn collect(translation_unit: &Entity<'_>, main_header: &Path, owned_dirs: &[Path
     collected.typedefs.sort();
     collected.typedefs.dedup();
     collected
+}
+
+/// Whether an aggregate body string (`struct X { … }`) declares a field whose
+/// identifier collides with a known type name — the signature of a parse corrupted
+/// by an undefined annotation macro (glib's `G_GNUC_BEGIN_IGNORE_DEPRECATIONS`
+/// around poppler's `GTime mtime;` shifts the declarator so libclang reports the
+/// *type* token, e.g. `GString`, as the field name). Emitting `int GString;` where
+/// `GString` is a typedef makes PHP FFI reject the whole cdef, so such a struct must
+/// stay opaque. Conservatively skips bodies with nested aggregates (anonymous
+/// `struct {…}` members), whose `;`-split would misparse.
+fn body_has_type_named_field(body: &str, type_names: &BTreeSet<String>) -> bool {
+    let (Some(open), Some(close)) = (body.find('{'), body.rfind('}')) else {
+        return false;
+    };
+    let inner = &body[open + 1..close];
+    if inner.contains('{') {
+        return false;
+    }
+    inner.split(';').any(|field| {
+        // The declared identifier is the last `\w+` token, after dropping an array
+        // suffix (`x[4]`) or bitfield width (`x : 3`).
+        let field = field.split('[').next().unwrap_or(field);
+        let field = field.split(':').next().unwrap_or(field);
+        field
+            .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .find(|token| !token.is_empty())
+            .is_some_and(|ident| type_names.contains(ident))
+    })
 }
 
 /// Record the enum's name (projected onto `int` in the cdef) and each of its
@@ -2495,7 +2560,21 @@ fn int_constructor_arg(value: i128) -> String {
 /// A PHP float literal that always reads back as a float (Rust's `{:?}` keeps a
 /// `.0` on whole numbers and uses `e` notation where needed).
 fn float_literal_text(value: f64) -> String {
-    format!("{value:?}")
+    // Rust's `{:?}` renders non-finite floats as `inf`/`-inf`/`NaN`, none of which
+    // are valid PHP — PHP spells them with the predefined constants `INF`/`NAN`. A
+    // macro that evaluates to one (duktape's `DUK_DOUBLE_INFINITY = (1.0 / 0.0)`)
+    // would otherwise emit `const … = inf;` → "Undefined constant".
+    if value.is_nan() {
+        "NAN".to_owned()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-INF".to_owned()
+        } else {
+            "INF".to_owned()
+        }
+    } else {
+        format!("{value:?}")
+    }
 }
 
 /// A resolved `require_definitions` value as a typed constant, by its declaration
@@ -3441,10 +3520,36 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
     // every by-value aggregate member must itself be emittable (transitively).
     let (emit_structs, emit_unions) = emittable_aggregates(collected);
 
+    // Every type name the cdef will emit, including pool types resolved on demand
+    // (`resolved_names`) and the final typedef set. Used to detect an aggregate whose
+    // field name was corrupted into a type token (see `body_has_type_named_field`):
+    // emitting it would make PHP FFI reject the whole cdef, so keep it opaque.
+    let mut all_type_names = declared_type_names.clone();
+    all_type_names.extend(resolved_names.iter().cloned());
+    all_type_names.extend(typedefs.iter().filter_map(|d| typedef_defined_name(d)));
+    all_type_names.extend(missing_types.iter().map(|(name, _)| name.clone()));
+    // PHP FFI's intrinsic type names (`off_t`, `time_t`, `size_t`, …) are never
+    // emitted as typedefs but still collide with a same-named param/field.
+    all_type_names.extend(builtin_type_names());
+
+    // Re-run the parameter/type collision rename against the COMPLETE type set: the
+    // earlier pass used `declared_type_names`, which lacks pool-resolved and
+    // `missing_types` names. An unnamed param of such a type takes the type's
+    // spelling as its name (libarchive's `archive_entry_set_atime(…, __LA_TIME_T, …)`
+    // → `int time_t`), and `time_t` is also an emitted typedef, so PHP FFI would
+    // reject `int time_t;`. Renaming the colliding param keeps the cdef valid.
+    let functions: Vec<String> = functions
+        .iter()
+        .map(|function| rename_type_colliding_params(function, &all_type_names))
+        .collect();
+
     out.push('\n');
     out.push_str("struct timeval { long tv_sec; int tv_usec; };\n");
     for (name, definition) in &collected.unions {
         if !emit_unions.contains(name) {
+            continue;
+        }
+        if body_has_type_named_field(definition, &all_type_names) {
             continue;
         }
         out.push_str(&project_enums_to_int(definition, &no_enums));
@@ -3455,6 +3560,9 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
         // (an embedded system `struct sockaddr_in`, or an unsafe union) can't be
         // laid out; keep it opaque (forward-declared only).
         if struct_definition_tag(definition).is_none_or(|tag| !emit_structs.contains(tag)) {
+            continue;
+        }
+        if body_has_type_named_field(definition, &all_type_names) {
             continue;
         }
         out.push_str(&project_enums_to_int(definition, &no_enums));
@@ -4007,6 +4115,13 @@ fn builtin_type_names() -> BTreeSet<String> {
         "ssize_t",
         "intptr_t",
         "uintptr_t",
+        // PHP FFI knows these intrinsically (no typedef needed/allowed); a param or
+        // field named after one — zlib's unnamed `z_off_t` param becomes `int off_t`
+        // — must be renamed or the cdef is rejected ("unexpected '<ID>'"). NOTE:
+        // `time_t` is NOT here — PHP FFI does NOT know it, so it must keep its emitted
+        // `typedef int time_t;` (suppressing it breaks libarchive's `time_t` returns).
+        "off_t",
+        "ptrdiff_t",
         "uint8_t",
         "uint16_t",
         "uint32_t",
@@ -4025,6 +4140,17 @@ fn builtin_type_names() -> BTreeSet<String> {
         "Sint64",
         "wchar_t",
         "va_list",
+        // Non-standard but widespread integer aliases (SysV/BSD), defined in the
+        // prelude. Real libraries use them in their public API (HTML Tidy's `uint`)
+        // but their `typedef` often lives in a platform header libclang never sees.
+        "uchar",
+        "ushort",
+        "uint",
+        "ulong",
+        "u_char",
+        "u_short",
+        "u_int",
+        "u_long",
         // GLib fundamental types, defined in the prelude (their real definitions
         // live in a libdir `glibconfig.h` libclang never sees). Listed here so the
         // missing-type backfill treats them as known and never re-emits them.
@@ -4461,6 +4587,13 @@ fn rename_param_if_type(param: &str, index: usize, type_names: &BTreeSet<String>
         return param.to_owned();
     }
     let type_part = trimmed[..start].trim_end();
+    // If everything before the trailing identifier is only cv-qualifiers, the
+    // identifier IS an unnamed param's type (`const CBLAS_ORDER`, or `const int`
+    // after enum projection), NOT a name — renaming it would destroy the type
+    // (`const arg0`). Leave it alone.
+    if type_part.is_empty() || type_part.split_whitespace().all(is_type_qualifier_keyword) {
+        return param.to_owned();
+    }
     let connector = if type_part.ends_with('*') { "" } else { " " };
     format!(" {type_part}{connector}arg{index}")
 }
@@ -4545,7 +4678,51 @@ impl Drop for Workspace {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{HeaderAdapterOptions, HeaderArtifacts, cdef_from_header};
+    use super::{HeaderAdapterOptions, HeaderArtifacts, cdef_from_header, owned_package_dirs};
+
+    #[test]
+    fn body_has_type_named_field_flags_type_named_fields() {
+        use super::body_has_type_named_field;
+        use std::collections::BTreeSet;
+        let types: BTreeSet<String> = ["GString", "GTime"].iter().map(|s| s.to_string()).collect();
+        // A field named after a type (corrupted parse) is flagged.
+        assert!(body_has_type_named_field(
+            "struct _PopplerAttachment { int parent; gchar *name; int GTime; int ctime; int GString; };",
+            &types,
+        ));
+        // A clean struct (no field name collides with a type) is not.
+        assert!(!body_has_type_named_field(
+            "struct Clean { int a; double b; char *name; unsigned long size; };",
+            &types,
+        ));
+        // Nested anonymous aggregates are conservatively skipped (not flagged).
+        assert!(!body_has_type_named_field(
+            "struct Nested { struct { int x; } GString; };",
+            &types,
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_package_dirs_resolves_symlinked_include_roots() {
+        // Homebrew exposes a package's headers through a symlinked include dir
+        // (`/opt/homebrew/include/<pkg>` -> `…/Cellar/<pkg>/<ver>/include/<pkg>`),
+        // but libclang reports the real Cellar path for `#include`d sub-headers.
+        // `owned_package_dirs` must surface the resolved real dir too, or those
+        // sub-header declarations are dropped as "not owned".
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("Cellar/pkg/1.0/include/pkg");
+        std::fs::create_dir_all(&real).expect("mkdir real");
+        let link = tmp.path().join("link-pkg");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let dirs = owned_package_dirs(&[link.join("pkg.h")]);
+        let canonical_real = std::fs::canonicalize(&real).expect("canonicalize");
+        assert!(
+            dirs.contains(&link) && dirs.iter().any(|d| *d == canonical_real),
+            "expected both the symlink dir and its resolved real dir, got {dirs:?}"
+        );
+    }
 
     fn artifacts(header: &str) -> HeaderArtifacts {
         cdef_from_header(

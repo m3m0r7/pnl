@@ -8,7 +8,7 @@ use crate::fetch::fetch_asset;
 use crate::manifest::{
     LibraryName, LoadType, NativeRequirement, PnlManifest, ResolvedHeader, ResolvedNativeLibrary,
 };
-use crate::validate::validate_semver;
+use crate::validate::{normalize_semver, validate_semver};
 
 use super::package::{absolutize, sha256_file, sha256_hex};
 
@@ -648,7 +648,16 @@ fn pkg_config_modules(key: &str) -> Vec<String> {
 }
 
 fn pkg_config_version(key: &str) -> Option<String> {
-    crate::pkg_config::modversion(&pkg_config_modules(key))
+    crate::pkg_config::modversion(&pkg_config_modules(key)).map(|version| {
+        // pkg-config `Version:` fields are not constrained to three components
+        // (z3 reports `4.15.4.0`), but the lockfile schema and the `semver` crate
+        // expect a canonical `major.minor.patch`. Canonicalize here so every
+        // resolution path records a lock-safe version; fall back to the raw value
+        // if it cannot be parsed, letting the later `validate_semver` surface it.
+        normalize_semver(&version)
+            .map(|canonical| canonical.to_string())
+            .unwrap_or(version)
+    })
 }
 
 /// The `-I` include directories pkg-config would report for this library (with

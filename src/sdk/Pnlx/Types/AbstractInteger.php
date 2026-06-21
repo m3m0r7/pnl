@@ -32,8 +32,15 @@ abstract class AbstractInteger implements AnySizeInteger, PointerInterface
      *
      * @param int|string|array<mixed>|null $value
      */
-    final public function __construct(int|string|array|null $value = null)
+    final public function __construct(int|string|array|bool|null $value = null)
     {
+        if (is_bool($value)) {
+            // A C `_Bool`/`bool` return surfaces as a native PHP bool through FFI.
+            // Fold it to 0/1 so a `Bool_` (which is an integer wrapper) can store it
+            // instead of tripping the int|string|array|null type guard below.
+            $value = $value ? 1 : 0;
+        }
+
         if ($value === []) {
             // An empty initialiser is "no elements" — a NULL pointer (FFI cannot
             // allocate a zero-length array, and C APIs pass NULL with a count of 0).
