@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -761,18 +760,14 @@ fn is_trusted_extension_source(source: &ExtensionSource, extension_root: &Path) 
 }
 
 fn local_git_origin_url(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8(output.stdout).ok()?;
-    let url = url.trim();
-    (!url.is_empty()).then(|| url.to_owned())
+    // Read `remote.origin.url` through libgit2 (vendored), not the `git` CLI, so
+    // `pnl install` needs no external git binary. `discover` walks up to the repo
+    // root, matching `git -C <path>`'s behaviour from a checkout subdirectory.
+    let repository = git2::Repository::discover(path).ok()?;
+    let origin = repository.find_remote("origin").ok()?;
+    // `url()` errors only when the configured URL is not valid UTF-8; treat that as
+    // "no usable origin" like the other failure paths.
+    origin.url().ok().map(str::to_owned)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1024,7 +1019,7 @@ fn install_local_extension(
         .iter()
         .flat_map(|entry| entry.package_names.iter().cloned())
         .collect();
-    let dependency_libraries =
+    let mut dependency_libraries =
         resolve_dependency_libraries(root, manifest, &dependency_arch_entries)?;
 
     // Map a (recursive) dependency package's C functions to its entity class, so a
@@ -1036,6 +1031,11 @@ fn install_local_extension(
     );
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
+        // Co-load libraries discovered from a GNU ld linker script (e.g. ncurses's
+        // `INPUT(libncurses.so.6 -ltinfo)` → libtinfo) join the declared dependency
+        // co-loads: their exports are unioned for the filter and they are loaded at
+        // runtime, so a symbol split into a sibling `.so` (curses_version) resolves.
+        dependency_libraries.append(&mut native.co_load);
         // Stamp the first-install time, preserving it across reinstalls so the
         // timestamp reflects when the library first entered the workspace.
         native.installed_at = pathmap
@@ -1078,7 +1078,14 @@ fn install_local_extension(
         // the package's own library and every co-load library, so a function exported
         // by a dependency (e.g. a second `.so` in the same package) is kept and stays
         // callable through the one monolithic cdef.
-        let exported = exported_symbols_union(&native_path, &dependency_libraries);
+        // Read exports from the `.tbd` stub when one backs the library (macOS SDK):
+        // `native.path` is the dylib the runtime loads, `export_source` the stub the
+        // filter reads.
+        let export_path = native
+            .export_source
+            .clone()
+            .unwrap_or_else(|| native_path.clone());
+        let exported = exported_symbols_union(&export_path, &dependency_libraries);
         pathmap.requires.insert(key.clone(), native);
         pathmap.headers.insert(key.clone(), header);
         generate_installed_package_artifacts(
@@ -1742,23 +1749,10 @@ mod tests {
         let package = temp.path().join("packages").join("libsdl");
         std::fs::create_dir_all(&package).unwrap();
 
-        let init = std::process::Command::new("git")
-            .arg("init")
-            .arg(temp.path())
-            .output()
+        let repository = git2::Repository::init(temp.path()).unwrap();
+        repository
+            .remote("origin", "git@github.com:m3m0r7/pnl-packages.git")
             .unwrap();
-        assert!(init.status.success());
-        let config = std::process::Command::new("git")
-            .arg("-C")
-            .arg(temp.path())
-            .args([
-                "config",
-                "remote.origin.url",
-                "git@github.com:m3m0r7/pnl-packages.git",
-            ])
-            .output()
-            .unwrap();
-        assert!(config.status.success());
 
         let source = ExtensionSource::File {
             source_url: format!("file://{}", package.display()),

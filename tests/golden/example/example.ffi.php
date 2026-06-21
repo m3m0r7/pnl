@@ -72,13 +72,19 @@ typedef void *gpointer;
 typedef const void *gconstpointer;
 
 struct timeval;
+struct example_point;
 
+typedef struct example_point example_point;
 typedef int example_mode;
 
 struct timeval { long tv_sec; int tv_usec; };
+struct example_point { int x; int y; };
 
 const char *example_version(void);
+example_mode example_next_mode(example_mode mode);
 int example_add(int left, int right);
 int example_apply(int value, int (*callback)(int));
+int example_point_sum(const struct example_point *point);
+void example_point_init(struct example_point *point, int x, int y);
 
 CDEF;

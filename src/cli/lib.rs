@@ -27,6 +27,7 @@ pub mod repository_index;
 pub mod schema;
 pub mod sdk_assets;
 pub mod self_upgrade;
+pub mod tbd;
 pub mod ui;
 pub mod validate;
 pub mod version;

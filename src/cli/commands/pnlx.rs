@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_const_php, generate_context_php,
-    generate_entity_php, generate_exception_php, generate_ffi_php_from_cdef,
+    generate_entity_php, generate_enums_php, generate_exception_php, generate_ffi_php_from_cdef,
     generate_functions_php, generate_index_php, generate_macro_functions_php,
     generate_manifest_php, generate_symbols_php, generate_types_php,
 };
@@ -256,10 +256,11 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         args.artifact_stem,
         crate::config::FFI_FILE_SUFFIX
     ));
-    let (cdef, constants, macro_functions, symbols, symbol_aliases, unsupported_functions) =
+    let (cdef, constants, macro_functions, symbols, symbol_aliases, unsupported_functions, enums) =
         if args.headers.is_empty() {
             (
                 read_existing_ffi_cdef(&out)?,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -289,13 +290,23 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
                 artifacts.symbols,
                 artifacts.symbol_aliases,
                 artifacts.unsupported_functions,
+                artifacts.enums,
             )
         };
+    // The generated PHP enums, by C name, so signature parsing can tag enum-typed
+    // parameters/returns (the wrapper exposes the enum; the dispatched value is int).
+    let enum_names: std::collections::BTreeSet<String> =
+        enums.iter().map(|def| def.name.clone()).collect();
     // Unsupported (`static inline`) functions become throwing stub methods; they are
     // parsed alongside the cdef for faithful types but never put into the FFI cdef.
-    let mut signatures =
-        crate::generate::parse_signatures_with_unsupported(&cdef, &unsupported_functions);
+    let mut signatures = crate::generate::parse_signatures_with_unsupported(
+        &cdef,
+        &unsupported_functions,
+        &enum_names,
+    );
     crate::generate::apply_symbol_aliases(&mut signatures, &symbol_aliases);
+    // Field accessors for the struct wrappers come from the cdef's own struct bodies.
+    let struct_fields = crate::generate::parse_struct_fields(&cdef);
     generate_ffi_php_from_cdef(&cdef, &out)?;
     let ffi_file = out
         .file_name()
@@ -313,6 +324,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         native_library_version: args.native_library_version,
         description: args.description,
         symbols: &symbols,
+        enums: &enums,
+        struct_fields: &struct_fields,
     };
     // Metadata, the CData wrapper, and the per-extension exception are shared by
     // every entity variant.
@@ -329,6 +342,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         &template_options,
     )?;
     generate_types_php(&generated_dir.join("types"), &template_options)?;
+    generate_enums_php(&generated_dir.join("enums"), &template_options)?;
     generate_symbols_php(&generated_dir.join("symbol"), &template_options)?;
     // Four entity variants on two axes, selected at runtime by `index.php`:
     // `allow_cdata` (the `cdata/` subdir, params also accept raw `\FFI\CData`) and

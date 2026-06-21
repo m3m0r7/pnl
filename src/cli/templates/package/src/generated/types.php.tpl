@@ -41,4 +41,61 @@ class {{TYPE}} extends {{BASE}}
             $cdata ?? {{ENTITY}}::pnlxNativeLibrary()->allocate(sprintf('{{TYPE}}[%d]', $size))
         );
     }
-}
+{{#each fields}}
+{{#if is_int}}
+    public function {{getter}}(): int
+    {
+        return $this->cdata()[0]->{{field}};
+    }
+
+    public function {{setter}}(int $value): static
+    {
+        $this->cdata()[0]->{{field}} = $value;
+
+        return $this;
+    }
+{{else}}{{#if is_float}}
+    public function {{getter}}(): float
+    {
+        return $this->cdata()[0]->{{field}};
+    }
+
+    public function {{setter}}(float|int $value): static
+    {
+        $this->cdata()[0]->{{field}} = $value;
+
+        return $this;
+    }
+{{else}}{{#if is_string}}
+    public function {{getter}}(): ?string
+    {
+        return \Pnlx\Util::cStringOrNull($this->cdata()[0]->{{field}});
+    }
+{{else}}{{#if pointer_class}}
+    public function {{getter}}(): ?{{pointer_class}}
+    {
+        $value = $this->cdata()[0]->{{field}};
+
+        return \Pnlx\Util::isNull($value) ? null : new {{pointer_class}}($value);
+    }
+
+    public function {{setter}}({{pointer_class}}|\FFI\CData|null $value): static
+    {
+        $this->cdata()[0]->{{field}} = $value instanceof {{pointer_class}} ? $value->cdata() : $value;
+
+        return $this;
+    }
+{{else}}
+    public function {{getter}}(): mixed
+    {
+        return $this->cdata()[0]->{{field}};
+    }
+
+    public function {{setter}}(mixed $value): static
+    {
+        $this->cdata()[0]->{{field}} = $value;
+
+        return $this;
+    }
+{{/if}}{{/if}}{{/if}}{{/if}}
+{{/each}}}

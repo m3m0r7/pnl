@@ -284,10 +284,29 @@ pub struct PlatformRequirement {
     pub libc: Option<String>,
 }
 
-/// A candidate library file name. A plain string is an ordinary on-disk library;
-/// the object form `{ "name": "libc.dylib", "virtual": true }` marks a library
-/// provided by the system (e.g. libc, which on macOS lives only in the dyld
-/// shared cache) — it is linked by name and never required to exist as a file.
+/// How to read a library's exported symbols (and, by extension, how to treat the
+/// resolved file). `Auto` infers from the file extension (and the running OS); the
+/// explicit variants force a reader, e.g. `tbd` for a macOS SDK text-stub when the
+/// extension is unusual. `Tbd` is special: the symbols come from the `.tbd`, but the
+/// runtime loads the dylib named by the stub's `install-name`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadType {
+    #[default]
+    Auto,
+    Elf,
+    Tbd,
+    Dll,
+    Dylib,
+}
+
+/// A candidate library load route. The `library_names` list is an ordered fallback
+/// chain: each route is tried in turn and the first that resolves wins (so an author
+/// can write `/opt/foo/libfoo.so` → `libfoo.so` → a `virtual` system fallback). A
+/// plain string is an ordinary on-disk library; the object form
+/// `{ "name": "libc.dylib", "virtual": true }` marks a system library linked by
+/// name and never required to exist as a file (libc on macOS lives only in the dyld
+/// shared cache); `load_type` overrides how exports are read (e.g. a `.tbd` stub).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum LibraryName {
@@ -296,6 +315,8 @@ pub enum LibraryName {
         name: String,
         #[serde(rename = "virtual", default)]
         is_virtual: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load_type: Option<LoadType>,
     },
 }
 
@@ -315,6 +336,17 @@ impl LibraryName {
                 ..
             }
         )
+    }
+
+    /// The author-specified export reader, or `Auto` (infer from the extension).
+    pub fn load_type(&self) -> LoadType {
+        match self {
+            Self::Tagged {
+                load_type: Some(load_type),
+                ..
+            } => *load_type,
+            _ => LoadType::Auto,
+        }
     }
 }
 
@@ -527,6 +559,20 @@ pub struct PnlxLockedDependency {
 pub struct ResolvedNativeLibrary {
     pub resolved_name: String,
     pub path: String,
+    /// Where to read this library's exported symbols, when that is NOT `path`
+    /// itself. A `.tbd` stub declares the exports while `path` is the dylib the
+    /// runtime loads (its `install-name`); for an ordinary library this is `None`
+    /// and exports are read from `path`. Not serialized into the pathmap (a
+    /// resolution-time detail).
+    #[serde(skip)]
+    pub export_source: Option<String>,
+    /// Extra shared libraries to co-load alongside `path`, as `name -> path`,
+    /// discovered when the unversioned dev name was a GNU ld linker script
+    /// (`INPUT(libncurses.so.6 -ltinfo)`): the real symbols are split across several
+    /// `.so`s, so they are co-loaded (and their exports unioned) like a multi-`.so`
+    /// dependency. Empty for an ordinary single-file library. Resolution-time only.
+    #[serde(skip)]
+    pub co_load: std::collections::BTreeMap<String, String>,
     pub version: String,
     pub sha256: String,
     /// RFC3339 timestamp of when this native library was first resolved into the

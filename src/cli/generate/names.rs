@@ -28,7 +28,7 @@ fn snake_to_camel(name: &str) -> String {
     }
 }
 
-fn snake_to_pascal(name: &str) -> String {
+pub(super) fn snake_to_pascal(name: &str) -> String {
     name.split('_')
         .filter(|part| !part.is_empty())
         .map(|part| {

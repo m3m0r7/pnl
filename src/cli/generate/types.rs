@@ -346,7 +346,7 @@ fn pascal_type_name(token: &str) -> Option<String> {
 
 /// Append `_` when a derived class name collides with a PHP reserved type word
 /// (case-insensitive), e.g. `Int`→`Int_`, `Float`→`Float_`, `String`→`String_`.
-fn reserved_suffix(name: &str) -> String {
+pub(super) fn reserved_suffix(name: &str) -> String {
     const RESERVED: &[&str] = &[
         "int", "float", "bool", "string", "void", "iterable", "object", "mixed", "never", "null",
         "false", "true", "parent", "self", "static", "enum", "list", "callable", "array",

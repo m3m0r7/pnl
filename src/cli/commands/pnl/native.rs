@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::fetch::fetch_asset;
 use crate::manifest::{
-    LibraryName, NativeRequirement, PnlManifest, ResolvedHeader, ResolvedNativeLibrary,
+    LibraryName, LoadType, NativeRequirement, PnlManifest, ResolvedHeader, ResolvedNativeLibrary,
 };
 use crate::validate::validate_semver;
 
@@ -31,6 +31,8 @@ pub(super) fn resolve_native_library(
         return Ok(ResolvedNativeLibrary {
             resolved_name,
             path: path.display().to_string(),
+            export_source: None,
+            co_load: BTreeMap::new(),
             version,
             sha256: sha256_file(&path)?,
             installed_at: None,
@@ -60,59 +62,34 @@ pub(super) fn resolve_native_library(
         dirs.push(PathBuf::from(format!("/usr/lib/{triplet}")));
         dirs.push(PathBuf::from(format!("/lib/{triplet}")));
     }
+    // macOS keeps no on-disk system dylibs (dyld shared cache); the active SDK ships
+    // `.tbd` text stubs declaring their exports. Adding the SDK lib dir makes those
+    // discoverable like any file, so a `libSystem.B.tbd` route resolves there.
+    dirs.extend(macos_sdk_lib_dirs());
 
     let searched = dedupe_paths(dirs)
         .into_iter()
         .map(|dir| absolutize(root, &dir))
         .collect::<Vec<_>>();
 
-    // Prefer a real on-disk library file (skipping virtual entries). The
-    // unversioned `libfoo.so` is a development symlink that only exists when the
-    // `-dev`/`-devel` package is installed; fall back to a versioned soname
-    // (`libfoo.so.N`), which is what is present on a runtime-only system and is
-    // also what PHP FFI ultimately dlopen()s.
-    for dir in &searched {
-        for name in names.iter().filter(|name| !name.is_virtual()) {
-            if let Some(path) = find_library_file(dir, name.name()) {
-                let version =
-                    pkg_config_version(key).unwrap_or_else(|| native_version_from_key(key));
-                validate_semver(&version)?;
-                let resolved_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(name.name())
-                    .to_owned();
-                return Ok(ResolvedNativeLibrary {
-                    resolved_name,
-                    path: path.display().to_string(),
-                    version,
-                    sha256: sha256_file(&path)?,
-                    installed_at: None,
-                });
-            }
+    // `library_names` is an ORDERED FALLBACK CHAIN: try each route in turn and take
+    // the first that resolves. A route resolves to a real on-disk file when found —
+    // INCLUDING for a `virtual` entry: "virtual" means "no file is REQUIRED", not
+    // "ignore the file if present", so the export filter still runs (dropping a
+    // declared-but-unexported symbol like glibc's `atexit`). A `virtual` route that
+    // matches the OS otherwise resolves by name (the dyld-cache fallback), so the
+    // chain can terminate in a system library that need not exist on disk.
+    for name in names {
+        if let Some(resolved) = resolve_route_file(name, &searched, key)? {
+            return Ok(resolved);
+        }
+        if name.is_virtual() && library_name_matches_os(name.name()) {
+            return virtual_route(name, key);
         }
     }
-
-    // Fall back to a virtual (system) library: linked by name, never required to
-    // exist as a file (e.g. libc, which on macOS lives in the dyld shared cache).
-    // Prefer the name whose extension matches the current OS so that, e.g.,
-    // `libc.so.6` is chosen on Linux rather than the first-listed `libc.dylib`.
-    let virtual_name = names
-        .iter()
-        .find(|name| name.is_virtual() && library_name_matches_os(name.name()))
-        .or_else(|| names.iter().find(|name| name.is_virtual()));
-    if let Some(name) = virtual_name {
-        let version = pkg_config_version(key).unwrap_or_else(|| native_version_from_key(key));
-        validate_semver(&version)?;
-        return Ok(ResolvedNativeLibrary {
-            resolved_name: name.name().to_owned(),
-            // A bare file name (no directory) signals a virtual/system library
-            // that PHP FFI should open by name.
-            path: name.name().to_owned(),
-            version,
-            sha256: sha256_hex(name.name().as_bytes()),
-            installed_at: None,
-        });
+    // Last resort: any virtual route, even if its extension doesn't match the OS.
+    if let Some(name) = names.iter().find(|name| name.is_virtual()) {
+        return virtual_route(name, key);
     }
 
     bail!(
@@ -121,13 +98,195 @@ pub(super) fn resolve_native_library(
     );
 }
 
+/// Resolve one route to a real on-disk file (searching `dirs`), or `None` if no
+/// file is found. A `.tbd` stub (macOS SDK) is read for its exports while the
+/// runtime load target becomes the stub's `install-name` — the `.tbd` itself is
+/// never `dlopen`ed.
+fn resolve_route_file(
+    name: &LibraryName,
+    dirs: &[PathBuf],
+    key: &str,
+) -> Result<Option<ResolvedNativeLibrary>> {
+    let Some(file) = dirs
+        .iter()
+        .find_map(|dir| find_library_file(dir, name.name()))
+    else {
+        return Ok(None);
+    };
+    let version = pkg_config_version(key).unwrap_or_else(|| native_version_from_key(key));
+    validate_semver(&version)?;
+    let resolved_name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(name.name())
+        .to_owned();
+    let is_tbd = matches!(name.load_type(), LoadType::Tbd)
+        || (name.load_type() == LoadType::Auto && file.extension().is_some_and(|ext| ext == "tbd"));
+    if is_tbd {
+        let content = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read tbd stub {}", file.display()))?;
+        let tbd = crate::tbd::parse_tbd(&content)
+            .with_context(|| format!("{} is not a parseable .tbd stub", file.display()))?;
+        // Load target = the stub's install-name (dlopen resolves it from the dyld
+        // cache); exports are read from the `.tbd` file via `export_source`.
+        let load_path = tbd
+            .install_name
+            .unwrap_or_else(|| file.display().to_string());
+        return Ok(Some(ResolvedNativeLibrary {
+            resolved_name,
+            path: load_path,
+            export_source: Some(file.display().to_string()),
+            co_load: BTreeMap::new(),
+            version,
+            sha256: sha256_file(&file)?,
+            installed_at: None,
+        }));
+    }
+    Ok(Some(ResolvedNativeLibrary {
+        resolved_name,
+        path: file.display().to_string(),
+        export_source: None,
+        // A GNU ld linker script at the unversioned dev name (`libncurses.so` =
+        // `INPUT(libncurses.so.6 -ltinfo)`) means the real symbols are split across
+        // several `.so`s; co-load the extras (libtinfo) so their symbols resolve.
+        co_load: linker_script_co_load(dirs, name.name(), &file),
+        version,
+        sha256: sha256_file(&file)?,
+        installed_at: None,
+    }))
+}
+
+/// When the unversioned dev name (`<base>`, e.g. `libncurses.so`) is a GNU ld
+/// linker script, parse its `INPUT(...)`/`GROUP(...)` for the libraries it pulls in
+/// and resolve each to a real path, EXCLUDING the already-resolved primary. The
+/// result is the extra shared objects to co-load (`name -> path`). Empty when there
+/// is no linker script (the common case, and every non-ELF platform).
+fn linker_script_co_load(dirs: &[PathBuf], base: &str, primary: &Path) -> BTreeMap<String, String> {
+    let mut co_load = BTreeMap::new();
+    let Some(script_path) = dirs
+        .iter()
+        .map(|dir| dir.join(base))
+        .find(|path| path.is_file())
+    else {
+        return co_load;
+    };
+    let Ok(content) = std::fs::read_to_string(&script_path) else {
+        return co_load;
+    };
+    let primary_name = primary.file_name().and_then(|n| n.to_str());
+    for lib_name in parse_linker_script_inputs(&content) {
+        if let Some(file) = dirs
+            .iter()
+            .find_map(|dir| find_library_file(dir, &lib_name))
+        {
+            let resolved_name = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&lib_name)
+                .to_owned();
+            // Skip the primary itself (the script lists it alongside its extras).
+            if Some(resolved_name.as_str()) == primary_name {
+                continue;
+            }
+            co_load.insert(resolved_name, file.display().to_string());
+        }
+    }
+    co_load
+}
+
+/// Library file names referenced by a GNU ld linker script's `INPUT(...)` /
+/// `GROUP(...)` / `AS_NEEDED(...)` directives: a bare `libfoo.so.N` token is taken
+/// verbatim, and a `-lfoo` token becomes `libfoo.so` (resolved to its real soname
+/// by [`find_library_file`]). Returns an empty list for a non-linker-script file.
+fn parse_linker_script_inputs(content: &str) -> Vec<String> {
+    // Only treat ASCII text that actually uses the directives as a linker script.
+    if !content.contains("INPUT") && !content.contains("GROUP") {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    // Flatten the directive arguments: replace separators with spaces and read the
+    // tokens. `INPUT ( a b )`, `GROUP(a,b)`, `AS_NEEDED(...)` all reduce to tokens.
+    let flattened: String = content
+        .chars()
+        .map(|ch| match ch {
+            '(' | ')' | ',' => ' ',
+            other => other,
+        })
+        .collect();
+    for token in flattened.split_whitespace() {
+        if matches!(token, "INPUT" | "GROUP" | "OUTPUT_FORMAT" | "AS_NEEDED") {
+            continue;
+        }
+        if let Some(stem) = token.strip_prefix("-l") {
+            if !stem.is_empty() {
+                names.push(format!("lib{stem}.so"));
+            }
+        } else if token.contains(".so") && !token.contains('/') {
+            // A bare shared-object name (e.g. `libncurses.so.6`); ignore absolute
+            // paths and the OUTPUT_FORMAT(...) ELF-flavour tokens.
+            names.push(token.to_owned());
+        }
+    }
+    names
+}
+
+/// A virtual/system library route: linked by name, never required to exist as a
+/// file (libc on macOS lives in the dyld shared cache). No export filter runs (no
+/// file to read), so the chain should keep such routes last.
+fn virtual_route(name: &LibraryName, key: &str) -> Result<ResolvedNativeLibrary> {
+    let version = pkg_config_version(key).unwrap_or_else(|| native_version_from_key(key));
+    validate_semver(&version)?;
+    Ok(ResolvedNativeLibrary {
+        resolved_name: name.name().to_owned(),
+        // A bare file name (no directory) signals a virtual/system library that PHP
+        // FFI should open by name.
+        path: name.name().to_owned(),
+        export_source: None,
+        co_load: BTreeMap::new(),
+        version,
+        sha256: sha256_hex(name.name().as_bytes()),
+        installed_at: None,
+    })
+}
+
+/// The active macOS SDK's `usr/lib` directory (where `.tbd` stubs live), via
+/// `xcrun --show-sdk-path` with an `xcode-select -p` fallback. Empty off macOS.
+fn macos_sdk_lib_dirs() -> Vec<PathBuf> {
+    if std::env::consts::OS != "macos" {
+        return Vec::new();
+    }
+    let run = |program: &str, args: &[&str]| -> Option<String> {
+        let output = ProcessCommand::new(program).args(args).output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    if let Some(sdk) = run("xcrun", &["--show-sdk-path"]).filter(|s| !s.is_empty()) {
+        return vec![PathBuf::from(sdk).join("usr/lib")];
+    }
+    // Fallback: derive the default macOS SDK under the developer dir.
+    if let Some(dev) = run("xcode-select", &["-p"]).filter(|s| !s.is_empty()) {
+        return vec![
+            PathBuf::from(&dev).join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib"),
+            PathBuf::from(&dev).join("SDKs/MacOSX.sdk/usr/lib"),
+        ];
+    }
+    Vec::new()
+}
+
 /// Locate a library file in `dir`: the exact `base` name if present, otherwise
 /// a versioned soname `base.N[.N...]` (e.g. `libgmp.so` -> `libgmp.so.10`).
 /// Among versioned matches the shortest name wins, which is the soname symlink
 /// (`libfoo.so.2`) rather than the fully-qualified file (`libfoo.so.2.0.9`).
 fn find_library_file(dir: &Path, base: &str) -> Option<PathBuf> {
     let exact = dir.join(base);
-    if exact.is_file() {
+    // Accept the exact name only if it is something the runtime can actually load:
+    // a real shared object, or a `.tbd` stub. A bare `libfoo.so` is often a GNU ld
+    // linker script (a tiny text file, `INPUT(libfoo.so.6 …)`) which `FFI` can't
+    // `dlopen` ("file too short"); skip it and fall through to the versioned soname
+    // `libfoo.so.N`, which is the real object (and what dlopen resolves at runtime).
+    if exact.is_file() && is_loadable_library_file(&exact) {
         return Some(exact);
     }
     let prefix = format!("{base}.");
@@ -148,6 +307,32 @@ fn find_library_file(dir: &Path, base: &str) -> Option<PathBuf> {
     matches.into_iter().next()
 }
 
+/// Whether a file is something the runtime can load as a native library: a real
+/// shared object (ELF / Mach-O / PE, detected by magic) or a macOS `.tbd` text
+/// stub. A GNU ld linker script (ASCII text that is not a `.tbd`) is rejected so
+/// resolution falls through to the real versioned soname.
+fn is_loadable_library_file(path: &Path) -> bool {
+    if path.extension().is_some_and(|ext| ext == "tbd") {
+        return true;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        // Can't introspect it — be permissive (don't reject a real library just
+        // because we couldn't open it for a peek).
+        return true;
+    };
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let Ok(read) = file.read(&mut magic) else {
+        return true;
+    };
+    let magic = &magic[..read];
+    magic.starts_with(b"\x7fELF")            // ELF (Linux)
+        || magic.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) // Mach-O 64 LE
+        || magic.starts_with(&[0xce, 0xfa, 0xed, 0xfe]) // Mach-O 32 LE
+        || magic.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) // Mach-O universal (fat)
+        || magic.starts_with(b"MZ") // PE (Windows .dll)
+}
+
 /// The function/data symbols a shared library actually exports, used to drop
 /// cdef declarations the installed library does not provide (PHP FFI resolves
 /// every declared symbol eagerly, so one missing symbol fails the whole load —
@@ -161,47 +346,40 @@ pub(super) fn exported_symbols(library_path: &str) -> Option<BTreeSet<String>> {
     if !library_path.contains(std::path::MAIN_SEPARATOR) {
         return None;
     }
-    // `nm -D` lists dynamic symbols on Linux; `nm -gU` is the macOS spelling.
-    for args in [&["-D", "--defined-only"][..], &["-gU"][..]] {
-        let Ok(output) = ProcessCommand::new("nm")
-            .args(args)
-            .arg(library_path)
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let symbols: BTreeSet<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                let name = fields.next_back()?;
-                // Lines with only a name (undefined) have no type column; require
-                // at least a type letter before the name.
-                if line.split_whitespace().count() < 2 {
-                    return None;
-                }
-                // Strip ELF symbol-versioning suffixes (`compressBound@@ZLIB_1.2.0`).
-                let name = name.split('@').next().unwrap_or(name);
-                // Mach-O prefixes every C symbol with a single leading underscore;
-                // strip exactly that one on macOS. ELF (Linux) has no such prefix, so
-                // keep the name verbatim — `trim_start_matches('_')` would corrupt
-                // legitimately underscore-prefixed symbols like GMP's `__gmpz_init`.
-                let name = if cfg!(target_os = "macos") {
-                    name.strip_prefix('_').unwrap_or(name)
-                } else {
-                    name
-                };
-                Some(name.to_owned())
-            })
-            .collect();
-        if !symbols.is_empty() {
-            return Some(symbols);
-        }
+    // Parse the shared library's export table directly (ELF `.dynsym` defined-global
+    // symbols, the Mach-O export trie, the PE export directory) instead of shelling
+    // out to `nm`: the export filter must always work so a declared-but-unexported
+    // symbol (e.g. SDL's app-provided `SDL_main`) is dropped, and `pnl install`'s
+    // only external toolchain requirement stays libclang — not binutils.
+    let data = std::fs::read(library_path).ok()?;
+    // A `.tbd` text stub (macOS SDK) isn't a Mach-O binary — read its declared
+    // exports through the YAML-based parser instead of `object`.
+    if library_path.ends_with(".tbd") {
+        return crate::tbd::parse_tbd(&String::from_utf8_lossy(&data))
+            .map(|tbd| tbd.symbols)
+            .filter(|symbols| !symbols.is_empty());
     }
-    None
+    let file = object::File::parse(&*data).ok()?;
+    let exports = object::Object::exports(&file).ok()?;
+    let symbols: BTreeSet<String> = exports
+        .iter()
+        .filter_map(|export| {
+            let name = std::str::from_utf8(export.name()).ok()?;
+            // Strip an ELF symbol-versioning suffix (`compressBound@@ZLIB_1.2.0`).
+            let name = name.split('@').next().unwrap_or(name);
+            // Mach-O prefixes every C symbol with a single leading underscore; strip
+            // exactly that one on macOS. ELF (Linux) has no such prefix, so keep the
+            // name verbatim — stripping all `_` would corrupt legitimately
+            // underscore-prefixed symbols like GMP's `__gmpz_init`.
+            let name = if cfg!(target_os = "macos") {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect();
+    (!symbols.is_empty()).then_some(symbols)
 }
 
 /// Whether a library file name matches the current OS's shared-object naming
@@ -531,18 +709,72 @@ mod tests {
     #[test]
     fn find_library_file_prefers_exact_then_shortest_soname() {
         let dir = tempfile::tempdir().unwrap();
-        let touch = |name: &str| std::fs::write(dir.path().join(name), b"x").unwrap();
+        // Real libraries carry ELF magic so they pass the loadable-object check.
+        let elf = |name: &str| std::fs::write(dir.path().join(name), b"\x7fELFreal").unwrap();
 
         // Only a versioned soname is present (the unversioned dev symlink is not).
-        touch("libgmp.so.10");
-        touch("libgmp.so.10.5.0");
+        elf("libgmp.so.10");
+        elf("libgmp.so.10.5.0");
         let found = find_library_file(dir.path(), "libgmp.so").unwrap();
         assert_eq!(found.file_name().unwrap(), "libgmp.so.10");
 
-        // An exact match wins over versioned ones.
-        touch("libgmp.so");
+        // A real exact match wins over versioned ones.
+        elf("libgmp.so");
         let found = find_library_file(dir.path(), "libgmp.so").unwrap();
         assert_eq!(found.file_name().unwrap(), "libgmp.so");
+    }
+
+    #[test]
+    fn parses_linker_script_inputs_for_coload() {
+        // ncurses's dev linker script: the primary plus `-ltinfo`. INPUT tokens are
+        // surfaced (bare soname verbatim, `-l` → `lib*.so`); a plain file is not.
+        assert_eq!(
+            parse_linker_script_inputs("/* GNU ld script */\nINPUT(libncurses.so.6 -ltinfo)\n"),
+            vec!["libncurses.so.6".to_owned(), "libtinfo.so".to_owned()]
+        );
+        // GROUP(...) and AS_NEEDED(...) are handled the same way.
+        assert_eq!(
+            parse_linker_script_inputs("GROUP ( libc.so.6 AS_NEEDED ( -lpthread ) )"),
+            vec!["libc.so.6".to_owned(), "libpthread.so".to_owned()]
+        );
+        // A non-linker-script file yields nothing.
+        assert!(parse_linker_script_inputs("\x7fELF...binary...").is_empty());
+        assert!(parse_linker_script_inputs("just some text").is_empty());
+    }
+
+    #[test]
+    fn linker_script_co_load_excludes_primary_and_resolves_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let elf = |name: &str| std::fs::write(dir.path().join(name), b"\x7fELFreal").unwrap();
+        // The dev symlink is a linker script naming the primary + libtinfo.
+        std::fs::write(
+            dir.path().join("libncurses.so"),
+            b"INPUT(libncurses.so.6 -ltinfo)\n",
+        )
+        .unwrap();
+        elf("libncurses.so.6");
+        elf("libtinfo.so.6");
+        let primary = dir.path().join("libncurses.so.6");
+        let co = linker_script_co_load(&[dir.path().to_path_buf()], "libncurses.so", &primary);
+        // libtinfo is co-loaded; the primary itself is excluded.
+        assert_eq!(co.len(), 1);
+        assert!(co.contains_key("libtinfo.so.6"));
+        assert!(!co.contains_key("libncurses.so.6"));
+    }
+
+    #[test]
+    fn find_library_file_skips_linker_script_for_real_soname() {
+        let dir = tempfile::tempdir().unwrap();
+        // `libncurses.so` is a GNU ld linker script (ASCII text, no ELF magic); the
+        // real object is the versioned soname. Resolution must skip the script.
+        std::fs::write(
+            dir.path().join("libncurses.so"),
+            b"/* GNU ld script */\nINPUT(libncurses.so.6 -ltinfo)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("libncurses.so.6"), b"\x7fELFreal").unwrap();
+        let found = find_library_file(dir.path(), "libncurses.so").unwrap();
+        assert_eq!(found.file_name().unwrap(), "libncurses.so.6");
     }
 
     #[test]

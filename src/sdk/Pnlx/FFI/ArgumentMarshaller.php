@@ -95,6 +95,12 @@ final class ArgumentMarshaller
             return $value->toValue();
         }
 
+        // A generated PHP enum (int-backed) sent where the C function takes the
+        // enum: hand the native call its backing integer value.
+        if ($value instanceof \BackedEnum) {
+            return $value->value;
+        }
+
         if ($value === null || $value instanceof CData) {
             return $value;
         }

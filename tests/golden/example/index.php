@@ -36,6 +36,11 @@ foreach (glob(__DIR__ . '/types/*.php') ?: [] as $typeFile) {
     require_once $typeFile;
 }
 
+// The native enums, one int-backed PHP enum per file under enums/.
+foreach (glob(__DIR__ . '/enums/*.php') ?: [] as $enumFile) {
+    require_once $enumFile;
+}
+
 // The exported-data-symbol markers, one flat class per file under symbol/ (resolved
 // by \Pnlx\FFI\ArgumentMarshaller; cheap class definitions, no FFI loaded here).
 foreach (glob(__DIR__ . '/symbol/*.php') ?: [] as $symbolFile) {

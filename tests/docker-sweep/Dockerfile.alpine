@@ -1,0 +1,22 @@
+# Toolchain image for sweeping `pnl install` + EXAMPLES.md of every pnl-packages
+# entry on Alpine (musl). pnl is built at run time from the mounted source, so a
+# source change needs no image rebuild. binutils is intentionally NOT installed:
+# the sweep proves `pnl install` works with libclang as its only external tool.
+FROM alpine:3.21
+
+RUN apk add --no-cache \
+        bash ca-certificates curl git \
+        build-base cmake perl pkgconf \
+        zlib-dev zlib-static \
+        clang clang-dev clang-libs llvm-dev \
+        sudo \
+        php83 php83-cli php83-ffi
+
+# Recent Rust toolchain via rustup (Alpine's packaged rust is too old for
+# edition 2024). rustup-init detects the musl host target automatically.
+ENV RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | CARGO_HOME=/opt/cargo sh -s -- -y --default-toolchain stable --profile minimal
+
+CMD ["bash"]

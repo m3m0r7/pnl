@@ -6,4 +6,10 @@ parameters:
   excludePaths:
     # Golden snapshots of generated code are fixtures, not source to analyse.
     - tests/golden/*
+    # The stub below is scanned (for type info), not analysed as source.
+    - tests/stubs/*
+  scanFiles:
+    # Type declarations for the example fixture's generated wrappers, which are
+    # installed into a temp dir at test time (so off the analysis path).
+    - tests/stubs/example-fixture.php
   tmpDir: .phpstan-cache

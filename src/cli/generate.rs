@@ -23,6 +23,7 @@ const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/ma
 const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
 const TYPE_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/types.php.tpl");
+const ENUM_FILE_TEMPLATE: &str = include_str!("templates/package/src/generated/enums.php.tpl");
 const SYMBOL_TEMPLATE: &str = include_str!("templates/package/src/generated/symbol.php.tpl");
 const CONST_TEMPLATE: &str = include_str!("templates/package/src/generated/const.php.tpl");
 const MACRO_FUNCTIONS_TEMPLATE: &str =
@@ -76,6 +77,10 @@ pub struct PhpPackageTemplateOptions<'a> {
     /// Exported data symbols (C globals), surfaced as entity const markers plus
     /// per-symbol marker classes under `symbol/`.
     pub symbols: &'a [crate::header_adapter::DataSymbol],
+    /// Named C enums surfaced as PHP `enum`s under `<namespace>\Enums`.
+    pub enums: &'a [crate::header_adapter::EnumDef],
+    /// Struct tag -> its fields, so a `Types\<tag>` wrapper gets typed accessors.
+    pub struct_fields: &'a BTreeMap<String, Vec<StructField>>,
 }
 
 /// Generate one entity variant. `allow_cdata` selects whether pointer parameters
@@ -199,6 +204,40 @@ pub fn generate_symbols_php(
     Ok(names)
 }
 
+/// Generate the per-package PHP enums into `dir` (`src/generated/enums/`), one
+/// int-backed `enum` per file. Returns the enum class names written.
+pub fn generate_enums_php(
+    dir: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for def in options.enums {
+        let class = php::enum_class_name(&def.name);
+        let mut context = generated_template_context();
+        context.insert(
+            "NAMESPACE".to_owned(),
+            Value::String(options.namespace.to_owned()),
+        );
+        context.insert("NAME".to_owned(), Value::String(def.name.clone()));
+        context.insert("ENUM_CLASS".to_owned(), Value::String(class.clone()));
+        context.insert(
+            "cases".to_owned(),
+            Value::Array(
+                def.cases
+                    .iter()
+                    .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+                    .collect(),
+            ),
+        );
+        write_generated(
+            &dir.join(format!("{class}.php")),
+            render_handlebars(ENUM_FILE_TEMPLATE, context)?,
+        )?;
+        names.push(class);
+    }
+    Ok(names)
+}
+
 /// Generate the per-package pointer wrappers into `dir` (`src/generated/types/`),
 /// one class per file. Returns the type class names that were written (so the
 /// package's `index.php` can require each one).
@@ -220,6 +259,14 @@ pub fn generate_types_php(
             Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
         );
         context.insert("TYPE".to_owned(), Value::String(type_name.clone()));
+        // Typed field accessors when this pointer type names a struct the cdef
+        // defines with a body; an opaque pointer type just gets the bare wrapper.
+        let fields = options
+            .struct_fields
+            .get(type_name)
+            .map(|fields| php::struct_field_views(fields, options))
+            .unwrap_or_default();
+        context.insert("fields".to_owned(), Value::Array(fields));
         write_generated(
             &dir.join(format!("{type_name}.php")),
             render_handlebars(TYPE_FILE_TEMPLATE, context)?,
@@ -613,6 +660,10 @@ pub struct FunctionSignature {
     /// with this reason (e.g. `static inline`) instead of dispatching. It is not in
     /// the cdef and is excluded from the alias map and the global-functions API.
     pub(super) unsupported: Option<String>,
+    /// When the C return type names a generated PHP enum, its enum name. The method
+    /// returns `<Enum>|null` via `<Enum>::tryFrom()`; the dispatched C value stays an
+    /// `int` (the `return_type` is collapsed to `int`).
+    pub(super) return_enum: Option<String>,
 }
 
 impl FunctionSignature {
@@ -621,6 +672,96 @@ impl FunctionSignature {
     pub(super) fn native_symbol(&self) -> &str {
         self.native_symbol.as_deref().unwrap_or(&self.name)
     }
+}
+
+/// One field of a generated struct, for emitting a typed accessor on its wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructField {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Parse the struct definitions the cdef emits with a body (`struct X { int a;
+/// char *b; };`) into their field lists, so the generated `Types\X` wrapper can
+/// expose typed `getA()/setA()` accessors. Opaque structs (forward-declared only,
+/// no body) yield nothing. Field types resolve against the cdef's typedefs exactly
+/// like function parameters, and a field whose declarator carries a nested
+/// aggregate/function type (`{`/`(`) is skipped (the accessor degrades).
+pub(super) fn parse_struct_fields(cdef: &str) -> BTreeMap<String, Vec<StructField>> {
+    let raw_typedefs = raw_typedef_map(cdef);
+    let scalar_typedefs = scalar_typedef_map(&raw_typedefs);
+    let char_pointer_typedefs = char_pointer_typedef_set(&raw_typedefs);
+    let mut structs = BTreeMap::new();
+    for line in cdef.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("struct ") else {
+            continue;
+        };
+        let Some(brace) = rest.find('{') else {
+            continue;
+        };
+        let tag = rest[..brace].trim();
+        if tag.is_empty()
+            || !tag
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            continue;
+        }
+        let Some(close) = rest.rfind('}') else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        let mut seen = BTreeSet::new();
+        // Split on TOP-LEVEL `;` only: an inline anonymous `union { ... } init`
+        // member must be treated as one field (and skipped), not have its own
+        // members harvested as struct fields (they would collide, e.g. luaL_Buffer's
+        // `lua_State *L` vs the union's `long l` both → `getL`).
+        for declaration in split_top_level_members(&rest[brace + 1..close]) {
+            let declaration = declaration.trim();
+            // A nested aggregate or function-pointer declarator can't be split into a
+            // simple name/type pair; skip it (the field stays reachable through cdata()).
+            if declaration.is_empty() || declaration.contains('{') || declaration.contains('(') {
+                continue;
+            }
+            let Some((type_name, name)) = split_c_declaration_name(declaration) else {
+                continue;
+            };
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let mut type_name = resolve_scalar_typedef(&type_name, &scalar_typedefs);
+            type_name = resolve_char_pointer_typedef(&type_name, &char_pointer_typedefs);
+            type_name = resolve_pointer_typedef(&type_name, &raw_typedefs);
+            fields.push(StructField { name, type_name });
+        }
+        structs.insert(tag.to_owned(), fields);
+    }
+    structs
+}
+
+/// Split a struct body into its members on top-level `;` only, treating a nested
+/// `{ ... }` (an inline anonymous union/struct) as part of the single member it
+/// belongs to rather than splitting its inner members out.
+fn split_top_level_members(body: &str) -> Vec<&str> {
+    let mut members = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => {
+                members.push(&body[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < body.len() {
+        members.push(&body[start..]);
+    }
+    members
 }
 
 /// Expose a public method name for an export reached through a symbol-version
@@ -660,9 +801,24 @@ pub(super) struct FunctionParam {
     /// it as a PHP `callable` (PHP FFI accepts a closure for a function-pointer
     /// argument).
     pub(super) callback: bool,
+    /// When the parameter's C type names a generated PHP enum, its enum name. The
+    /// wrapper accepts `<Enum>|int|…` and marshals the enum's backing `->value`; the
+    /// `type_name` is collapsed to `int` so the dispatched value is a plain int.
+    pub(super) enum_type: Option<String>,
 }
 
 pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
+    parse_function_signatures_with_enums(cdef, &BTreeSet::new())
+}
+
+/// As [`parse_function_signatures`], but `enum_names` (the generated PHP enums)
+/// tags any non-pointer parameter/return whose C type names one of them: its
+/// `enum_type`/`return_enum` is recorded and the type collapsed to `int`, so the
+/// generated wrapper exposes the PHP enum while the dispatched value stays an int.
+pub fn parse_function_signatures_with_enums(
+    cdef: &str,
+    enum_names: &BTreeSet<String>,
+) -> Vec<FunctionSignature> {
     let raw_typedefs = raw_typedef_map(cdef);
     let scalar_typedefs = scalar_typedef_map(&raw_typedefs);
     let char_pointer_typedefs = char_pointer_typedef_set(&raw_typedefs);
@@ -670,12 +826,23 @@ pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
     cdef.lines()
         .filter_map(parse_function_signature)
         .map(|mut signature| {
-            signature.return_type =
-                resolve_scalar_typedef(&signature.return_type, &scalar_typedefs);
-            signature.return_type =
-                resolve_char_pointer_typedef(&signature.return_type, &char_pointer_typedefs);
-            signature.return_type = resolve_pointer_typedef(&signature.return_type, &raw_typedefs);
+            if let Some(name) = enum_value_type(&signature.return_type, enum_names) {
+                signature.return_enum = Some(name);
+                signature.return_type = "int".to_owned();
+            } else {
+                signature.return_type =
+                    resolve_scalar_typedef(&signature.return_type, &scalar_typedefs);
+                signature.return_type =
+                    resolve_char_pointer_typedef(&signature.return_type, &char_pointer_typedefs);
+                signature.return_type =
+                    resolve_pointer_typedef(&signature.return_type, &raw_typedefs);
+            }
             for param in &mut signature.params {
+                if let Some(name) = enum_value_type(&param.type_name, enum_names) {
+                    param.enum_type = Some(name);
+                    param.type_name = "int".to_owned();
+                    continue;
+                }
                 param.type_name = resolve_scalar_typedef(&param.type_name, &scalar_typedefs);
                 param.type_name =
                     resolve_char_pointer_typedef(&param.type_name, &char_pointer_typedefs);
@@ -687,6 +854,24 @@ pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
         .collect()
 }
 
+/// If a C type is a by-value reference to one of the generated enums — a single
+/// type token (after dropping cv-quals and an `enum` keyword) that names an enum,
+/// with no pointer — return that enum's name. A pointer to an enum is not an enum
+/// value and keeps its normal pointer handling.
+fn enum_value_type(c_type: &str, enum_names: &BTreeSet<String>) -> Option<String> {
+    if c_type.contains('*') {
+        return None;
+    }
+    let tokens: Vec<&str> = c_type
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict" | "enum"))
+        .collect();
+    let [name] = tokens.as_slice() else {
+        return None;
+    };
+    enum_names.contains(*name).then(|| (*name).to_owned())
+}
+
 /// Parse the cdef's function signatures and append the `unsupported` functions
 /// (which are NOT in the cdef, e.g. `static inline`), tagging each so its generated
 /// method throws instead of dispatching. The unsupported declarations are parsed
@@ -695,9 +880,10 @@ pub fn parse_function_signatures(cdef: &str) -> Vec<FunctionSignature> {
 pub fn parse_signatures_with_unsupported(
     cdef: &str,
     unsupported: &[crate::header_adapter::UnsupportedFunction],
+    enum_names: &BTreeSet<String>,
 ) -> Vec<FunctionSignature> {
     if unsupported.is_empty() {
-        return parse_function_signatures(cdef);
+        return parse_function_signatures_with_enums(cdef, enum_names);
     }
     let reason_by_name: BTreeMap<String, String> = unsupported
         .iter()
@@ -711,7 +897,8 @@ pub fn parse_signatures_with_unsupported(
         .map(|function| function.declaration.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let mut signatures = parse_function_signatures(&format!("{cdef}\n{declarations}"));
+    let mut signatures =
+        parse_function_signatures_with_enums(&format!("{cdef}\n{declarations}"), enum_names);
     for signature in &mut signatures {
         if let Some(reason) = reason_by_name.get(&signature.name) {
             signature.unsupported = Some(reason.clone());
@@ -985,6 +1172,7 @@ fn parse_function_signature(line: &str) -> Option<FunctionSignature> {
         variadic,
         native_symbol: None,
         unsupported: None,
+        return_enum: None,
     })
 }
 
@@ -1081,6 +1269,7 @@ fn parse_param(param: &str, index: usize) -> FunctionParam {
             name: sanitize_php_param_name(&name, index),
             type_name,
             callback: false,
+            enum_type: None,
         };
     }
 
@@ -1088,6 +1277,7 @@ fn parse_param(param: &str, index: usize) -> FunctionParam {
         name: format!("arg{index}"),
         type_name: param.to_owned(),
         callback: false,
+        enum_type: None,
     }
 }
 
@@ -1100,6 +1290,7 @@ fn parse_function_pointer_param(param: &str, index: usize) -> Option<FunctionPar
         name: sanitize_php_param_name(name, index),
         type_name: "void *".to_owned(),
         callback: true,
+        enum_type: None,
     })
 }
 
@@ -1129,6 +1320,13 @@ double demo_scale(double value, int factor);\n";
             native_library_version: "1.0.0",
             description: "Demo native library.",
             symbols: &[],
+            enums: &[],
+            struct_fields: {
+                // An empty static keeps the borrow `'static` (a `&BTreeMap::new()`
+                // temporary would not outlive the function).
+                static EMPTY_FIELDS: BTreeMap<String, Vec<StructField>> = BTreeMap::new();
+                &EMPTY_FIELDS
+            },
         }
     }
 
@@ -1259,6 +1457,7 @@ void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, co
                 name: "format".to_owned(),
                 type_name: "const char *".to_owned(),
                 callback: false,
+                enum_type: None,
             }]
         );
         assert_eq!(signatures[1].name, "qsort");
@@ -1269,8 +1468,57 @@ void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, co
                 name: "compar".to_owned(),
                 type_name: "void *".to_owned(),
                 callback: true,
+                enum_type: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_struct_fields_with_bodies_for_accessors() {
+        // A struct with a body yields its fields (types resolved through typedefs);
+        // an opaque (body-less) struct yields nothing; a nested aggregate/function
+        // field is skipped so the accessor degrades rather than mis-parsing.
+        let cdef = "typedef unsigned long size_t;\n\
+struct ex_point { int x; int y; };\n\
+struct ex_box { struct ex_point *origin; char *label; size_t len; };\n\
+typedef struct ex_opaque ex_opaque;\n";
+        let fields = parse_struct_fields(cdef);
+
+        assert_eq!(
+            fields.get("ex_point"),
+            Some(&vec![
+                StructField {
+                    name: "x".to_owned(),
+                    type_name: "int".to_owned(),
+                },
+                StructField {
+                    name: "y".to_owned(),
+                    type_name: "int".to_owned(),
+                },
+            ])
+        );
+        // `size_t` resolves through the typedef to `unsigned long`; the struct
+        // pointer and char pointer keep their pointer spelling.
+        let box_fields = fields.get("ex_box").expect("ex_box parsed");
+        assert_eq!(box_fields[0].type_name, "struct ex_point *");
+        assert_eq!(box_fields[1].type_name, "char *");
+        assert_eq!(box_fields[2].type_name, "unsigned long");
+        // An opaque struct (no body) is not in the map.
+        assert!(!fields.contains_key("ex_opaque"));
+    }
+
+    #[test]
+    fn struct_fields_skip_inline_union_members() {
+        // luaL_Buffer's shape: an inline anonymous union. Splitting on top-level `;`
+        // only must keep the union as ONE (skipped) member, NOT harvest its inner
+        // members as fields — otherwise the union's `long l` would collide with the
+        // real `lua_State *L` (both → `getL`).
+        let cdef = "struct ex_buf { char *b; long n; void *L; \
+union { long l; double u; char b[8]; } init; };\n";
+        let fields = parse_struct_fields(cdef).remove("ex_buf").expect("parsed");
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        // Only the top-level members; the union's inner `l`/`u`/`b`/`init` are gone.
+        assert_eq!(names, vec!["b", "n", "L"], "fields: {names:?}");
     }
 
     #[test]

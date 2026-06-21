@@ -34,6 +34,7 @@ const RUST_LICENSES: &[(&str, &str)] = &[
     ("handlebars", "MIT"),
     ("include_dir", "MIT"),
     ("jsonschema", "MIT"),
+    ("object", "Apache-2.0 OR MIT"),
     ("semver", "MIT OR Apache-2.0"),
     ("serde", "MIT OR Apache-2.0"),
     ("serde_json", "MIT OR Apache-2.0"),
@@ -42,6 +43,7 @@ const RUST_LICENSES: &[(&str, &str)] = &[
     ("tar", "MIT OR Apache-2.0"),
     ("ureq", "MIT OR Apache-2.0"),
     ("url", "MIT OR Apache-2.0"),
+    ("yaml-rust2", "MIT OR Apache-2.0"),
     ("zip", "MIT"),
 ];
 

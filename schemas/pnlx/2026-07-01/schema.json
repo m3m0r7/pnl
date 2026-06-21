@@ -190,6 +190,10 @@
                             },
                             "virtual": {
                               "type": "boolean"
+                            },
+                            "load_type": {
+                              "type": "string",
+                              "enum": ["auto", "elf", "tbd", "dll", "dylib"]
                             }
                           }
                         }
@@ -347,7 +351,7 @@
                 {
                   "type": "string",
                   "minLength": 1,
-                  "pattern": "^(?!.*[\\\\/])(?!.*\\.\\.).+$"
+                  "pattern": "^(?!.*\\.\\.).+$"
                 },
                 {
                   "type": "object",
@@ -359,10 +363,14 @@
                     "name": {
                       "type": "string",
                       "minLength": 1,
-                      "pattern": "^(?!.*[\\\\/])(?!.*\\.\\.).+$"
+                      "pattern": "^(?!.*\\.\\.).+$"
                     },
                     "virtual": {
                       "type": "boolean"
+                    },
+                    "load_type": {
+                      "type": "string",
+                      "enum": ["auto", "elf", "tbd", "dll", "dylib"]
                     }
                   }
                 }

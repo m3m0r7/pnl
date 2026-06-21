@@ -208,6 +208,8 @@ class RuntimeTest extends TestCase
             'scalar/const.php',
             'function.aliases.php',
             'example.ffi.php',
+            'enums/example_mode.php',
+            'types/example_point.php',
         ];
 
         $updating = getenv('UPDATE_GOLDEN') === '1';
@@ -313,6 +315,80 @@ class RuntimeTest extends TestCase
         $result = $cls::example_apply(5, 'Pnlx\\Tests\\example_callback_increment');
         self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $result);
         self::assertSame(7, $result->toInt());
+    }
+
+    public function testRuntimeMapsCEnumToPhpEnum(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+
+        // The C `enum example_mode` is generated as an int-backed PHP enum.
+        self::assertTrue(enum_exists('Pnlx\\Example\\Enums\\example_mode'));
+
+        // A raw int is accepted; the int the C function returns is mapped back to the
+        // enum (OFF=0 -> ON=1).
+        $on = $cls::example_next_mode(0);
+        self::assertInstanceOf(\BackedEnum::class, $on);
+        self::assertSame(1, $on->value);
+        self::assertSame('Pnlx\\Example\\Enums\\example_mode', $on::class);
+
+        // Passing a PHP enum case back in sends its backing int (ON=1 -> AUTO=10).
+        $auto = $cls::example_next_mode($on);
+        self::assertInstanceOf(\BackedEnum::class, $auto);
+        self::assertSame(10, $auto->value);
+
+        // AUTO(10) wraps around to OFF(0).
+        $off = $cls::example_next_mode($auto);
+        self::assertInstanceOf(\BackedEnum::class, $off);
+        self::assertSame(0, $off->value);
+    }
+
+    public function testRuntimeStructFieldAccessors(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+
+        // Allocate a struct from PHP and set its fields with the typed (chainable)
+        // setters, then pass the wrapper where the C API wants `example_point *`.
+        // (The generated wrapper is on a temp dir at test time; stubs/example-fixture.php
+        // declares its shape for PHPStan, so the natural typed API analyses cleanly.)
+        $point = new \Pnlx\Example\Types\example_point();
+        $point->setX(3)->setY(4);
+        self::assertSame(3, $point->getX());
+        self::assertSame(4, $point->getY());
+
+        $sum = $cls::example_point_sum($point);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $sum);
+        self::assertSame(7, $sum->toInt());
+
+        // A C function that writes through the struct is read back via the getters.
+        $cls::example_point_init($point, 10, 20);
+        self::assertSame(10, $point->getX());
+        self::assertSame(20, $point->getY());
+    }
+
+    public function testUnexportedDeclaredFunctionIsFilteredOut(): void
+    {
+        // example_unexported is declared in example.h but never defined in the native
+        // library, so it is not in its export table. The export-symbol filter (which
+        // parses the binary directly, not via `nm`) must drop it — otherwise
+        // FFI::cdef fails to resolve it and breaks the whole extension (the SDL_main
+        // scenario reported on a host without binutils).
+        $cdef = file_get_contents(
+            self::$workspace->installedPackageRoot . '/src/generated/example.ffi.php'
+        );
+        self::assertIsString($cdef);
+        self::assertStringNotContainsString('example_unexported', $cdef);
+
+        // The extension still loads and a real export works.
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+        $sum = $cls::example_add(2, 3);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $sum);
+        self::assertSame(5, $sum->toInt());
     }
 
     public function testFunctionLikeMacrosBecomePhpFunctions(): void

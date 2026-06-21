@@ -3,12 +3,73 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 use serde_json::json;
 
-use super::names::method_names;
+use super::names::{method_names, snake_to_pascal};
 use super::types::{
     HELPERS_NS, PointerOut, ValueKind, fits_php_scalar, is_void_pointer, pointer_out_param,
-    value_kind, writable_char_buffer,
+    reserved_suffix, value_kind, writable_char_buffer,
 };
-use super::{FunctionParam, FunctionSignature, PhpPackageTemplateOptions};
+use super::{FunctionParam, FunctionSignature, PhpPackageTemplateOptions, StructField};
+
+/// The PHP class name for a C enum: the C tag, suffixed if it collides with a PHP
+/// reserved word so it is a legal class name (`enum`→`enum_`).
+pub(super) fn enum_class_name(c_name: &str) -> String {
+    reserved_suffix(c_name)
+}
+
+/// One struct field rendered as a typed accessor pair on the `Types\<tag>` wrapper.
+/// Exactly one type flag is set; with none, a `mixed` accessor reads/writes the raw
+/// `\FFI\CData` field (so a field whose type the value layer can't name is still
+/// reachable). A `char *` field gets a read-only `?string` getter (writing a string
+/// field needs C-side allocation/lifetime, deferred).
+#[derive(Debug, Serialize)]
+struct FieldView {
+    field: String,
+    getter: String,
+    setter: String,
+    is_int: bool,
+    is_float: bool,
+    is_string: bool,
+    pointer_class: Option<String>,
+}
+
+/// The accessor views for a struct's fields, as JSON for the `Types\<tag>` template.
+pub(super) fn struct_field_views(
+    fields: &[StructField],
+    options: &PhpPackageTemplateOptions<'_>,
+) -> Vec<serde_json::Value> {
+    // PHP method names are case-insensitive, so two fields whose accessors collide
+    // (e.g. a `Foo` and a `foo` field, both → `getFoo`) would redeclare. Keep the
+    // first; a later collider stays reachable through `cdata()`.
+    let mut taken_accessors = BTreeSet::new();
+    fields
+        .iter()
+        .filter_map(|field| {
+            let pascal = snake_to_pascal(&field.name);
+            if !taken_accessors.insert(pascal.to_ascii_lowercase()) {
+                return None;
+            }
+            let mut view = FieldView {
+                field: field.name.clone(),
+                getter: format!("get{pascal}"),
+                setter: format!("set{pascal}"),
+                is_int: false,
+                is_float: false,
+                is_string: false,
+                pointer_class: None,
+            };
+            match value_kind(&field.type_name) {
+                ValueKind::Int(_) => view.is_int = true,
+                ValueKind::Float(_) => view.is_float = true,
+                ValueKind::Str => view.is_string = true,
+                ValueKind::Pointer(Some(class)) => {
+                    view.pointer_class = Some(format!("{}\\{class}", types_ns(options)));
+                }
+                ValueKind::Pointer(None) | ValueKind::Void => {}
+            }
+            Some(json!(view))
+        })
+        .collect()
+}
 
 /// One native-dispatch argument: the template marshals it with `unwrap` (a
 /// pointer) or `scalarArg` (a scalar), or — for a scalar-pointer out-parameter —
@@ -40,6 +101,9 @@ struct ParamView {
     /// closure/function name PHP FFI turns into a C callback). Mutually exclusive
     /// with the other type flags.
     callback: bool,
+    /// When the parameter's C type is a generated enum, its FQCN — added to the
+    /// accepted-type union alongside `int` (the enum's backing value is marshalled).
+    enum_class: Option<String>,
     cdata: bool,
     /// Whether this is a by-reference out/in-out pointer parameter (`int *`,
     /// `char **`, `T **`), rendered with `#[NativePointer(...)]` and `&$name`.
@@ -88,6 +152,10 @@ struct MethodView {
     cast: Option<&'static str>,
     /// A `return new <new_class>(...)` return (wrapped scalar or pointer wrapper).
     new_class: Option<String>,
+    /// When the C return is a generated enum, its FQCN: the method returns
+    /// `<Enum>|null` via `<Enum>::tryFrom()` (null for a value outside the enum).
+    /// Takes precedence over the scalar/pointer return forms.
+    enum_return: Option<String>,
     /// Whether any parameter is a scalar-pointer out/in-out param, so the call is
     /// routed through `OutParameterMarshaller::call` (allocate holder, write back).
     has_out_params: bool,
@@ -384,6 +452,13 @@ fn method_view(
         ValueKind::Float(wrapper) if native && fits_php_scalar(wrapper) => Some("float"),
         _ => None,
     };
+    // An enum return takes its own `<Enum>::tryFrom(...)` form; the scalar/cast forms
+    // (the collapsed `int`) must not also fire.
+    let (new_class, cast) = if signature.return_enum.is_some() {
+        (None, None)
+    } else {
+        (new_class, cast)
+    };
 
     MethodView {
         name: format!("{prefix}{name}"),
@@ -397,6 +472,10 @@ fn method_view(
         native_string: native,
         cast,
         new_class,
+        enum_return: signature
+            .return_enum
+            .as_ref()
+            .map(|name| format!("\\{}\\Enums\\{}", options.namespace, name)),
         has_out_params,
         unsupported_reason: signature.unsupported.clone(),
         unsupported_attribute: signature.unsupported.as_deref().map(unsupported_attribute),
@@ -436,6 +515,7 @@ fn param_views(
                 pointer_class: None,
                 void_pointer: false,
                 callback: false,
+                enum_class: None,
                 cdata: allow_cdata,
                 native_pointer: false,
                 np_element: String::new(),
@@ -450,6 +530,13 @@ fn param_views(
             if param.callback {
                 view.callback = true;
                 return view;
+            }
+            // An enum parameter accepts the generated PHP enum alongside `int`; its
+            // `type_name` is collapsed to `int`, so the normal scalar classification
+            // below makes it `is_int`, and the marshaller sends the enum's backing
+            // value. Only the accepted-type union changes.
+            if let Some(enum_name) = &param.enum_type {
+                view.enum_class = Some(format!("\\{}\\Enums\\{}", options.namespace, enum_name));
             }
             // A non-const `char *` is a writable byte buffer the call fills in: a
             // by-reference out-parameter the caller pre-sizes (it takes precedence

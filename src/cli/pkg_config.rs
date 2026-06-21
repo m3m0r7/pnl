@@ -349,69 +349,6 @@ mod tests {
         assert_eq!(flag_dirs("-L/x -lpango", "-L"), vec![PathBuf::from("/x")]);
     }
 
-    /// Parity against the real `pkg-config` for locally-installed modules. Ignored
-    /// by default (machine-dependent); run with `cargo test -- --ignored parity`.
-    #[test]
-    #[ignore]
-    fn parity_with_real_pkg_config() {
-        use std::collections::BTreeSet;
-        use std::process::Command;
-
-        let modules = [
-            "pango",
-            "glib-2.0",
-            "gobject-2.0",
-            "harfbuzz",
-            "cairo",
-            "freetype2",
-            "libpng16",
-            "zlib",
-            "icu-uc",
-            "libcrypto",
-            "libpcre2-8",
-        ];
-        let as_set = |out: Vec<u8>, prefix: &str| -> BTreeSet<String> {
-            String::from_utf8_lossy(&out)
-                .split_whitespace()
-                .filter_map(|flag| flag.strip_prefix(prefix))
-                .map(str::to_owned)
-                .collect()
-        };
-        for module in modules {
-            let Ok(real) = Command::new("pkg-config")
-                .args(["--cflags-only-I", module])
-                .output()
-            else {
-                eprintln!("pkg-config not available; skipping");
-                return;
-            };
-            if !real.status.success() {
-                eprintln!("{module}: not known to pkg-config, skipping");
-                continue;
-            }
-            let real_set = as_set(real.stdout, "-I");
-            let ours: BTreeSet<String> = include_dirs(&[module.to_owned()])
-                .iter()
-                .map(|dir| dir.display().to_string())
-                .collect();
-            let missing: Vec<&String> = real_set.difference(&ours).collect();
-            let extra: Vec<&String> = ours.difference(&real_set).collect();
-            let real_ver = Command::new("pkg-config")
-                .args(["--modversion", module])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
-            eprintln!(
-                "{module}: ver {} (real {real_ver:?}) | missing={missing:?} extra={extra:?}",
-                if modversion(&[module.to_owned()]) == real_ver {
-                    "OK"
-                } else {
-                    "DIFF"
-                }
-            );
-        }
-    }
-
     #[test]
     fn expansion_leaves_unknown_variables_and_breaks_cycles() {
         let mut vars = BTreeMap::new();

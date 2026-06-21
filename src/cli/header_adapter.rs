@@ -87,6 +87,8 @@ pub struct HeaderArtifacts {
     /// generated method that throws (today: `static inline`, which has no exported
     /// symbol). Kept out of the cdef.
     pub unsupported_functions: Vec<UnsupportedFunction>,
+    /// Named C enums surfaced as PHP `enum`s (see [`EnumDef`]).
+    pub enums: Vec<EnumDef>,
 }
 
 /// A function with no FFI binding, surfaced as a throwing stub method. `declaration`
@@ -119,6 +121,17 @@ pub struct Constant {
     pub name: String,
     pub wrapped: String,
     pub scalar: String,
+}
+
+/// A named C `enum`, surfaced as a real PHP `enum <name>: int`. `cases` are the
+/// enumerators in source order. Only emitted for a *named* enum whose case values
+/// are all distinct (PHP enums forbid two cases sharing a value); an enum with
+/// duplicate values stays projected to `int` and its enumerators remain in
+/// `const.php`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDef {
+    pub name: String,
+    pub cases: Vec<(String, i64)>,
 }
 
 /// Translate a C header into a normalised cdef suitable for PHP `FFI::cdef`,
@@ -171,8 +184,20 @@ pub fn libclang_unavailable_message(err: &impl std::fmt::Display) -> String {
 pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<HeaderArtifacts> {
     let prefix = options.symbol_prefix.trim();
     if prefix.is_empty() {
+        // An empty symbol prefix means "use the header verbatim" (a curated
+        // `header_inline`, e.g. libc) without libclang. But still drop any
+        // single-line function declaration the resolved library does not export
+        // (glibc's `atexit`/`at_quick_exit` live in `libc_nonshared.a`, not
+        // `libc.so.6`): PHP FFI resolves every declared function eagerly, so one
+        // unexported symbol fails the whole `FFI::cdef`. When no export set is known
+        // (a virtual lib with no on-disk file, e.g. libc on macOS) the header is
+        // used as-is.
+        let cdef = match options.exported_symbols.as_ref() {
+            Some(symbols) => filter_verbatim_to_exports(header, symbols),
+            None => header.to_owned(),
+        };
         return Ok(HeaderArtifacts {
-            cdef: header.to_owned(),
+            cdef,
             ..HeaderArtifacts::default()
         });
     }
@@ -232,8 +257,26 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
         symbols: data_symbols(&collected, options.exported_symbols.as_ref()),
         symbol_aliases: macro_symbol_aliases(&collected, &options.definitions),
         unsupported_functions: unsupported_functions(&collected),
+        enums: enum_definitions(&collected, prefix),
         constants,
     })
+}
+
+/// The named C enums to surface as PHP enums: package-owned, prefix-matching (the
+/// tag carries the symbol prefix), with all-distinct case values (PHP enums forbid
+/// duplicate-valued cases). Others stay projected to `int` with their enumerators in
+/// `const.php`.
+fn enum_definitions(collected: &Collected, prefix: &str) -> Vec<EnumDef> {
+    collected
+        .enum_definitions
+        .iter()
+        .filter(|def| def.name.contains(prefix))
+        .filter(|def| {
+            let mut seen = BTreeSet::new();
+            def.cases.iter().all(|(_, value)| seen.insert(*value))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The unbindable functions (today: `static inline`) to surface as throwing stub
@@ -621,6 +664,8 @@ struct Collected {
     function_names: BTreeSet<String>,
     /// `(name, value)` for every enumerator, in source order, for `const.php`.
     enum_constants: Vec<(String, i64)>,
+    /// Named enums with their cases, for emitting PHP `enum`s (see [`EnumDef`]).
+    enum_definitions: Vec<EnumDef>,
     /// Enumerators from #included (non-owned) headers, e.g. libtidy's
     /// `TidyOptionId` values in `tidyenum.h` when it sits flat in `/usr/include`
     /// (Alpine) rather than a package subdir (Ubuntu's `/usr/include/tidy/`).
@@ -765,11 +810,25 @@ fn gather_empty_macros(translation_unit: &Entity<'_>) -> BTreeSet<String> {
             .skip_while(|spelling| spelling == &name)
             .collect();
         let is_attribute = body.first().map(String::as_str) == Some("__attribute__");
-        if body.is_empty() || is_attribute {
+        // A macro expanding to a lone cv/restrict qualifier (notcurses's
+        // `#define RESTRICT restrict`) is droppable for cdef purposes: the qualifier
+        // is irrelevant to the FFI ABI, and the macro name would otherwise leak into a
+        // type as an unknown identifier (`int * RESTRICT y`), failing `FFI::cdef`.
+        let is_qualifier = body.len() == 1 && is_type_qualifier_keyword(&body[0]);
+        if body.is_empty() || is_attribute || is_qualifier {
             empty.insert(name);
         }
     }
     empty
+}
+
+/// A C type-qualifier keyword (irrelevant to the FFI ABI), so a macro expanding to
+/// exactly one of these can be stripped from the cdef like an empty macro.
+fn is_type_qualifier_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "const" | "volatile" | "restrict" | "__restrict" | "__restrict__" | "__const"
+    )
 }
 
 fn collect(translation_unit: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf]) -> Collected {
@@ -812,11 +871,13 @@ fn collect(translation_unit: &Entity<'_>, main_header: &Path, owned_dirs: &[Path
 /// Record the enum's name (projected onto `int` in the cdef) and each of its
 /// enumerators with its evaluated integer value (for `const.php`).
 fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
-    if let Some(name) = entity.get_name()
-        && !is_synthetic_anonymous_name(&name)
-    {
-        collected.enums.insert(name);
+    let tag = entity
+        .get_name()
+        .filter(|name| !is_synthetic_anonymous_name(name));
+    if let Some(name) = &tag {
+        collected.enums.insert(name.clone());
     }
+    let mut cases = Vec::new();
     for constant in entity.get_children() {
         if constant.get_kind() != EntityKind::EnumConstantDecl {
             continue;
@@ -824,8 +885,16 @@ fn collect_enum(entity: &Entity<'_>, collected: &mut Collected) {
         if let (Some(name), Some((signed, _))) =
             (constant.get_name(), constant.get_enum_constant_value())
         {
-            collected.enum_constants.push((name, signed));
+            collected.enum_constants.push((name.clone(), signed));
+            cases.push((name, signed));
         }
+    }
+    // A named, non-empty enum can become a PHP `enum`. Anonymous enums (just a bag
+    // of int constants) and empty ones stay in `const.php` only.
+    if let Some(name) = tag
+        && !cases.is_empty()
+    {
+        collected.enum_definitions.push(EnumDef { name, cases });
     }
 }
 
@@ -1399,17 +1468,52 @@ fn render_union_field(field: &Entity<'_>, collected: &Collected) -> Option<Strin
         {
             return render_struct_field(field);
         }
+        // A by-value member that is a known aggregate (`JSValueUnion u`) is rendered
+        // here, and the EMISSION-TIME gate decides safety: `has_incomplete_value_member`
+        // (with full collected state) keeps the enclosing aggregate opaque when the
+        // member's aggregate is not actually emitted, and `ordered_struct_definitions`
+        // emits dependencies first. The safety predicates MUST run at render time, not
+        // here — during collection the state is partial (a referenced type may not be
+        // collected yet), so `is_safe_union_definition` would answer inconsistently.
         if collected.struct_aliases.contains_key(&display)
             || collected.structs.contains_key(&display)
             || collected.union_aliases.contains_key(&display)
             || collected.unions.contains_key(&display)
-            || !is_builtin_value_field_type(&display)
         {
+            return render_struct_field(field);
+        }
+        if !is_builtin_value_field_type(&display) {
+            // A field whose type is a typedef to a builtin scalar (hiredis's
+            // `redisFD fd`, where `redisFD` is `typedef int`) is renderable: emit it
+            // as the RESOLVED scalar so it is sizable without the gate having to know
+            // the typedef name and without depending on that typedef being emitted.
+            // This keeps the enclosing struct from going opaque over a scalar alias.
+            if let Some(name) = field.get_name()
+                && let Some(scalar) = field_value_scalar_spelling(&field_type)
+            {
+                return Some(format!("{} {name};", scalar));
+            }
             return None;
         }
     }
 
     render_struct_field(field)
+}
+
+/// The resolved builtin-scalar spelling for a by-value field whose canonical type is
+/// an arithmetic scalar or an enum (e.g. a typedef `redisFD` → `int`), or `None` for
+/// anything else (pointers, records, arrays — handled elsewhere). Lets a struct keep
+/// a scalar-typedef field without the conservative opacity gate dropping the whole
+/// aggregate over an unrecognised typedef name.
+fn field_value_scalar_spelling(field_type: &clang::Type<'_>) -> Option<String> {
+    let canonical = field_type.get_canonical_type();
+    if canonical.get_pointee_type().is_some() {
+        return None;
+    }
+    if canonical.get_kind() == TypeKind::Enum {
+        return Some("int".to_owned());
+    }
+    builtin_scalar_spelling(canonical.get_kind()).map(str::to_owned)
 }
 
 fn is_builtin_value_field_type(display: &str) -> bool {
@@ -3119,10 +3223,18 @@ fn split_top_level_commas(params: &str) -> Vec<&str> {
 }
 
 fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) -> String {
+    // An enum *usage* keeps its bare typedef name ONLY in function declarations, so
+    // `parse_function_signatures` can tag enum-typed params/returns for the PHP-enum
+    // layer (the name still resolves to `int` via the emitted `typedef int <enum>`).
+    // Everywhere else (typedefs, globals, struct/union bodies) it must project to
+    // `int`: keeping the name in the enum's OWN forward typedef would emit
+    // `typedef <enum> <enum>` (self-referential, conflicts with `typedef int <enum>`)
+    // and break `FFI::cdef` — notcurses's `ncintype_e`/`ncblitter_e`.
+    let no_enums: BTreeSet<String> = BTreeSet::new();
     let mut typedefs = collected
         .typedefs
         .iter()
-        .map(|typedef| project_enums_to_int(typedef))
+        .map(|typedef| project_enums_to_int(typedef, &no_enums))
         .collect::<Vec<_>>();
     // For resolving byte-pointer parameters hidden behind a typedef.
     let byte_typedefs = simple_typedef_map(collected);
@@ -3157,7 +3269,7 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
             Some(symbols) => function_decl_name(function).is_none_or(|name| symbols.contains(name)),
             None => true,
         })
-        .map(|function| project_enums_to_int(function))
+        .map(|function| project_enums_to_int(function, &collected.enums))
         .map(|function| rewrite_byte_pointer_params(&function, &byte_typedefs))
         .map(|function| rename_type_colliding_params(&function, &declared_type_names))
         .collect::<Vec<_>>();
@@ -3171,7 +3283,7 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
             Some(symbols) => global_decl_name(global).is_none_or(|name| symbols.contains(&name)),
             None => true,
         })
-        .map(|global| project_enums_to_int(global))
+        .map(|global| project_enums_to_int(global, &no_enums))
         .collect::<Vec<_>>();
 
     // Resolve types referenced by the kept declarations but defined only in
@@ -3314,23 +3426,28 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
         out.push('\n');
     }
 
+    // The structs/unions the cdef emits with a full body (everything else stays
+    // forward-declared/opaque). Computed once: a union must be structurally safe and
+    // every by-value aggregate member must itself be emittable (transitively).
+    let (emit_structs, emit_unions) = emittable_aggregates(collected);
+
     out.push('\n');
     out.push_str("struct timeval { long tv_sec; int tv_usec; };\n");
     for (name, definition) in &collected.unions {
-        if !is_safe_union_definition(name, definition, collected) {
+        if !emit_unions.contains(name) {
             continue;
         }
-        out.push_str(&project_enums_to_int(definition));
+        out.push_str(&project_enums_to_int(definition, &no_enums));
         out.push('\n');
     }
     for definition in ordered_struct_definitions(collected) {
         // A struct with a by-value member of a type the cdef leaves incomplete
-        // (an embedded system `struct sockaddr_in`) can't be laid out; keep it
-        // opaque (forward-declared only) rather than emit an unsizable body.
-        if has_incomplete_value_member(definition, collected) {
+        // (an embedded system `struct sockaddr_in`, or an unsafe union) can't be
+        // laid out; keep it opaque (forward-declared only).
+        if struct_definition_tag(definition).is_none_or(|tag| !emit_structs.contains(tag)) {
             continue;
         }
-        out.push_str(&project_enums_to_int(definition));
+        out.push_str(&project_enums_to_int(definition, &no_enums));
         out.push('\n');
     }
 
@@ -3736,6 +3853,34 @@ fn callback_component_types(function: &str) -> Vec<String> {
     components
 }
 
+/// Drop single-line function declarations the resolved library does not export
+/// from a verbatim (empty-`symbol_prefix`) header. Only lines that are clearly a
+/// single-line function declaration are considered (end in `;`, contain `(`, carry
+/// no aggregate body, and are not a `typedef`/tag definition); everything else —
+/// typedefs, struct/union/enum, blank lines, and any function whose return type is
+/// a `struct`/`union`/`enum` (conservatively kept) — passes through unchanged. This
+/// is the empty-prefix counterpart to the export filter in [`render`].
+fn filter_verbatim_to_exports(header: &str, exported: &BTreeSet<String>) -> String {
+    let mut out = String::new();
+    for line in header.lines() {
+        let trimmed = line.trim();
+        let looks_like_function = trimmed.ends_with(';')
+            && trimmed.contains('(')
+            && !trimmed.contains('{')
+            && !trimmed.starts_with("typedef ")
+            && !trimmed.starts_with("struct ")
+            && !trimmed.starts_with("union ")
+            && !trimmed.starts_with("enum ");
+        let drop = looks_like_function
+            && function_decl_name(trimmed).is_some_and(|name| !exported.contains(name));
+        if !drop {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// The function name in a cdef declaration like `int foo(int a);` — the
 /// identifier immediately before the parameter list.
 fn function_decl_name(function: &str) -> Option<&str> {
@@ -3969,7 +4114,74 @@ fn next_nonspace(input: &str, index: usize) -> Option<char> {
     input[index..].chars().find(|ch| !ch.is_whitespace())
 }
 
-fn is_safe_union_definition(name: &str, definition: &str, collected: &Collected) -> bool {
+/// The set of struct tags and union tags the cdef will actually EMIT with a full
+/// body, computed once for the whole package by fixpoint. A union must be
+/// structurally safe (reference no struct and no other union) AND every aggregate
+/// any kept aggregate embeds BY VALUE must itself be emitted — so a struct embedding
+/// a union (`JSValue` ← `JSValueUnion`) is emitted only if that union is, and one
+/// embedding an unsafe union (`config_setting_t` ← `config_value_t`) is not. Doing
+/// this as a fixpoint (vs per-aggregate recursion) keeps it cheap on big headers.
+fn emittable_aggregates(collected: &Collected) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut structs: BTreeSet<String> = collected.structs.keys().cloned().collect();
+    let mut unions: BTreeSet<String> = collected
+        .unions
+        .iter()
+        .filter(|(name, definition)| union_structurally_safe(name, definition, collected))
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let drop_unions: Vec<String> = unions
+            .iter()
+            .filter(|name| {
+                aggregate_has_unemittable_member(
+                    &collected.unions[*name],
+                    collected,
+                    &structs,
+                    &unions,
+                )
+            })
+            .cloned()
+            .collect();
+        let drop_structs: Vec<String> = structs
+            .iter()
+            .filter(|name| {
+                aggregate_has_unemittable_member(
+                    &collected.structs[*name],
+                    collected,
+                    &structs,
+                    &unions,
+                )
+            })
+            .cloned()
+            .collect();
+        if drop_unions.is_empty() && drop_structs.is_empty() {
+            break;
+        }
+        for name in drop_unions {
+            unions.remove(&name);
+        }
+        for name in drop_structs {
+            structs.remove(&name);
+        }
+    }
+    (structs, unions)
+}
+
+/// The tag of a `struct TAG { … };` definition (the identifier after `struct `),
+/// or `None` if the string is not a named struct definition.
+fn struct_definition_tag(definition: &str) -> Option<&str> {
+    let rest = definition.trim_start().strip_prefix("struct ")?;
+    let tag = rest.trim_start();
+    let end = tag
+        .find(|ch: char| !is_c_identifier_char(ch))
+        .unwrap_or(tag.len());
+    (end > 0).then(|| &tag[..end])
+}
+
+/// Whether a union's body references no `struct`/`struct`-alias (PHP FFI can't place
+/// those in a union here) and no OTHER union — a fixed structural prerequisite for
+/// emitting the union, independent of which aggregates end up emittable.
+fn union_structurally_safe(name: &str, definition: &str, collected: &Collected) -> bool {
     for candidate in collected
         .structs
         .keys()
@@ -3988,15 +4200,27 @@ fn is_safe_union_definition(name: &str, definition: &str, collected: &Collected)
             return false;
         }
     }
-    !has_incomplete_value_member(definition, collected)
+    true
 }
 
-/// Whether an aggregate body has a *by-value* member of a `struct`/`union` whose
-/// full definition the cdef never emits (a system type like `struct sockaddr_in`,
-/// only forward-declared). PHP FFI can't size such a member, so the enclosing
-/// aggregate must stay opaque (libuv/libcares/libwebsockets embed sockaddrs by
-/// value). Pointer members (`struct sockaddr_in *`) are fine and ignored.
-fn has_incomplete_value_member(definition: &str, collected: &Collected) -> bool {
+/// Whether an aggregate body has a *by-value* member of a `struct`/`union` NOT in
+/// the emittable sets — a forward-declared system type (`struct sockaddr_in`), an
+/// unsafe union (`config_value_t`), or a struct itself incomplete. PHP FFI can't
+/// size such a member, so the enclosing aggregate must stay opaque. Pointer members
+/// are fine and ignored. Non-recursive: the sets already capture transitive
+/// emittability (see [`emittable_aggregates`]).
+fn aggregate_has_unemittable_member(
+    definition: &str,
+    collected: &Collected,
+    structs: &BTreeSet<String>,
+    unions: &BTreeSet<String>,
+) -> bool {
+    // Scan the MEMBERS only — skip the aggregate's own `struct/union NAME {` header,
+    // or its leading tag would be read as a by-value member of itself. Members all
+    // sit after the first `{`.
+    let definition = definition
+        .find('{')
+        .map_or(definition, |brace| &definition[brace..]);
     for keyword in ["struct", "union"] {
         let mut search_from = 0;
         while let Some(found) = definition[search_from..].find(keyword) {
@@ -4027,34 +4251,32 @@ fn has_incomplete_value_member(definition: &str, collected: &Collected) -> bool 
             if after[tag.len()..].trim_start().starts_with('*') {
                 continue;
             }
+            // "Complete" means actually EMITTED — present in the precomputed set.
             let complete = if keyword == "struct" {
-                collected.structs.contains_key(&tag)
+                structs.contains(&tag)
             } else {
-                collected.unions.contains_key(&tag)
+                unions.contains(&tag)
             };
             if !complete {
                 return true;
             }
         }
     }
-    // A by-value member typed as a bare *typedef* (no `struct`/`union` keyword)
-    // that aliases an aggregate whose body the cdef never emits — mbedtls embeds
-    // `mbedtls_x509_san_other_name`, a typedef for an incomplete struct, by value
-    // inside a union. PHP FFI can't size it, so the enclosing aggregate must stay
-    // opaque. Pointer members (`alias *p`) need no size and are ignored.
-    let incomplete_value_aliases = collected
+    // A by-value member typed as a bare *typedef* (no `struct`/`union` keyword) that
+    // aliases an aggregate the cdef won't emit — mbedtls embeds the incomplete
+    // `mbedtls_x509_san_other_name` by value; libconfig embeds the unsafe union alias
+    // `config_value_t` by value. Pointer members (`alias *p`) need no size, ignored.
+    let incomplete_struct_aliases = collected
         .struct_aliases
         .iter()
-        .filter(|(_, tag)| !collected.structs.contains_key(*tag))
-        .map(|(alias, _)| alias)
-        .chain(
-            collected
-                .union_aliases
-                .iter()
-                .filter(|(_, tag)| !collected.unions.contains_key(*tag))
-                .map(|(alias, _)| alias),
-        );
-    for alias in incomplete_value_aliases {
+        .filter(|(_, tag)| !structs.contains(*tag))
+        .map(|(alias, _)| alias);
+    let incomplete_union_aliases = collected
+        .union_aliases
+        .iter()
+        .filter(|(_, tag)| !unions.contains(*tag))
+        .map(|(alias, _)| alias);
+    for alias in incomplete_struct_aliases.chain(incomplete_union_aliases) {
         if contains_value_member(definition, alias) {
             return true;
         }
@@ -4239,7 +4461,7 @@ fn rename_param_if_type(param: &str, index: usize, type_names: &BTreeSet<String>
 /// forward-declares (FFmpeg's `AVMediaType`) and case-variant enum tags that would
 /// otherwise generate colliding wrappers (OpenBLAS's `order`/`Order`). A definition
 /// (`enum Name { ... }`) is left intact.
-fn project_enums_to_int(input: &str) -> String {
+fn project_enums_to_int(input: &str, known_enums: &BTreeSet<String>) -> String {
     let bytes = input.as_bytes();
     let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -4260,9 +4482,17 @@ fn project_enums_to_int(input: &str) -> String {
                 while k < bytes.len() && bytes[k].is_ascii_whitespace() {
                     k += 1;
                 }
-                // `enum Name {` is a definition — keep it; a usage projects to int.
+                // `enum Name {` is a definition — keep it; a usage projects to the
+                // bare typedef name when the enum is one this cdef emits as
+                // `typedef int Name` (so it stays a PHP-enum-bearing name and still
+                // resolves to int for FFI), otherwise to plain `int`.
                 if !(k < bytes.len() && bytes[k] == b'{') {
-                    out.extend_from_slice(b"int");
+                    let name = &input[id_start..j];
+                    if known_enums.contains(name) {
+                        out.extend_from_slice(name.as_bytes());
+                    } else {
+                        out.extend_from_slice(b"int");
+                    }
                     i = j;
                     continue;
                 }
@@ -4456,6 +4686,33 @@ mod tests {
             callback_component_types("void ex_on(void (*cb)(void));"),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn empty_prefix_header_drops_unexported_functions() {
+        use super::filter_verbatim_to_exports;
+        let header = "typedef unsigned long size_t;\n\
+struct tm { int tm_sec; };\n\
+int printf(const char *fmt, ...);\n\
+int atexit(void *func);\n\
+void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *));\n\
+void *malloc(size_t n);\n";
+        let exported: std::collections::BTreeSet<String> = ["printf", "malloc", "qsort"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let out = filter_verbatim_to_exports(header, &exported);
+        // Exported functions kept; the unexported one (libc_nonshared `atexit`) dropped.
+        assert!(out.contains("int printf(const char *fmt, ...);"), "{out}");
+        assert!(out.contains("void *malloc(size_t n);"), "{out}");
+        assert!(out.contains("void qsort("), "fnptr-param fn kept: {out}");
+        assert!(
+            !out.contains("atexit"),
+            "unexported atexit should be dropped: {out}"
+        );
+        // Non-function lines pass through verbatim.
+        assert!(out.contains("typedef unsigned long size_t;"), "{out}");
+        assert!(out.contains("struct tm { int tm_sec; };"), "{out}");
     }
 
     #[test]
