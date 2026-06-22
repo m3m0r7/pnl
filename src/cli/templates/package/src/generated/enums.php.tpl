@@ -22,6 +22,10 @@ declare(strict_types=1);
  * where this enum is accepted (its backing `->value` is sent to C); a returned
  * value is mapped back with `{{ENUM_CLASS}}::tryFrom()`, yielding `null` for a value
  * the C API returned that is outside the enum.
+ *
+ * `toInt()` returns the backing C value, mirroring the integer-wrapper API that
+ * scalar returns expose (PHP enums cannot define `__toString`, so use `->name`
+ * for a label). Compare cases directly (`$x === {{ENUM_CLASS}}::SOME_CASE`).
  */
 
 namespace {{NAMESPACE}}\Enums;
@@ -29,4 +33,10 @@ namespace {{NAMESPACE}}\Enums;
 enum {{ENUM_CLASS}}: int
 {
 {{#each cases}}    case {{name}} = {{value}};
-{{/each}}}
+{{/each}}
+    /** The backing C integer value (alias of `->value`). */
+    public function toInt(): int
+    {
+        return $this->value;
+    }
+}

@@ -22,6 +22,10 @@ declare(strict_types=1);
  * where this enum is accepted (its backing `->value` is sent to C); a returned
  * value is mapped back with `example_mode::tryFrom()`, yielding `null` for a value
  * the C API returned that is outside the enum.
+ *
+ * `toInt()` returns the backing C value, mirroring the integer-wrapper API that
+ * scalar returns expose (PHP enums cannot define `__toString`, so use `->name`
+ * for a label). Compare cases directly (`$x === example_mode::SOME_CASE`).
  */
 
 namespace Pnlx\Example\Enums;
@@ -31,4 +35,9 @@ enum example_mode: int
     case EXAMPLE_MODE_OFF = 0;
     case EXAMPLE_MODE_ON = 1;
     case EXAMPLE_MODE_AUTO = 10;
+    /** The backing C integer value (alias of `->value`). */
+    public function toInt(): int
+    {
+        return $this->value;
+    }
 }

@@ -229,10 +229,22 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
     // API declarations depend on (libunistring's `_UC_ATTRIBUTE_CONST` and `ucs4_t`
     // live in unitypes.h next to unictype.h; without it every `uc_is_*` decl drops).
     for path in &options.package_header_paths {
-        if let Some(parent) = path.parent().map(Path::to_path_buf)
-            && !include_dirs.contains(&parent)
-        {
-            include_dirs.push(parent);
+        if let Some(parent) = path.parent().map(Path::to_path_buf) {
+            // The header's own directory, for sibling quote-includes.
+            if !include_dirs.contains(&parent) {
+                include_dirs.push(parent.clone());
+            }
+            // When the header lives under an `include/<pkg>/` subdirectory, also
+            // add that `include` root so an angle include carrying the subdir
+            // prefix resolves (lzo's `#include <lzo/lzodefs.h>` needs
+            // `.../include` on `-I`, not just `.../include/lzo`; without it
+            // libclang aborts the parse and emits zero functions).
+            if let Some(grandparent) = parent.parent().map(Path::to_path_buf)
+                && grandparent.file_name().is_some_and(|name| name == "include")
+                && !include_dirs.contains(&grandparent)
+            {
+                include_dirs.push(grandparent);
+            }
         }
     }
     // The pkg-config `--cflags` dirs (libdir configs etc.) the compiler would see.
@@ -375,6 +387,14 @@ fn parse_with_neutralized_macros(
             .context("prelude path is not UTF-8")?
             .to_owned(),
     ];
+    // On macOS, point libclang at the active SDK so system headers
+    // (`<time.h>`, `<sys/types.h>`, …) resolve. Without a sysroot, types like
+    // `time_t`/`size_t` brought in by a `#include <…>` are undefined and
+    // libclang's error recovery rewrites a callback typedef whose return type is
+    // that undefined name into a bogus function type (`typedef int time_t(int*)`),
+    // which then makes every function returning it look like "function returning
+    // function" and fails the PHP-FFI parse (libgnutls, libenet).
+    arguments.extend(macos_isysroot_args());
     // User-resolved `require_definitions`, so a config-gated header parses (pcre2's
     // `#error` guard) and its conditioned declarations/types are collected.
     arguments.extend(define_args.iter().cloned());
@@ -438,6 +458,39 @@ fn parse_with_neutralized_macros(
     Err(anyhow!(
         "header still failed to parse after neutralising macros"
     ))
+}
+
+/// `-isysroot <path>` for the active macOS SDK so libclang resolves system
+/// headers, or empty off macOS / when no SDK can be located. `$SDKROOT` wins
+/// (honours an explicit override), then `xcrun --show-sdk-path`, then a
+/// developer-dir fallback. Mirrors `native.rs`'s `macos_sdk_lib_dirs`.
+fn macos_isysroot_args() -> Vec<String> {
+    if std::env::consts::OS != "macos" {
+        return Vec::new();
+    }
+    let run = |program: &str, args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let sdk = std::env::var("SDKROOT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| run("xcrun", &["--show-sdk-path"]).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            run("xcode-select", &["-p"])
+                .filter(|s| !s.is_empty())
+                .map(|dev| format!("{dev}/SDKs/MacOSX.sdk"))
+        });
+    match sdk {
+        Some(sdk) if Path::new(&sdk).is_dir() => vec!["-isysroot".to_owned(), sdk],
+        _ => Vec::new(),
+    }
 }
 
 /// Identifier tokens that look like call-convention or attribute macros:

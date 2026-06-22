@@ -634,15 +634,18 @@ fn env_path_dirs(name: &str) -> Vec<PathBuf> {
 }
 
 /// pkg-config module names to try for a requirement key. The key is rarely the
-/// exact `.pc` module name (e.g. key `libpixman-1` -> module `pixman-1`, key
-/// `libdbus-1` -> module `dbus-1`), so also try the key without its leading
-/// `lib`.
+/// exact `.pc` module name, so also try variants: the key without its leading
+/// `lib` (key `libpixman-1` -> module `pixman-1`, key `libdbus-1` -> module
+/// `dbus-1`), and the key WITH a `lib` prefix (key `enet` -> module `libenet`,
+/// whose `.pc` is `libenet.pc`).
 fn pkg_config_modules(key: &str) -> Vec<String> {
     let mut modules = vec![key.to_owned()];
     if let Some(stripped) = key.strip_prefix("lib")
         && !stripped.is_empty()
     {
         modules.push(stripped.to_owned());
+    } else {
+        modules.push(format!("lib{key}"));
     }
     modules
 }
@@ -705,14 +708,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pkg_config_modules_also_tries_without_lib_prefix() {
+    fn pkg_config_modules_tries_lib_prefix_variants() {
+        // A `lib`-prefixed key also tries the stripped form.
         assert_eq!(
             pkg_config_modules("libpixman-1"),
             ["libpixman-1", "pixman-1"]
         );
         assert_eq!(pkg_config_modules("libdbus-1"), ["libdbus-1", "dbus-1"]);
-        // No leading `lib`: only the key itself.
-        assert_eq!(pkg_config_modules("openssl"), ["openssl"]);
+        // A key without a leading `lib` also tries the `lib`-prefixed form
+        // (key `enet` -> module `libenet`, whose `.pc` is `libenet.pc`).
+        assert_eq!(pkg_config_modules("enet"), ["enet", "libenet"]);
+        assert_eq!(pkg_config_modules("openssl"), ["openssl", "libopenssl"]);
     }
 
     #[test]

@@ -38,7 +38,9 @@ class {{TYPE}} extends {{BASE}}
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
         parent::__construct(
-            $cdata ?? {{ENTITY}}::pnlxNativeLibrary()->allocate(sprintf('{{TYPE}}[%d]', $size))
+            $cdata !== null
+                ? {{ENTITY}}::pnlxNativeLibrary()->reinterpret('{{TYPE}}', $cdata)
+                : {{ENTITY}}::pnlxNativeLibrary()->allocate(sprintf('{{TYPE}}[%d]', $size))
         );
     }
 {{#each fields}}

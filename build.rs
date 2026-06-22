@@ -13,8 +13,10 @@
 //! [`generate_config_constants`]) so the built-in endpoints and defaults travel
 //! with the binary without any runtime TOML parsing.
 
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use handlebars::Handlebars;
@@ -25,6 +27,22 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set for build scripts"));
     generate_config_constants(&out_dir);
+
+    // The PHP SDK under `src/sdk` is embedded with `include_dir!` (see
+    // `sdk_assets.rs`). On stable Rust that macro does NOT register the embedded
+    // files as rebuild triggers, so editing an SDK file alone would otherwise leave
+    // a stale runtime baked into the binary (a fixed `Util`/`NativeLibrary` method
+    // would silently not ship). Two-part guard: (1) re-export every SDK file as a
+    // build-script trigger so this script reruns on any change, and (2) write a
+    // content fingerprint that `sdk_assets.rs` pulls in via `include_str!` (which
+    // cargo DOES track), so a changed fingerprint forces that module to recompile
+    // and `include_dir!` to re-embed the current tree.
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
+    let mut fingerprint = String::new();
+    fingerprint_sdk_tree(&manifest_dir.join("src/sdk"), &mut fingerprint);
+    fs::write(out_dir.join("sdk_fingerprint.txt"), fingerprint)
+        .expect("failed to write SDK fingerprint");
 
     let dest = out_dir.join("support.lib");
 
@@ -127,6 +145,30 @@ fn generate_config_constants(out_dir: &Path) {
 
     fs::write(out_dir.join("config_constants.rs"), generated)
         .expect("failed to write generated config constants");
+}
+
+/// Walk `src/sdk` in sorted order, emitting a `rerun-if-changed` for every file
+/// and appending each file's path and length to `fingerprint`. The fingerprint is
+/// written to OUT_DIR and `include_str!`d by `sdk_assets.rs`, so any SDK edit
+/// changes a cargo-tracked input and forces the embedded copy to be rebuilt.
+fn fingerprint_sdk_tree(dir: &Path, fingerprint: &mut String) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.is_dir() {
+            fingerprint_sdk_tree(&path, fingerprint);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+            let bytes = fs::read(&path).unwrap_or_default();
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            fingerprint.push_str(&format!("{}:{:x}\n", path.display(), hasher.finish()));
+        }
+    }
 }
 
 /// Walk a dotted path of nested TOML tables, returning the value at the leaf.

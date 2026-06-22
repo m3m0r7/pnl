@@ -117,6 +117,61 @@ abstract class AbstractExtension
     }
 
     /**
+     * Describe what this extension contributes to a composed FFI scope: absolute
+     * paths to its generated cdef and alias-map files, its co-load libraries, and
+     * its own native library path. Consumed by {@see \Pnlx\Runtime::compose()}.
+     *
+     * `pnlx`-prefixed so it cannot collide with a generated C-function method.
+     *
+     * @return array{cdef: string, aliases: string, libraries: list<string>, path: string}
+     */
+    public static function pnlxComposeDescriptor(): array
+    {
+        $directory = self::pnlxGeneratedDirectory();
+
+        return [
+            'cdef' => $directory . '/' . static::FFI_FILE,
+            'aliases' => $directory . '/' . static::ALIASES_FILE,
+            'libraries' => static::LIBRARIES,
+            'path' => static::PATH,
+        ];
+    }
+
+    /**
+     * Adopt a shared {@see NativeLibrary} (assembled by {@see \Pnlx\Runtime::compose()})
+     * as this extension's booted library, so its generated methods dispatch through
+     * the shared FFI scope and can exchange CData with the other composed extensions.
+     * Marks the class booted so the normal per-class {@see boot()} is skipped.
+     *
+     * `pnlx`-prefixed so it cannot collide with a generated C-function method.
+     */
+    public static function pnlxAdoptNativeLibrary(NativeLibrary $library): void
+    {
+        self::$natives[static::class] = $library;
+        self::$initialized[static::class] = true;
+
+        \Pnlx\FFI\ArgumentMarshaller::rememberScalarsAllowed(
+            static::class,
+            Runtime::useScalarsInParams((new Runtime())->projectRoot()),
+        );
+    }
+
+    /**
+     * The generated directory holding the cdef and alias map. Entity variants live
+     * in `cdata/`/`scalar/` subdirs, so walk up from this class's file until the
+     * cdef file appears.
+     */
+    private static function pnlxGeneratedDirectory(): string
+    {
+        $directory = dirname((string) (new \ReflectionClass(static::class))->getFileName());
+        while (!is_file($directory . '/' . static::FFI_FILE) && dirname($directory) !== $directory) {
+            $directory = dirname($directory);
+        }
+
+        return $directory;
+    }
+
+    /**
      * One-time per-class setup: verify the baked native library against its constant hash
      * and open it. The cdef and alias map are siblings of the generated entity, so
      * we locate them from this class's own file — no manifest or pathmap lookup.
@@ -142,12 +197,7 @@ abstract class AbstractExtension
             }
         }
 
-        // Entity variants live in cdata/scalar subdirs; the cdef/alias map sit in
-        // the base generated dir, so walk up from this file until the cdef appears.
-        $directory = dirname((string) (new \ReflectionClass(static::class))->getFileName());
-        while (!is_file($directory . '/' . static::FFI_FILE) && dirname($directory) !== $directory) {
-            $directory = dirname($directory);
-        }
+        $directory = self::pnlxGeneratedDirectory();
 
         self::$natives[static::class] = NativeLibrary::load(
             $directory . '/' . static::FFI_FILE,

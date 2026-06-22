@@ -108,6 +108,44 @@ class NativeLibrary
     }
 
     /**
+     * Build ONE FFI scope shared by several composed extensions (see
+     * {@see \Pnlx\Runtime::compose()}): co-load every member library into the global
+     * symbol table, then bind the already-merged cdef with NO library so each
+     * declared function resolves against whichever loaded library exports it — and,
+     * crucially, every value lives in a single scope, so a CData produced by one
+     * member's call can be passed to another's.
+     *
+     * Unlike {@see load()} this takes the merged cdef and alias map in memory (the
+     * caller assembled them from the members), not from files.
+     *
+     * @param array<string, string> $aliases   Merged PHP-facing name => native symbol map.
+     * @param list<string>          $libraries Absolute paths of the member libraries
+     *                                         (and their co-load dependencies) to load.
+     *
+     * @throws ExtensionLoadException When a library cannot be co-loaded.
+     */
+    public static function composite(string $cdef, array $aliases, array $libraries): self
+    {
+        $loaded = [];
+        foreach ($libraries as $path) {
+            if ($path === '' || !is_file($path)) {
+                continue;
+            }
+            try {
+                $loaded[] = FFI::cdef('', $path);
+            } catch (Throwable $e) {
+                throw new ExtensionLoadException(
+                    sprintf('Failed to co-load library %s.', $path),
+                    0,
+                    $e
+                );
+            }
+        }
+
+        return new self(FFI::cdef($cdef), self::normalizeAliases($aliases), $loaded);
+    }
+
+    /**
      * Invoke a native function by its PHP-facing name.
      *
      * @param string      $name      Alias or native symbol name to call.
@@ -148,6 +186,26 @@ class NativeLibrary
         }
 
         return $value;
+    }
+
+    /**
+     * Reinterpret an existing pointer as a pointer to `$type` in this library's FFI
+     * scope, so a value handed back as an untyped `void *` (hiredis's `redisCommand`
+     * returns a `redisReply *` typed `void *`) can be wrapped in its real type and
+     * have its fields read. A best-effort cast: if `$type` is not a castable type in
+     * this scope (an opaque/unknown name, or the value is already the right shape),
+     * the original value is returned unchanged, so this never makes a working wrapper
+     * worse — an already-correctly-typed pointer just round-trips.
+     */
+    public function reinterpret(string $type, CData $value): CData
+    {
+        try {
+            $cast = $this->ffi->cast($type . ' *', $value);
+
+            return $cast instanceof CData ? $cast : $value;
+        } catch (\Throwable) {
+            return $value;
+        }
     }
 
     /**

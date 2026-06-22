@@ -405,6 +405,15 @@ pub(super) fn collect_pointer_types(options: &PhpPackageTemplateOptions<'_>) -> 
             }
         }
     }
+    // Also emit a wrapper for every struct the cdef defines with a body, even when
+    // no function takes/returns a pointer to it — a library may hand back such a
+    // struct through `void *` (hiredis's `redisReply`, re-wrapped by the caller).
+    // Match the signature-derived naming (`reserved_suffix`, the form
+    // `pointer_type_name` produces) so a struct that IS named in a signature is not
+    // emitted twice under two class names.
+    for tag in options.struct_fields.keys() {
+        names.insert(reserved_suffix(tag));
+    }
     names.into_iter().collect()
 }
 

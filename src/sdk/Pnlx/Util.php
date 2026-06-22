@@ -10,9 +10,11 @@ use FFI\CData;
 /**
  * Static helpers for working with FFI values returned by native libraries.
  *
- * Used by generated extension code to convert C string pointers to PHP strings.
- * The null-pointer check lives as a function instead — see
- * {@see \Pnlx\Util\is_null()} in Util/functions.php.
+ * Used by generated extension code to convert C string pointers to PHP strings
+ * and to null-check returned pointers. A richer null check that also shadows
+ * PHP's built-in is also available as a function — see {@see \Pnlx\Util\is_null()}
+ * in Util/functions.php — but generated code calls {@see isNull()} here so it
+ * works without that function file being required.
  */
 class Util
 {
@@ -69,5 +71,37 @@ class Util
         }
 
         return self::cString($value);
+    }
+
+    /**
+     * Null-pointer check used by generated struct field accessors. Mirrors
+     * {@see \Pnlx\Util\is_null()} but as a static method so generated code does
+     * not depend on the Util/functions.php file being loaded.
+     *
+     * A generated {@see \Pnlx\Types\PointerInterface} wrapper reports the pointer
+     * it wraps; a {@see \Pnlx\Types\Null_} value object is always null; a raw FFI
+     * {@see CData} pointer is checked via {@see FFI::isNull()} (any failure means
+     * "not null", since that method only accepts pointer CData); anything else
+     * falls back to PHP's native `\is_null`.
+     */
+    public static function isNull(mixed $value): bool
+    {
+        if ($value instanceof \Pnlx\Types\Null_) {
+            return true;
+        }
+
+        if ($value instanceof \Pnlx\Types\PointerInterface) {
+            $value = $value->cdata();
+        }
+
+        if (!$value instanceof CData) {
+            return \is_null($value);
+        }
+
+        try {
+            return FFI::isNull($value);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 }

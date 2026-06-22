@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Pnlx;
 
 use Pnlx\Exception\ExtensionLoadException;
+use Pnlx\Extension\AbstractExtension;
+use Pnlx\FFI\CdefComposer;
+use Pnlx\FFI\NativeLibrary;
 
 /**
  * Central entry point that wires together the SDK and loads extensions.
@@ -120,6 +123,100 @@ class Runtime implements RuntimeInterface
     public static function useScalarsInConst(?string $projectRoot = null): bool
     {
         return self::feature('use_php_scalars_in_const', $projectRoot);
+    }
+
+    /**
+     * Compose several generated extensions into ONE shared FFI scope, so a CData
+     * produced by one (e.g. an SDL2_image surface from `Sdlimage::IMG_Load`) can be
+     * passed straight into another (e.g. `Libsdl::SDL_CreateTextureFromSurface`).
+     *
+     * Each member's generated cdef is merged into one (see {@see CdefComposer}), the
+     * member libraries are co-loaded into a single {@see NativeLibrary} scope, and
+     * that scope is adopted by every member class — so their generated methods keep
+     * marshalling arguments and wrapping return values exactly as before; only the
+     * underlying native scope is now shared.
+     *
+     * Call it once, before using the members. Returns a {@see ComposedScope} that
+     * also proxies calls, so `Runtime::compose([A::class, B::class])->some_func(...)`
+     * works; plain `A::some_func(...)` / `B::other_func(...)` share the scope too.
+     *
+     * @param list<class-string<AbstractExtension>> $classes Generated entity classes.
+     *
+     * @throws ExtensionLoadException When fewer than two classes are given or a
+     *                                member's generated cdef/alias files are unusable.
+     */
+    public static function compose(array $classes): ComposedScope
+    {
+        if (count($classes) < 2) {
+            throw new ExtensionLoadException('Runtime::compose() needs at least two extension classes.');
+        }
+
+        $cdefs = [];
+        $aliases = [];
+        $libraries = [];
+        foreach ($classes as $class) {
+            $descriptor = $class::pnlxComposeDescriptor();
+
+            $cdef = require $descriptor['cdef'];
+            if (!is_string($cdef)) {
+                throw new ExtensionLoadException(sprintf('CDEF file %s must return a string.', $descriptor['cdef']));
+            }
+            $cdefs[] = $cdef;
+
+            $memberAliases = require $descriptor['aliases'];
+            if (!is_array($memberAliases)) {
+                throw new ExtensionLoadException(sprintf('Aliases file %s must return an array.', $descriptor['aliases']));
+            }
+            /** @var array<string, string> $memberAliases */
+            $aliases += $memberAliases;
+
+            foreach ([...$descriptor['libraries'], $descriptor['path']] as $library) {
+                if ($library !== '') {
+                    $libraries[$library] = $library;
+                }
+            }
+        }
+
+        $shared = NativeLibrary::composite(
+            CdefComposer::merge($cdefs),
+            $aliases,
+            array_values($libraries),
+        );
+
+        $owners = [];
+        foreach ($classes as $class) {
+            $class::pnlxAdoptNativeLibrary($shared);
+            foreach (self::nativeFunctionNames($class) as $function) {
+                $owners[strtolower($function)] ??= $class;
+            }
+        }
+
+        return new ComposedScope($classes, $owners);
+    }
+
+    /**
+     * The native-function method names a generated entity exposes: public static
+     * methods it declares itself (the C functions and their camelCase aliases),
+     * excluding the inherited runtime plumbing (`__callStatic`, the `pnlx*` helpers).
+     *
+     * @param class-string<AbstractExtension> $class
+     * @return list<string>
+     */
+    private static function nativeFunctionNames(string $class): array
+    {
+        $names = [];
+        foreach ((new \ReflectionClass($class))->getMethods(\ReflectionMethod::IS_STATIC | \ReflectionMethod::IS_PUBLIC) as $method) {
+            $name = $method->getName();
+            if ($method->getDeclaringClass()->getName() === AbstractExtension::class) {
+                continue;
+            }
+            if (str_starts_with($name, '__') || str_starts_with($name, 'pnlx')) {
+                continue;
+            }
+            $names[] = $name;
+        }
+
+        return $names;
     }
 
     /** Read a boolean `features.*` flag from `pnl.json` without a full runtime. */

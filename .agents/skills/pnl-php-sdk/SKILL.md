@@ -65,6 +65,34 @@ needed) — these select which generated variant a class uses:
 | `Runtime::useScalarsInReturn()` | `use_php_scalars_in_return` | methods return PHP scalars (`scalar/<Class>.php`) |
 | `Runtime::useScalarsInConst()` | `use_php_scalars_in_const` | `const.php` uses PHP scalars (`scalar/const.php`) |
 
+## Composing extensions into one FFI scope — `Runtime::compose()`
+
+Normally each extension boots its **own** `NativeLibrary` (its own `FFI::cdef` scope),
+so a `\FFI\CData` returned by one package can't be passed into another's function (PHP
+FFI rejects cross-scope CData). `Runtime::compose([A::class, B::class, …])` fixes that for
+a set of generated extensions:
+
+```php
+use Pnlx\Runtime;
+Runtime::compose([Libsdl::class, Sdlimage::class]);          // call once, before using them
+$surface = Sdlimage::IMG_Load('logo.svg');                   // CData from one package…
+$texture = Libsdl::SDL_CreateTextureFromSurface($r, $surface); // …consumed by another — OK
+```
+
+It merges the members' generated cdefs (`Pnlx\FFI\CdefComposer`: the first member's cdef is
+kept whole, later members contribute only declarations whose introduced C identifier is new
+— so co-libraries that forward-declare a shared type and add their own functions merge
+without redeclaration), co-loads every member library into one scope
+(`NativeLibrary::composite()`), and adopts that scope into each member class
+(`AbstractExtension::pnlxAdoptNativeLibrary()`). The members' generated methods keep
+marshalling and return-wrapping unchanged; only the underlying native scope is now shared.
+
+It returns a `Pnlx\ComposedScope` that also proxies calls
+(`Runtime::compose([...])->some_c_function(...)`), routing each to the member that exposes
+it. This is the consumer-side counterpart to a package's authoring-time `dependencies`
+co-load (which only resolves symbols *within* one package's cdef). Distinct from the
+single-package multi-library `LIBRARIES` co-load.
+
 ## Entity classes (generated)
 
 Each package's entity is `Pnlx\<Pkg>\<Class>` extending `Pnlx\Extension\AbstractExtension`.

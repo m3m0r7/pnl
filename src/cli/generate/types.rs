@@ -58,6 +58,16 @@ pub(super) enum PointerOut {
 pub(super) fn pointer_out_param(c_type: &str) -> Option<PointerOut> {
     let normalized = normalize_c_type(c_type);
     match normalized.matches('*').count() {
+        // A pointer-to-const scalar (`const int *`, `const double *`) is a
+        // read-only input array, not a writable out-param. Keeping it out of the
+        // out-param path lets `value_kind` surface it as a by-value parameter that
+        // accepts `null`/a pointer, instead of a by-reference `&$p = null` (PHP
+        // cannot pass a `null` literal by reference — the libopenal/libswscale
+        // crash). A trailing `int * const` (const pointer to a mutable scalar) is
+        // still a genuine out-param, so the `const` must qualify the pointee — i.e.
+        // appear before the `*`. `const` is checked on the raw type because
+        // {@see normalize_c_type} strips it. Mirrors {@see writable_char_buffer}.
+        1 if points_to_const(c_type) => None,
         1 => scalar_pointer_element(&normalized).map(PointerOut::Scalar),
         2 => {
             let last_star = normalized.rfind('*')?;
@@ -71,6 +81,16 @@ pub(super) fn pointer_out_param(c_type: &str) -> Option<PointerOut> {
         }
         _ => None,
     }
+}
+
+/// Whether a `const` qualifier applies to the pointee (appears before the first
+/// `*`), i.e. the parameter is a pointer to read-only data. A trailing `const`
+/// (`int * const`) qualifies the pointer itself and is not counted.
+fn points_to_const(raw_type: &str) -> bool {
+    raw_type
+        .split('*')
+        .next()
+        .is_some_and(|head| head.split_whitespace().any(|token| token == "const"))
 }
 
 /// A non-const single-level `char *` (or other byte pointer) parameter: a writable
