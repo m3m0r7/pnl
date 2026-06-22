@@ -6,9 +6,8 @@ use clap::{Parser, Subcommand};
 use crate::generate::{
     PhpPackageTemplateOptions, generate_aliases_php, generate_component_php, generate_const_php,
     generate_context_php, generate_entity_php, generate_enums_php, generate_exception_php,
-    generate_ffi_php_from_cdef,
-    generate_functions_php, generate_index_php, generate_macro_functions_php,
-    generate_manifest_php, generate_symbols_php, generate_types_php,
+    generate_ffi_php_from_cdef, generate_functions_php, generate_index_php,
+    generate_macro_functions_php, generate_manifest_php, generate_symbols_php, generate_types_php,
 };
 use crate::header_adapter::{HeaderAdapterOptions, cdef_from_header};
 use crate::interaction::Interaction;

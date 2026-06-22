@@ -240,7 +240,9 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
             // `.../include` on `-I`, not just `.../include/lzo`; without it
             // libclang aborts the parse and emits zero functions).
             if let Some(grandparent) = parent.parent().map(Path::to_path_buf)
-                && grandparent.file_name().is_some_and(|name| name == "include")
+                && grandparent
+                    .file_name()
+                    .is_some_and(|name| name == "include")
                 && !include_dirs.contains(&grandparent)
             {
                 include_dirs.push(grandparent);
@@ -787,7 +789,10 @@ fn entity_owned(entity: &Entity<'_>, main_header: &Path, owned_dirs: &[PathBuf])
     // regardless of which spelling each side happens to use.
     let canonical = std::fs::canonicalize(&path).ok();
     owned_dirs.iter().any(|dir| {
-        path.starts_with(dir) || canonical.as_deref().is_some_and(|real| real.starts_with(dir))
+        path.starts_with(dir)
+            || canonical
+                .as_deref()
+                .is_some_and(|real| real.starts_with(dir))
     })
 }
 
@@ -3580,7 +3585,7 @@ fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<String>>) ->
     let mut all_type_names = declared_type_names.clone();
     all_type_names.extend(resolved_names.iter().cloned());
     all_type_names.extend(typedefs.iter().filter_map(|d| typedef_defined_name(d)));
-    all_type_names.extend(missing_types.iter().map(|(name, _)| name.clone()));
+    all_type_names.extend(missing_types.keys().cloned());
     // PHP FFI's intrinsic type names (`off_t`, `time_t`, `size_t`, …) are never
     // emitted as typedefs but still collide with a same-named param/field.
     all_type_names.extend(builtin_type_names());
@@ -4772,7 +4777,7 @@ mod tests {
         let dirs = owned_package_dirs(&[link.join("pkg.h")]);
         let canonical_real = std::fs::canonicalize(&real).expect("canonicalize");
         assert!(
-            dirs.contains(&link) && dirs.iter().any(|d| *d == canonical_real),
+            dirs.contains(&link) && dirs.contains(&canonical_real),
             "expected both the symlink dir and its resolved real dir, got {dirs:?}"
         );
     }

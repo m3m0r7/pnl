@@ -19,8 +19,7 @@ use types::sanitize_php_param_name;
 
 const FFI_TEMPLATE: &str = include_str!("templates/package/src/generated/ffi.php.tpl");
 const ENTITY_TEMPLATE: &str = include_str!("templates/package/src/generated/entity.php.tpl");
-const COMPONENT_TEMPLATE: &str =
-    include_str!("templates/package/src/generated/component.php.tpl");
+const COMPONENT_TEMPLATE: &str = include_str!("templates/package/src/generated/component.php.tpl");
 const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/manifest.php.tpl");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
@@ -1347,11 +1346,7 @@ double demo_scale(double value, int factor);\n";
     fn renders_php_methods() {
         let signatures = sample_signatures();
         // Default variant: wrapper returns (scalars_in_return = false).
-        insta::assert_snapshot!(render_methods(
-            &sample_options(&signatures),
-            false,
-            false,
-        ));
+        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, false,));
     }
 
     #[test]
@@ -1388,11 +1383,7 @@ double demo_scale(double value, int factor);\n";
     fn renders_php_methods_using_php_scalars() {
         let signatures = sample_signatures();
         // The `scalar/` variant: methods return PHP-native scalars.
-        insta::assert_snapshot!(render_methods(
-            &sample_options(&signatures),
-            false,
-            true,
-        ));
+        insta::assert_snapshot!(render_methods(&sample_options(&signatures), false, true,));
     }
 
     #[test]
@@ -1422,7 +1413,10 @@ double demo_scale(double value, int factor);\n";
         .unwrap();
 
         let stamped = fs::read_to_string(entity).unwrap();
-        assert!(stamped.contains("path: '/usr/lib/libdemo.dylib'"), "{stamped}");
+        assert!(
+            stamped.contains("path: '/usr/lib/libdemo.dylib'"),
+            "{stamped}"
+        );
         assert!(stamped.contains("hash: 'abc123'"), "{stamped}");
         assert!(
             stamped.contains("libraries: ['/usr/lib/libcblas.so']"),

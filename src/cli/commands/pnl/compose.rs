@@ -47,20 +47,26 @@ pub(super) fn compose(
     let mut resolved = Vec::new();
     let mut seen = BTreeSet::new();
     for member in members {
-        let (installed, dir) = find_installed_package(&packages_root, member)?.ok_or_else(|| {
-            anyhow::anyhow!("package {member} is not installed; run `pnl install {member}` first")
-        })?;
+        let (installed, dir) =
+            find_installed_package(&packages_root, member)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "package {member} is not installed; run `pnl install {member}` first"
+                )
+            })?;
         if !seen.insert(installed.name.clone()) {
             continue;
         }
-        let entity = entity_class_fqn(&installed)
-            .ok_or_else(|| anyhow::anyhow!("package {member} has no namespaced class to compose"))?;
+        let entity = entity_class_fqn(&installed).ok_or_else(|| {
+            anyhow::anyhow!("package {member} has no namespaced class to compose")
+        })?;
         let leaf = entity.rsplit('\\').next().unwrap_or(&entity);
         let generated = dir.join(crate::config::GENERATED_DIR);
         resolved.push(Member {
             entity_fqn: entity.clone(),
             trait_fqn: format!("{entity}LibraryComponent"),
-            methods: extract_component_methods(&generated.join(format!("{leaf}LibraryComponent.php")))?,
+            methods: extract_component_methods(
+                &generated.join(format!("{leaf}LibraryComponent.php")),
+            )?,
             functions_file: generated.join("functions.php"),
         });
         canonical_members.push(installed.name);
@@ -92,16 +98,15 @@ pub(super) fn compose(
     // \Pnlx\Func\<Composite>\* that delegate to the composite class (so they share
     // its scope and round-trip out-params), retargeted from each member's own
     // functions.php (which already carries the real, typed signatures).
-    if manifest.features.use_functions {
-        let functions = render_composite_functions(&resolved, &namespace, &class, prefix);
-        if functions.is_some() {
-            let functions_file = workspace
-                .join("composites")
-                .join(format!("{class}Functions.php"));
-            fs::write(&functions_file, functions.expect("checked is_some"))
-                .with_context(|| format!("failed to write {}", functions_file.display()))?;
-            crate::ui::created("composed functions", &functions_file);
-        }
+    if manifest.features.use_functions
+        && let Some(functions) = render_composite_functions(&resolved, &namespace, &class, prefix)
+    {
+        let functions_file = workspace
+            .join("composites")
+            .join(format!("{class}Functions.php"));
+        fs::write(&functions_file, functions)
+            .with_context(|| format!("failed to write {}", functions_file.display()))?;
+        crate::ui::created("composed functions", &functions_file);
     }
 
     manifest.composites.insert(
@@ -116,7 +121,11 @@ pub(super) fn compose(
     // Regenerate the autoload so it requires the new composite (after its members).
     super::package::write_pnlx_autoload(root)?;
 
-    crate::ui::success(&format!("composed {} from {}", as_class, members.join(", ")));
+    crate::ui::success(&format!(
+        "composed {} from {}",
+        as_class,
+        members.join(", ")
+    ));
     Ok(())
 }
 
@@ -136,8 +145,10 @@ fn build_uses_block(members: &[Member], prefix: Option<&str>) -> Result<(String,
             }
         }
     }
-    let collisions: Vec<(&&str, &Vec<usize>)> =
-        by_method.iter().filter(|(_, owners)| owners.len() > 1).collect();
+    let collisions: Vec<(&&str, &Vec<usize>)> = by_method
+        .iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .collect();
 
     if collisions.is_empty() {
         let block = members
@@ -266,7 +277,11 @@ fn render_composite_functions(
             continue; // member generated without use_functions
         };
         found_any = true;
-        let member_leaf = member.entity_fqn.rsplit('\\').next().unwrap_or(&member.entity_fqn);
+        let member_leaf = member
+            .entity_fqn
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&member.entity_fqn);
 
         for chunk in content.split("if (!function_exists(").skip(1) {
             let mut block = format!("if (!function_exists({chunk}");
@@ -300,7 +315,10 @@ fn render_composite_functions(
                 &format!("Func\\\\{composite_class}\\\\"),
             );
             if final_name != name {
-                block = block.replace(&format!("function {name}("), &format!("function {final_name}("));
+                block = block.replace(
+                    &format!("function {name}("),
+                    &format!("function {final_name}("),
+                );
                 block = block.replace(&format!("::{name}("), &format!("::{final_name}("));
                 block = block.replace(&format!("\\\\{name}'"), &format!("\\\\{final_name}'"));
             }
@@ -336,9 +354,9 @@ namespace Pnlx\\Func\\{composite_class};\n\
 /// Split a class FQN into (namespace, class name); the composite must be namespaced.
 fn split_class(class: &str) -> Result<(String, String)> {
     let normalized = normalize_class(class);
-    let (namespace, name) = normalized
-        .rsplit_once('\\')
-        .with_context(|| format!("--as {class} must be a namespaced class, e.g. Pnlx\\Sdlx\\Sdlx"))?;
+    let (namespace, name) = normalized.rsplit_once('\\').with_context(|| {
+        format!("--as {class} must be a namespaced class, e.g. Pnlx\\Sdlx\\Sdlx")
+    })?;
     if namespace.is_empty() || name.is_empty() {
         bail!("--as {class} must be a namespaced class, e.g. Pnlx\\Sdlx\\Sdlx");
     }
@@ -447,9 +465,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved, vec!["init".to_owned()]);
-        assert!(block.contains("use \\A\\AComponent, \\B\\BComponent {"), "{block}");
-        assert!(block.contains("\\A\\AComponent::init insteadof \\B\\BComponent;"), "{block}");
-        assert!(block.contains("\\B\\BComponent::init as b_init;"), "{block}");
+        assert!(
+            block.contains("use \\A\\AComponent, \\B\\BComponent {"),
+            "{block}"
+        );
+        assert!(
+            block.contains("\\A\\AComponent::init insteadof \\B\\BComponent;"),
+            "{block}"
+        );
+        assert!(
+            block.contains("\\B\\BComponent::init as b_init;"),
+            "{block}"
+        );
     }
 
     #[test]
@@ -465,8 +492,14 @@ mod tests {
             php.contains("class Sdlx extends \\Pnlx\\Extension\\AbstractExtension"),
             "{php}"
         );
-        assert!(php.contains("    use \\Pnlx\\Libsdl\\LibsdlLibraryComponent;"), "{php}");
-        assert!(php.contains("#[\\Pnlx\\Attribute\\AutoGeneratedByPnlx]"), "{php}");
+        assert!(
+            php.contains("    use \\Pnlx\\Libsdl\\LibsdlLibraryComponent;"),
+            "{php}"
+        );
+        assert!(
+            php.contains("#[\\Pnlx\\Attribute\\AutoGeneratedByPnlx]"),
+            "{php}"
+        );
     }
 
     #[test]

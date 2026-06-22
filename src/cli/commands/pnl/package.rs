@@ -141,7 +141,10 @@ fn collect_composite_requires(root: &Path, workspace: &Path) -> Result<Vec<Strin
         // The class file, then its optional global-functions file (sorted so
         // `<Class>.php` is required before `<Class>Functions.php`, which delegates
         // to the class).
-        for relative in [format!("composites/{class}.php"), format!("composites/{class}Functions.php")] {
+        for relative in [
+            format!("composites/{class}.php"),
+            format!("composites/{class}Functions.php"),
+        ] {
             if workspace.join(&relative).is_file() {
                 requires.push(php_single_quoted_path(&relative));
             }
