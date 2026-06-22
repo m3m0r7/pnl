@@ -193,6 +193,10 @@ struct FunctionView {
     /// Whether the return can be `null` (a pointer that the native call may not
     /// produce), so the forwarding wrapper's return type admits it.
     nullable_return: bool,
+    /// When the C return is a generated enum, its FQCN: the function returns
+    /// `<Enum>|null` (the entity method maps it via `<Enum>::tryFrom()`), taking
+    /// precedence over the scalar/pointer return forms.
+    enum_return: Option<String>,
 }
 
 /// FQ namespace of this package's per-type pointer wrapper classes.
@@ -297,6 +301,10 @@ pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -
             is_void: matches!(kind, ValueKind::Void),
             return_native,
             return_class,
+            enum_return: signature
+                .return_enum
+                .as_ref()
+                .map(|name| format!("\\{}\\Enums\\{}", options.namespace, name)),
         });
     }
 
