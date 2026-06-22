@@ -93,6 +93,11 @@ enum Command {
         /// values instead of `Pnlx\Types\*` wrappers).
         #[arg(long)]
         enable_use_php_scalars_in_const: bool,
+        /// Persist `compile_options.static_inline = true` into pnl.json: build a
+        /// trampoline shim (needs a C compiler) so a library's `static inline`
+        /// functions become bound methods instead of throwing stubs.
+        #[arg(long)]
+        enable_static_inline: bool,
         /// Reinstall even when the resolved content no longer matches the sha256
         /// recorded in the lockfile; the locked digest is overwritten.
         #[arg(long, short = 'f')]
@@ -110,6 +115,19 @@ enum Command {
         /// Method-name prefix to resolve trait method collisions (reserved).
         #[arg(long)]
         prefix: Option<String>,
+    },
+    /// Get or set a pnl.json configuration value (git-config style), e.g.
+    /// `pnl config compile_options.static_inline true`. Omit the value to print
+    /// the current one.
+    Config {
+        /// Dotted key, e.g. `compile_options.static_inline` or `features.use_functions`.
+        key: String,
+        /// New value (true/1/yes/on or false/0/no/off for booleans). Omit to print
+        /// the current value.
+        value: Option<String>,
+        /// Reset the key to its default instead of setting a value.
+        #[arg(long)]
+        unset: bool,
     },
     /// Reinstall an extension (or all of them) from its recorded source.
     Update {
@@ -288,6 +306,7 @@ pub fn run() -> Result<()> {
             enable_allow_cdata,
             enable_use_php_scalars_in_return,
             enable_use_php_scalars_in_const,
+            enable_static_inline,
             force,
         } => install(
             Path::new("."),
@@ -302,6 +321,7 @@ pub fn run() -> Result<()> {
                 enable_allow_cdata,
                 enable_use_php_scalars_in_return,
                 enable_use_php_scalars_in_const,
+                enable_static_inline,
                 force,
             },
         ),
@@ -310,6 +330,9 @@ pub fn run() -> Result<()> {
             as_class,
             prefix,
         } => compose::compose(Path::new("."), &members, &as_class, prefix.as_deref()),
+        Command::Config { key, value, unset } => {
+            config_command(Path::new("."), &key, value.as_deref(), unset, interaction)
+        }
         Command::Update { package } => update(Path::new("."), package.as_deref()),
         Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),
@@ -381,6 +404,165 @@ fn update(root: &Path, package: Option<&str>) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// The pnl.json keys `pnl config` can read and write.
+const KNOWN_CONFIG_KEYS: &[&str] = &[
+    "compile_options.static_inline",
+    "features.use_functions",
+    "features.allow_cdata",
+    "features.use_php_scalars_in_params",
+    "features.use_php_scalars_in_return",
+    "features.use_php_scalars_in_const",
+    "output_dir",
+];
+
+/// `pnl config <key> [value]` — git-config-style get/set/unset of a pnl.json value,
+/// validated against the typed manifest. After a change that affects generated
+/// output, offer to reinstall so it takes effect.
+fn config_command(
+    root: &Path,
+    key: &str,
+    value: Option<&str>,
+    unset: bool,
+    interaction: Interaction,
+) -> Result<()> {
+    let manifest_path = root.join(crate::config::PNL_MANIFEST_FILE);
+    let mut manifest = read_or_default::<PnlManifest>(&manifest_path)?;
+
+    // No value and no --unset: print the current value.
+    if value.is_none() && !unset {
+        println!("{}", config_get(&manifest, key)?);
+        return Ok(());
+    }
+
+    config_apply(&mut manifest, key, value, unset)?;
+    write_json(&manifest_path, &manifest)?;
+    crate::ui::success(&format!(
+        "{} {key}{}",
+        if unset { "unset" } else { "set" },
+        value
+            .filter(|_| !unset)
+            .map(|v| format!(" = {v}"))
+            .unwrap_or_default(),
+    ));
+
+    // Every config key affects generated output, which is only (re)built on install.
+    offer_config_reinstall(root, interaction)
+}
+
+/// The current value of a config key as a display string.
+fn config_get(manifest: &PnlManifest, key: &str) -> Result<String> {
+    Ok(match key {
+        "compile_options.static_inline" => manifest.compile_options.static_inline.to_string(),
+        "features.use_functions" => manifest.features.use_functions.to_string(),
+        "features.allow_cdata" => manifest.features.allow_cdata.to_string(),
+        "features.use_php_scalars_in_params" => {
+            manifest.features.use_php_scalars_in_params.to_string()
+        }
+        "features.use_php_scalars_in_return" => {
+            manifest.features.use_php_scalars_in_return.to_string()
+        }
+        "features.use_php_scalars_in_const" => {
+            manifest.features.use_php_scalars_in_const.to_string()
+        }
+        "output_dir" => manifest.output_dir.clone(),
+        other => bail!(
+            "unknown config key `{other}`. Known keys: {}",
+            KNOWN_CONFIG_KEYS.join(", ")
+        ),
+    })
+}
+
+/// Set (or `--unset` to its default) a config key on the manifest.
+fn config_apply(
+    manifest: &mut PnlManifest,
+    key: &str,
+    value: Option<&str>,
+    unset: bool,
+) -> Result<()> {
+    match key {
+        "compile_options.static_inline" => {
+            manifest.compile_options.static_inline = config_bool(value, unset, false)?;
+        }
+        "features.use_functions" => {
+            manifest.features.use_functions = config_bool(value, unset, false)?;
+        }
+        "features.allow_cdata" => {
+            manifest.features.allow_cdata = config_bool(value, unset, false)?;
+        }
+        "features.use_php_scalars_in_params" => {
+            manifest.features.use_php_scalars_in_params = config_bool(value, unset, true)?;
+        }
+        "features.use_php_scalars_in_return" => {
+            manifest.features.use_php_scalars_in_return = config_bool(value, unset, false)?;
+        }
+        "features.use_php_scalars_in_const" => {
+            manifest.features.use_php_scalars_in_const = config_bool(value, unset, false)?;
+        }
+        "output_dir" => {
+            manifest.output_dir = if unset {
+                crate::config::DEFAULT_OUTPUT_DIR.to_owned()
+            } else {
+                value.context("a value is required")?.to_owned()
+            };
+        }
+        other => bail!(
+            "unknown config key `{other}`. Known keys: {}",
+            KNOWN_CONFIG_KEYS.join(", ")
+        ),
+    }
+    Ok(())
+}
+
+/// Parse a boolean config value (`--unset` yields `default`).
+fn config_bool(value: Option<&str>, unset: bool, default: bool) -> Result<bool> {
+    if unset {
+        return Ok(default);
+    }
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => bail!("`{other}` is not a boolean (use true/false, 1/0, yes/no, on/off)"),
+    }
+}
+
+/// After a config change, offer to reinstall so generated output reflects it. A
+/// non-interactive run just warns the change is pending; with no installed
+/// extensions there is nothing to rebuild.
+fn offer_config_reinstall(root: &Path, interaction: Interaction) -> Result<()> {
+    let lock_path = pnl_lock_path(root);
+    let has_installed = lock_path.exists()
+        && read_json::<PnlLock>(&lock_path)
+            .map(|lock| !lock.extensions.is_empty())
+            .unwrap_or(false);
+    if !has_installed {
+        return Ok(());
+    }
+    if !interaction.can_prompt() {
+        crate::ui::warn("the change affects generated output; run `pnl install` to apply it");
+        return Ok(());
+    }
+    if interaction.confirm("Reinstall now to apply the change?", true)? {
+        install(
+            root,
+            &[],
+            &InstallOptions {
+                interaction,
+                ..InstallOptions::default()
+            },
+        )
+    } else {
+        crate::ui::warn(
+            "not reinstalled; existing extensions keep their current build until you run `pnl install`",
+        );
+        Ok(())
     }
 }
 

@@ -119,8 +119,29 @@ What each field means:
 | `features.use_php_scalars_in_params` | boolean | no | When `true` (the default), methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false`, a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
 | `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Types\*` wrapper. |
 | `features.use_php_scalars_in_const` | boolean | no | When `true`, generated `const.php` uses native `int`/`float`/`string` for losslessly representable constants instead of `\Pnlx\Types\*` wrappers. |
+| `compile_options.static_inline` | boolean | no | When `true`, build a compiled trampoline shim so a library's `static inline` functions become callable methods instead of throwing stubs. Requires a C compiler at install time (see below). Defaults to `false`. |
 | `config` | object | no | Per-project overrides for the endpoints baked into the binary (see below). Omit it to use the built-in defaults. |
 | `extensions` | object | yes | The extensions you want, keyed by `vendor/package`. `pnl install` adds entries here automatically. |
+
+### Static inline functions (`compile_options`)
+
+A C `static inline` function is defined entirely in a header and exports no symbol, so PHP FFI cannot bind it. By default pnl still generates the method, but calling it throws `UnsupportedNativeFunctionException` (the method is marked `#[\Pnlx\Attribute\StaticInline]`).
+
+If you need these functions, opt in:
+
+```jsonc
+"compile_options": {
+  "static_inline": true
+}
+```
+
+When enabled, `pnl install` emits a tiny C trampoline for each such function, compiles it to a small shared library next to the package, and co-loads it — so the function becomes an ordinary callable method. pnl never reimplements C; the real C compiler does the work.
+
+- **A C compiler is required at install time.** pnl looks for `$CC`, then `cc`, `clang`, `gcc` on `$PATH` (and honours `$CFLAGS`/`$LDFLAGS`). If a package actually has `static inline` functions and no compiler is found, the install fails with an actionable message. This is the only thing that adds a compiler to pnl's install requirements, which is why it is strictly opt-in — the default install needs only libclang.
+- **Graceful fallback.** If a compiler is present but a package's shim cannot be compiled (e.g. a header needs an include the parser tolerated dropping), the install does **not** fail: those functions stay throwing stubs and a warning is printed. So turning the option on never breaks an install.
+- This is a **consumer-side** setting (it lives in your `pnl.json`); a package author cannot force it on, so it never silently adds a compiler requirement for the packages you install.
+
+Set it directly, or with [`pnl config`](commands.md#config) / `pnl install --enable-static-inline`.
 
 ### Overriding built-in endpoints
 

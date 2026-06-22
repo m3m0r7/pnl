@@ -42,6 +42,9 @@
           "features": {
             "$ref": "#/components/schemas/features"
           },
+          "compile_options": {
+            "$ref": "#/components/schemas/compileOptions"
+          },
           "config": {
             "$ref": "#/components/schemas/config"
           },
@@ -105,6 +108,16 @@
           },
           "use_php_scalars_in_const": {
             "type": "boolean"
+          }
+        }
+      },
+      "compileOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "static_inline": {
+            "type": "boolean",
+            "default": false
           }
         }
       },

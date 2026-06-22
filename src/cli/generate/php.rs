@@ -29,6 +29,8 @@ struct FieldView {
     is_int: bool,
     is_float: bool,
     is_string: bool,
+    /// A `wchar_t *` field: the getter decodes a wide string to `?string`.
+    is_wide_string: bool,
     pointer_class: Option<String>,
 }
 
@@ -55,16 +57,23 @@ pub(super) fn struct_field_views(
                 is_int: false,
                 is_float: false,
                 is_string: false,
+                is_wide_string: false,
                 pointer_class: None,
             };
-            match value_kind(&field.type_name) {
-                ValueKind::Int(_) => view.is_int = true,
-                ValueKind::Float(_) => view.is_float = true,
-                ValueKind::Str => view.is_string = true,
-                ValueKind::Pointer(Some(class)) => {
-                    view.pointer_class = Some(format!("{}\\{class}", types_ns(options)));
+            // A `wchar_t *` field reads as a wide string; the scalar typedef has
+            // already collapsed its type to an `int` pointer, so use the flag.
+            if field.wide_string {
+                view.is_wide_string = true;
+            } else {
+                match value_kind(&field.type_name) {
+                    ValueKind::Int(_) => view.is_int = true,
+                    ValueKind::Float(_) => view.is_float = true,
+                    ValueKind::Str => view.is_string = true,
+                    ValueKind::Pointer(Some(class)) => {
+                        view.pointer_class = Some(format!("{}\\{class}", types_ns(options)));
+                    }
+                    ValueKind::Pointer(None) | ValueKind::Void => {}
                 }
-                ValueKind::Pointer(None) | ValueKind::Void => {}
             }
             Some(json!(view))
         })

@@ -20,7 +20,7 @@ At a minimum, you need the following:
 | Git | 2.x | Needed for Git install sources. |
 | Make | any POSIX make | Used by the included `Makefile`. |
 | libclang | required to install packages | Reads C headers to generate the FFI cdef. On macOS it ships with the Xcode Command Line Tools (`xcode-select --install`); on Linux install your distro's clang/llvm dev package (e.g. `apt install libclang-dev`). pnl loads it at runtime — set `LIBCLANG_PATH` if it lives in a non-standard location. |
-| C compiler | optional | A `cc`/`gcc`/`clang` sharpens library-path discovery on multiarch systems, but is not required. |
+| C compiler | optional | A `cc`/`gcc`/`clang` sharpens library-path discovery on multiarch systems. It is also required at install time **only if** you opt into `compile_options.static_inline` (compiling `static inline` functions into a callable shim — see [Configuration](configuration.md#static-inline-functions-compile_options)); otherwise it is not needed. |
 | C libraries | per package | The libusb/libnfc/SDL examples need the matching libraries and headers (the `-dev`/`-devel` package, which also ships the `.pc` file pnl reads). |
 
 pnl reads libraries' `.pc` files directly, so the external `pkg-config`/`pkgconf` **binary is not required**. `pnl -i` reports toolchain readiness (`libclang`, `cc`).

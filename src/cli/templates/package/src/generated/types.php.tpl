@@ -73,6 +73,11 @@ class {{TYPE}} extends {{BASE}}
     {
         return \Pnlx\Util::cStringOrNull($this->cdata()[0]->{{field}});
     }
+{{else}}{{#if is_wide_string}}
+    public function {{getter}}(): ?string
+    {
+        return \Pnlx\Util::wcStringOrNull($this->cdata()[0]->{{field}});
+    }
 {{else}}{{#if pointer_class}}
     public function {{getter}}(): ?{{pointer_class}}
     {
@@ -99,5 +104,5 @@ class {{TYPE}} extends {{BASE}}
 
         return $this;
     }
-{{/if}}{{/if}}{{/if}}{{/if}}
+{{/if}}{{/if}}{{/if}}{{/if}}{{/if}}
 {{/each}}}

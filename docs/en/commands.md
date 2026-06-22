@@ -11,6 +11,7 @@
   - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
   - [`pnl init`](#pnl-init)
   - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl config <key> [value]`](#pnl-config-key-value)
   - [`pnl compose <members...> --as <Class>`](#pnl-compose-members---as-class)
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
@@ -146,12 +147,13 @@ Flags that adjust the generated PHP:
 - `--enable-allow-cdata` persists `features.allow_cdata = true`, so generated signatures also accept a raw `\FFI\CData`.
 - `--enable-use-php-scalars-in-return` persists `features.use_php_scalars_in_return = true`, so methods return native `int`/`float`/`string` for scalars that fit.
 - `--enable-use-php-scalars-in-const` persists `features.use_php_scalars_in_const = true`, so `const.php` uses native scalars instead of `\Pnlx\Types\*` wrappers where lossless.
+- `--enable-static-inline` persists `compile_options.static_inline = true`, so a library's `static inline` functions are compiled into a callable shim instead of throwing stubs (needs a C compiler — see [Configuration](configuration.md#static-inline-functions-compile_options)).
 
 Flags that gate install scripts and integrity:
 
 - `--allow-install-script-hash <sha256>` trusts the given install-script hash for this run. It can be repeated.
 - `--allow-unverified-install-scripts` allows missing or changed install-script hashes.
-- `-f` / `--force` reinstalls even when the resolved content no longer matches the sha256 recorded in the lockfile; instead of aborting, it warns and overwrites the locked digest with the new content.
+- `-f` / `--force` reinstalls even when the resolved content no longer matches the sha256 recorded in the lockfile; instead of aborting, it warns and overwrites the locked digest with the new content. When run interactively without the flag, a digest mismatch prompts before overwriting (default: no).
 
 ```sh
 # Install libusb by bare name (resolved against the default repository).
@@ -200,6 +202,20 @@ See [`pnlx gen`](#pnlx-gen-target---library-key-key) for the full set of files w
 #### Content integrity
 
 When a package is installed, `pnl` computes a content signature for it: every file is hashed with sha256 (in sorted order), and those per-file hashes are hashed together into one digest, which is recorded as `dist.sha256` in `pnlx-lock.json`. On a later install of the **same version**, the freshly downloaded content is hashed again and compared to the locked digest; if they differ, the install is aborted with an integrity error because the content was modified or tampered with. Installing a new version is treated as a legitimate update. (Generated output, `.git`, and the workspace directory are excluded from the digest.)
+
+### `pnl config <key> [value]`
+
+Gets or sets a `pnl.json` configuration value, git-config style. With no value it prints the current one; with a value it sets the key; `--unset` resets the key to its default.
+
+```sh
+pnl config compile_options.static_inline          # print the current value
+pnl config compile_options.static_inline true     # set it (true/1/yes/on or false/0/no/off)
+pnl config compile_options.static_inline --unset   # reset to the default
+```
+
+The value is validated against the typed schema, so an unknown key or a non-boolean value for a boolean key is rejected. Known keys are `compile_options.static_inline`, the `features.*` switches, and `output_dir`.
+
+Because these settings change generated output, after a successful change `pnl config` offers to reinstall so it takes effect (interactive only — answer no to apply it later with `pnl install`; a non-interactive run just prints a reminder).
 
 ### `pnl compose <members...> --as <Class>`
 

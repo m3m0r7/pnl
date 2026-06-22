@@ -20,7 +20,7 @@
 | Git | 2.x | Git からインストールする場合に必要です。 |
 | Make | POSIX 互換の make | 同梱の `Makefile` で使います。 |
 | libclang | パッケージのインストールに必須 | C ヘッダーを読んで FFI cdef を生成します。macOS では Xcode Command Line Tools に同梱されています（`xcode-select --install`）。Linux ではディストリの clang/llvm 開発パッケージ（例: `apt install libclang-dev`）を入れてください。pnl は実行時に読み込むので、非標準の場所にある場合は `LIBCLANG_PATH` を設定します。 |
-| C コンパイラ | 任意 | `cc`/`gcc`/`clang` があると multiarch 環境でのライブラリパス探索がより正確になりますが、必須ではありません。 |
+| C コンパイラ | 任意 | `cc`/`gcc`/`clang` があると multiarch 環境でのライブラリパス探索がより正確になります。また、`compile_options.static_inline`（`static inline` 関数を呼び出し可能な shim にコンパイルする — [設定](configuration.md#static-inline-関数compile_options)参照）をオプトインした場合**のみ**、インストール時に必要になります。それ以外では不要です。 |
 | C ライブラリ本体 | ライブラリごと | libusb / libnfc / SDL の例には、対応するライブラリとヘッダー（`.pc` ファイルも同梱する `-dev`/`-devel` パッケージ）が必要です。 |
 
 pnl は各ライブラリの `.pc` ファイルを直接読むため、外部の `pkg-config`/`pkgconf` **バイナリは不要**です。`pnl -i` でツールチェーンの状態（`libclang`・`cc`）を確認できます。

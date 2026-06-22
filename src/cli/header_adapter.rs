@@ -466,7 +466,7 @@ fn parse_with_neutralized_macros(
 /// headers, or empty off macOS / when no SDK can be located. `$SDKROOT` wins
 /// (honours an explicit override), then `xcrun --show-sdk-path`, then a
 /// developer-dir fallback. Mirrors `native.rs`'s `macos_sdk_lib_dirs`.
-fn macos_isysroot_args() -> Vec<String> {
+pub(crate) fn macos_isysroot_args() -> Vec<String> {
     if std::env::consts::OS != "macos" {
         return Vec::new();
     }
@@ -844,7 +844,7 @@ fn owned_package_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
 /// Only headers that actually live below a system include root contribute roots;
 /// a header elsewhere (a test fixture, a `self_build` checkout) yields none,
 /// rather than walking up to `/` and feeding libclang bogus `-I` paths.
-fn include_search_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn include_search_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for path in paths {
         let mut pending: Vec<PathBuf> = Vec::new();

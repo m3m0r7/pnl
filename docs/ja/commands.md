@@ -11,6 +11,7 @@
   - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
   - [`pnl init`](#pnl-init)
   - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl config <key> [value]`](#pnl-config-key-value)
   - [`pnl compose <members...> --as <Class>`](#pnl-compose-members---as-class)
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
@@ -146,12 +147,13 @@ initialized ./pnl.json
 - `--enable-allow-cdata` … `features.allow_cdata = true` を書き込み、生成シグネチャが生の `\FFI\CData` も受け付けるようにします。
 - `--enable-use-php-scalars-in-return` … `features.use_php_scalars_in_return = true` を書き込み、スカラーに収まる戻り値をネイティブの `int`/`float`/`string` で返すようにします。
 - `--enable-use-php-scalars-in-const` … `features.use_php_scalars_in_const = true` を書き込み、`const.php` が `\Pnlx\Types\*` ラッパーではなくネイティブスカラーを使うようにします（無損失な範囲で）。
+- `--enable-static-inline` … `compile_options.static_inline = true` を書き込み、ライブラリの `static inline` 関数を例外スタブではなく呼び出し可能な shim にコンパイルします（C コンパイラが必要 — [設定](configuration.md#static-inline-関数compile_options)参照）。
 
 install スクリプトと整合性に関するフラグ:
 
 - `--allow-install-script-hash <sha256>` … 指定した install script hash をこの実行だけ信頼します。複数回指定できます。
 - `--allow-unverified-install-scripts` … install script hash の不一致／未記録を許可します。
-- `-f` / `--force` … 解決したコンテンツが lockfile に記録された sha256 と一致しなくても再インストールします。中断せず警告を出し、記録済みダイジェストを新しいコンテンツのもので上書きします。
+- `-f` / `--force` … 解決したコンテンツが lockfile に記録された sha256 と一致しなくても再インストールします。中断せず警告を出し、記録済みダイジェストを新しいコンテンツのもので上書きします。対話実行でフラグ無しの場合、ダイジェスト不一致時に上書き確認を求めます（既定: いいえ）。
 
 ```sh
 # パッケージ名だけで libusb を入れます（既定リポジトリから解決）。
@@ -200,6 +202,20 @@ pnlx-lock.json
 #### コンテンツ整合性（署名）
 
 パッケージのインストール時、`pnl` はコンテンツの署名を計算します。各ファイルを（ソート順で）sha256 化し、それらのハッシュをまとめてもう一度 sha256 にした 1 つのダイジェストを `pnlx-lock.json` の `dist.sha256` に記録します。次回**同じバージョン**をインストールする際は、取得したコンテンツを再びハッシュ化してロック値と比較し、異なる場合は「コンテンツが改ざんされている」としてエラーを出してインストールを中止します。新しいバージョンのインストールは正当な更新として許可します。（生成物・`.git`・ワークスペースディレクトリはダイジェスト対象から除外します。）
+
+### `pnl config <key> [value]`
+
+git config 風に `pnl.json` の設定値を取得・設定します。値を省略すると現在値を表示し、値を指定するとそのキーを設定します。`--unset` でキーを既定値に戻します。
+
+```sh
+pnl config compile_options.static_inline          # 現在値を表示
+pnl config compile_options.static_inline true     # 設定（true/1/yes/on または false/0/no/off）
+pnl config compile_options.static_inline --unset   # 既定値に戻す
+```
+
+値は型付きスキーマで検証されるため、未知のキーや真偽値キーへの非真偽値は拒否されます。指定できるキーは `compile_options.static_inline`、`features.*` 各スイッチ、`output_dir` です。
+
+これらの設定は生成物を変えるため、設定変更が成功すると `pnl config` は反映のための再インストールを提案します（対話時のみ。いいえと答えれば後で `pnl install` で反映できます。非対話実行ではリマインダーを表示するだけです）。
 
 ### `pnl compose <members...> --as <Class>`
 

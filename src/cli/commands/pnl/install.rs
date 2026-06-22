@@ -54,6 +54,9 @@ pub(crate) struct InstallOptions {
     pub enable_use_php_scalars_in_return: bool,
     /// Persist `features.use_php_scalars_in_const = true` into pnl.json.
     pub enable_use_php_scalars_in_const: bool,
+    /// Persist `compile_options.static_inline = true` into pnl.json (build a
+    /// trampoline shim so `static inline` functions become bound methods).
+    pub enable_static_inline: bool,
     /// Reinstall even when the resolved content differs from the lockfile digest,
     /// overwriting the recorded sha256 instead of aborting.
     pub force: bool,
@@ -103,6 +106,10 @@ fn apply_feature_flags(manifest: &mut PnlManifest, options: &InstallOptions) -> 
     }
     if options.enable_use_php_scalars_in_const && !manifest.features.use_php_scalars_in_const {
         manifest.features.use_php_scalars_in_const = true;
+        changed = true;
+    }
+    if options.enable_static_inline && !manifest.compile_options.static_inline {
+        manifest.compile_options.static_inline = true;
         changed = true;
     }
     changed
@@ -947,7 +954,13 @@ fn install_local_extension(
             name = extension.name
         );
     }
-    verify_locked_integrity(root, &extension, &content_hash, options.force)?;
+    verify_locked_integrity(
+        root,
+        &extension,
+        &content_hash,
+        options.force,
+        &options.interaction,
+    )?;
     crate::install_script::verify_install_scripts(
         extension_root,
         &extension,
@@ -1039,6 +1052,15 @@ fn install_local_extension(
         &installed_extension_root.join("packages"),
         &dependency_package_names,
     );
+    // `compile_options.static_inline` (consumer-side): build a trampoline shim so
+    // `static inline` functions become bound methods. Discover the C compiler once;
+    // `shim::build` errors per package if one is actually needed but missing.
+    let compile_static_inline = manifest.compile_options.static_inline;
+    let shim_compiler = if compile_static_inline {
+        crate::cc::find_c_compiler()
+    } else {
+        None
+    };
     for (key, requirement) in &extension.requires {
         let mut native = resolve_native_library(root, manifest, key, requirement)?;
         // Co-load libraries discovered from a GNU ld linker script (e.g. ncurses's
@@ -1098,7 +1120,28 @@ fn install_local_extension(
         let exported = exported_symbols_union(&export_path, &dependency_libraries);
         pathmap.requires.insert(key.clone(), native);
         pathmap.headers.insert(key.clone(), header);
-        generate_installed_package_artifacts(
+        // The shim build uses the same headers, `-I` dirs (the libclang-derived set
+        // plus pkg-config's), and `-D` definitions as the parse, links the primary
+        // library, and writes into the package's `shim/` dir.
+        let shim_request = compile_static_inline.then(|| {
+            let mut include_dirs = crate::header_adapter::include_search_dirs(&generation_headers);
+            for dir in &header_include_dirs {
+                if !include_dirs.contains(dir) {
+                    include_dirs.push(dir.clone());
+                }
+            }
+            crate::shim::ShimRequest {
+                compiler: shim_compiler.clone(),
+                out_dir: installed_extension_root.join("shim"),
+                stem: sanitize_shim_stem(key),
+                headers: generation_headers.clone(),
+                include_dirs,
+                definitions: resolved_definitions.clone(),
+                primary_library: native_path.clone(),
+                package: extension.name.clone(),
+            }
+        });
+        let shim_library = generate_installed_package_artifacts(
             &installed_extension_root,
             &extension,
             extension.name.rsplit('/').next().unwrap_or(key),
@@ -1110,7 +1153,23 @@ fn install_local_extension(
             &dependency_functions,
             exported.as_ref(),
             &resolved_definitions,
+            shim_request.as_ref(),
         )?;
+        // Co-load the shim alongside the package's own library so its `pnl_si_*`
+        // exports resolve; recorded in `LIBRARIES` and the lock with the others.
+        if let Some(shim_library) = shim_library {
+            crate::ui::success(&format!(
+                "built static-inline shim {}",
+                crate::ui::dim(&shim_library.display().to_string())
+            ));
+            // Store an absolute path, like the other co-load libraries, so the
+            // runtime resolves it regardless of the working directory.
+            let shim_path = std::fs::canonicalize(&shim_library).unwrap_or(shim_library);
+            dependency_libraries.insert(
+                format!("{key}-static-inline-shim"),
+                shim_path.to_string_lossy().into_owned(),
+            );
+        }
         if let Some(fqcn) = entity_class_fqn(&extension) {
             // Bake the resolved native library path + hash + co-load library paths
             // into the entity constants.
@@ -1457,6 +1516,13 @@ fn sole_installed_version_dir(packages_root: &Path, package: &str) -> Option<std
         .find(|path| path.join(crate::config::PNLX_MANIFEST_FILE).is_file())
 }
 
+/// A filesystem-safe stem for a per-library shim file, derived from the library key.
+fn sanitize_shim_stem(key: &str) -> String {
+    key.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
 /// Reject an install whose content digest differs from a previously locked
 /// digest for the *same* version — the hallmark of tampered-with content. A new
 /// version is treated as a legitimate update and is allowed through.
@@ -1465,6 +1531,7 @@ fn verify_locked_integrity(
     extension: &PnlxManifest,
     content_hash: &str,
     force: bool,
+    interaction: &crate::interaction::Interaction,
 ) -> Result<()> {
     let lock = read_lock_for_current_platform(root)?;
     let Some(existing) = lock.extensions.get(&extension.name) else {
@@ -1484,6 +1551,27 @@ fn verify_locked_integrity(
                 actual = content_hash,
             ));
             return Ok(());
+        }
+        // Interactively offer to proceed as if `--force`; default No, the safe
+        // choice (a mismatch may be tampering). Non-interactive installs abort.
+        if interaction.can_prompt() {
+            crate::ui::warn(&format!(
+                "{name}: content does not match the lockfile digest.\n  \
+                 was sha256: {expected}\n  \
+                 now sha256: {actual}",
+                name = extension.name,
+                expected = existing.dist.sha256,
+                actual = content_hash,
+            ));
+            if interaction.confirm(
+                &format!(
+                    "Install {} anyway, overwriting the locked digest (--force)?",
+                    extension.name
+                ),
+                false,
+            )? {
+                return Ok(());
+            }
         }
         bail!(
             "integrity check failed for {name}: the content does not match the signature recorded in the lockfile.\n  \
@@ -1705,14 +1793,50 @@ mod tests {
         };
 
         // Same version + matching digest is fine.
-        assert!(verify_locked_integrity(dir.path(), &extension, &locked_hash, false).is_ok());
+        assert!(
+            verify_locked_integrity(
+                dir.path(),
+                &extension,
+                &locked_hash,
+                false,
+                &crate::interaction::Interaction::default()
+            )
+            .is_ok()
+        );
         // Same version + different digest is a tamper and must be rejected.
-        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), false).is_err());
+        assert!(
+            verify_locked_integrity(
+                dir.path(),
+                &extension,
+                &"b".repeat(64),
+                false,
+                &crate::interaction::Interaction::default()
+            )
+            .is_err()
+        );
         // ...unless --force is given, which trusts the resolved content.
-        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), true).is_ok());
+        assert!(
+            verify_locked_integrity(
+                dir.path(),
+                &extension,
+                &"b".repeat(64),
+                true,
+                &crate::interaction::Interaction::default()
+            )
+            .is_ok()
+        );
         // A new version is a legitimate update and is allowed through.
         extension.version = "2.0.0".to_owned();
-        assert!(verify_locked_integrity(dir.path(), &extension, &"b".repeat(64), false).is_ok());
+        assert!(
+            verify_locked_integrity(
+                dir.path(),
+                &extension,
+                &"b".repeat(64),
+                false,
+                &crate::interaction::Interaction::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

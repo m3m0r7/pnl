@@ -7,6 +7,7 @@ pub const SUPPORT_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/support
 pub mod about;
 pub mod archive;
 pub mod cache;
+pub mod cc;
 pub mod commands;
 pub mod config;
 pub mod fetch;
@@ -27,6 +28,7 @@ pub mod repository_index;
 pub mod schema;
 pub mod sdk_assets;
 pub mod self_upgrade;
+pub mod shim;
 pub mod tbd;
 pub mod ui;
 pub mod validate;

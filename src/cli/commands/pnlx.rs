@@ -156,7 +156,11 @@ fn gen_pnlx(root: &Path, options: GenOptions) -> Result<()> {
         // defaults only (no prompting, no lockfile); install does the interactive
         // resolution.
         definitions: &resolve_definition_defaults(&manifest.require_definitions),
-    })
+        // `compile_options.static_inline` is a consumer-side install concern; the
+        // local author `pnlx gen` path keeps `static inline` as throwing stubs.
+        shim: None,
+    })?;
+    Ok(())
 }
 
 /// Resolve `require_definitions` to their declared defaults (no prompt, no lock),
@@ -216,7 +220,8 @@ pub(crate) fn generate_installed_package_artifacts(
     dependency_functions: &std::collections::BTreeMap<String, String>,
     exported_symbols: Option<&std::collections::BTreeSet<String>>,
     definitions: &[crate::manifest::ResolvedDefinition],
-) -> Result<()> {
+    shim: Option<&crate::shim::ShimRequest>,
+) -> Result<Option<std::path::PathBuf>> {
     let package_leaf = manifest.name.rsplit('/').next().unwrap_or(target);
     let artifact_stem = sanitize_artifact_stem(package_leaf);
     let (namespace, manifest_class) = split_class(&manifest.class)?;
@@ -239,6 +244,7 @@ pub(crate) fn generate_installed_package_artifacts(
         dependency_functions,
         exported_symbols,
         definitions,
+        shim,
     })
 }
 
@@ -272,9 +278,13 @@ struct GenerateArtifacts<'a> {
     /// `require_definitions` resolved at install time, passed to libclang as `-D`s
     /// and emitted as generated constants.
     definitions: &'a [crate::manifest::ResolvedDefinition],
+    /// When set (consumer opted into `compile_options.static_inline`), a compiled
+    /// trampoline shim is built so `static inline` functions become bound methods
+    /// instead of throwing stubs. `None` keeps them as throwing stubs.
+    shim: Option<&'a crate::shim::ShimRequest>,
 }
 
-fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
+fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBuf>> {
     let generated_dir = args.generated_dir;
     let class_name = args.class_name;
     let out = generated_dir.join(format!(
@@ -282,47 +292,115 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         args.artifact_stem,
         crate::config::FFI_FILE_SUFFIX
     ));
-    let (cdef, constants, macro_functions, symbols, symbol_aliases, unsupported_functions, enums) =
-        if args.headers.is_empty() {
-            (
-                read_existing_ffi_cdef(&out)?,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        } else {
-            let artifacts = cdef_from_header(
-                &read_headers(args.headers)?,
-                &HeaderAdapterOptions {
-                    symbol_prefix: args
-                        .symbol_prefix
-                        .clone()
-                        .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
-                    entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
-                    dependency_functions: args.dependency_functions.clone(),
-                    exported_symbols: args.exported_symbols.cloned(),
-                    package_header_paths: args.headers.to_vec(),
-                    extra_include_dirs: args.extra_include_dirs.to_vec(),
-                    definitions: args.definitions.to_vec(),
-                },
-            )?;
-            (
-                artifacts.cdef,
-                artifacts.constants,
-                artifacts.macro_functions,
-                artifacts.symbols,
-                artifacts.symbol_aliases,
-                artifacts.unsupported_functions,
-                artifacts.enums,
-            )
-        };
+    let (
+        cdef,
+        constants,
+        macro_functions,
+        symbols,
+        symbol_aliases,
+        mut unsupported_functions,
+        enums,
+    ) = if args.headers.is_empty() {
+        (
+            read_existing_ffi_cdef(&out)?,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    } else {
+        let artifacts = cdef_from_header(
+            &read_headers(args.headers)?,
+            &HeaderAdapterOptions {
+                symbol_prefix: args
+                    .symbol_prefix
+                    .clone()
+                    .unwrap_or_else(|| symbol_prefix_from_library_key(args.library_key)),
+                entity_fqcn: format!("\\{}\\{}", args.namespace, args.class_name),
+                dependency_functions: args.dependency_functions.clone(),
+                exported_symbols: args.exported_symbols.cloned(),
+                package_header_paths: args.headers.to_vec(),
+                extra_include_dirs: args.extra_include_dirs.to_vec(),
+                definitions: args.definitions.to_vec(),
+            },
+        )?;
+        (
+            artifacts.cdef,
+            artifacts.constants,
+            artifacts.macro_functions,
+            artifacts.symbols,
+            artifacts.symbol_aliases,
+            artifacts.unsupported_functions,
+            artifacts.enums,
+        )
+    };
     // The generated PHP enums, by C name, so signature parsing can tag enum-typed
     // parameters/returns (the wrapper exposes the enum; the dispatched value is int).
     let enum_names: std::collections::BTreeSet<String> =
         enums.iter().map(|def| def.name.clone()).collect();
+
+    // When the consumer opted into `compile_options.static_inline`, build a compiled
+    // trampoline shim: each `static inline` becomes an exported `pnl_si_<name>` the
+    // cdef declares and the method dispatches to (via a symbol alias), instead of a
+    // throwing stub. The shim `.so` is co-loaded; its path is returned to the caller
+    // so it is baked into the entity's `LIBRARIES` and recorded in the lock.
+    let mut cdef = cdef;
+    let mut shim_aliases: Vec<(String, String)> = Vec::new();
+    let mut shim_library: Option<std::path::PathBuf> = None;
+    if let Some(request) = args.shim {
+        let static_inlines: Vec<crate::header_adapter::UnsupportedFunction> = unsupported_functions
+            .iter()
+            .filter(|function| function.reason == "static inline")
+            .cloned()
+            .collect();
+        if !static_inlines.is_empty() {
+            match crate::shim::build(request, &static_inlines) {
+                crate::shim::ShimOutcome::Built(built) => {
+                    let shimmed: std::collections::BTreeSet<String> = built
+                        .entries
+                        .iter()
+                        .map(|entry| entry.original_declaration.clone())
+                        .collect();
+                    // Drop the throwing stub for every function the shim now provides.
+                    unsupported_functions
+                        .retain(|function| !shimmed.contains(&function.declaration));
+                    for entry in &built.entries {
+                        cdef.push('\n');
+                        cdef.push_str(&entry.cdef_declaration);
+                        shim_aliases.push((
+                            entry.public_name.clone(),
+                            format!("pnl_si_{}", entry.public_name),
+                        ));
+                    }
+                    shim_library = Some(built.library);
+                }
+                crate::shim::ShimOutcome::Empty => {}
+                // The consumer enabled the option but has no compiler: fatal, with an
+                // actionable message (it cannot be satisfied any other way).
+                crate::shim::ShimOutcome::MissingCompiler { functions } => {
+                    anyhow::bail!(crate::cc::compiler_not_found_message(
+                        &request.package,
+                        &functions
+                    ));
+                }
+                // A compiler is present but the shim did not compile (e.g. a header
+                // needs an include libclang tolerated dropping). Degrade to throwing
+                // stubs — exactly the option-off behaviour — instead of failing the
+                // whole install.
+                crate::shim::ShimOutcome::CompileFailed { functions, detail } => {
+                    crate::ui::warn(&format!(
+                        "{}: could not compile a static-inline shim; {} function(s) stay throwing stubs.\n{}",
+                        request.package,
+                        functions.len(),
+                        detail
+                    ));
+                }
+            }
+        }
+    }
+
     // Unsupported (`static inline`) functions become throwing stub methods; they are
     // parsed alongside the cdef for faithful types but never put into the FFI cdef.
     let mut signatures = crate::generate::parse_signatures_with_unsupported(
@@ -331,6 +409,12 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         &enum_names,
     );
     crate::generate::apply_symbol_aliases(&mut signatures, &symbol_aliases);
+    // Map each shimmed function's public name to its `pnl_si_<name>` export, then
+    // drop the raw `pnl_si_*` signatures so only the ergonomic public method remains.
+    crate::generate::apply_symbol_aliases(&mut signatures, &shim_aliases);
+    if !shim_aliases.is_empty() {
+        signatures.retain(|signature| !signature.name.starts_with("pnl_si_"));
+    }
     // Field accessors for the struct wrappers come from the cdef's own struct bodies.
     let struct_fields = crate::generate::parse_struct_fields(&cdef);
     generate_ffi_php_from_cdef(&cdef, &out)?;
@@ -413,7 +497,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
         &generated_dir.join(crate::config::ALIASES_FILE),
         &signatures,
     )?;
-    Ok(())
+    Ok(shim_library)
 }
 
 pub(crate) fn read_existing_ffi_cdef(out: &Path) -> Result<String> {

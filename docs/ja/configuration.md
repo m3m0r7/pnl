@@ -119,8 +119,29 @@ project-root/
 | `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true`（既定）にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false` の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
 | `features.use_php_scalars_in_return` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
 | `features.use_php_scalars_in_const` | 真偽値 | いいえ | `true` にすると、生成される `const.php` が無損失に表現できる定数を `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` で表現します。 |
+| `compile_options.static_inline` | 真偽値 | いいえ | `true` にすると、ライブラリの `static inline` 関数を、例外を投げるスタブではなく呼び出し可能なメソッドにするためのコンパイル済みトランポリン shim をビルドします。インストール時に C コンパイラが必要です（下記参照）。既定は `false`。 |
 | `config` | オブジェクト | いいえ | バイナリに埋め込まれた既定エンドポイントのプロジェクト単位の上書き（下記参照）。省略すると既定値を使います。 |
 | `extensions` | オブジェクト | はい | 入れたい拡張を `vendor/package` をキーにして並べます。`pnl install` がここに自動で追記します。 |
+
+### static inline 関数（`compile_options`）
+
+C の `static inline` 関数はヘッダー内で完結して定義され、シンボルをエクスポートしないため、PHP FFI からバインドできません。既定では pnl はメソッド自体は生成しますが、呼び出すと `UnsupportedNativeFunctionException` を投げます（メソッドには `#[\Pnlx\Attribute\StaticInline]` が付きます）。
+
+これらの関数が必要なら、オプトインします:
+
+```jsonc
+"compile_options": {
+  "static_inline": true
+}
+```
+
+有効にすると、`pnl install` は各 `static inline` 関数の小さな C トランポリンを生成し、パッケージの隣で小さな共有ライブラリにコンパイルして co-load します。これでその関数は通常の呼び出し可能なメソッドになります。pnl が C を再実装することはなく、実際の C コンパイラに処理を任せます。
+
+- **インストール時に C コンパイラが必要です。** pnl は `$CC` → `cc` → `clang` → `gcc` の順に `$PATH` を探索します（`$CFLAGS`/`$LDFLAGS` も尊重）。パッケージに実際に `static inline` 関数があり、かつコンパイラが見つからない場合、インストールは実行可能なメッセージを出して失敗します。これは pnl のインストール要件にコンパイラを追加する唯一の項目なので、厳密にオプトインです（既定のインストールに必要なのは libclang だけ）。
+- **グレースフルフォールバック。** コンパイラはあるがパッケージの shim をコンパイルできない場合（例: パーサーが許容して落としたインクルードをヘッダーが必要とする場合）でも、インストールは**失敗しません**。該当関数は例外スタブのまま残り、警告が表示されます。つまりこのオプションを有効にしてもインストールが壊れることはありません。
+- これは**利用者側**の設定です（あなたの `pnl.json` に置く）。パッケージ作者が強制することはできないため、インストールするパッケージに勝手にコンパイラ要件が追加されることはありません。
+
+直接書くか、[`pnl config`](commands.md#pnl-config-key-value) / `pnl install --enable-static-inline` で設定できます。
 
 ### 既定エンドポイントの上書き
 

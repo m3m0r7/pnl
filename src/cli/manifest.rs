@@ -69,6 +69,10 @@ pub struct PnlManifest {
     pub output_dir: String,
     #[serde(default)]
     pub features: PnlFeatures,
+    /// Native-compilation toggles (consumer-side). Opt-in only — omitted when no
+    /// option is set; the default install requires no C compiler.
+    #[serde(default, skip_serializing_if = "CompileOptions::is_empty")]
+    pub compile_options: CompileOptions,
     /// Per-project overrides for built-in endpoints; omitted when no override
     /// is set.
     #[serde(default, skip_serializing_if = "WorkspaceConfig::is_empty")]
@@ -127,6 +131,27 @@ impl Default for PnlFeatures {
     }
 }
 
+/// Consumer-side native-compilation toggles (`compile_options` in pnl.json). These
+/// can require a C toolchain at install time, so they are opt-in and never set by a
+/// package author (a package's `pnlx.json` cannot turn them on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Build a compiled trampoline shim (`.so`/`.dylib`) so a library's
+    /// `static inline` functions — which export no symbol and otherwise become
+    /// throwing stubs — become real bound methods. Requires a C compiler (`$CC`,
+    /// then `cc`/`clang`/`gcc`) when a package actually has such functions; the
+    /// install errors if one is needed but none is found. Defaults to false.
+    #[serde(default)]
+    pub static_inline: bool,
+}
+
+impl CompileOptions {
+    /// Whether no option is set, so `compile_options` can be omitted from pnl.json.
+    pub fn is_empty(&self) -> bool {
+        !self.static_inline
+    }
+}
+
 /// Per-project overrides for the built-in service endpoints (see `config.toml`).
 /// Absent fields fall back to the values baked into the binary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +188,7 @@ impl Default for PnlManifest {
             load_paths: Vec::new(),
             output_dir: default_output_dir(),
             features: PnlFeatures::default(),
+            compile_options: CompileOptions::default(),
             config: WorkspaceConfig::default(),
             extensions: BTreeMap::new(),
             composites: BTreeMap::new(),

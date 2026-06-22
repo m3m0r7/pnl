@@ -691,6 +691,10 @@ impl FunctionSignature {
 pub struct StructField {
     pub name: String,
     pub type_name: String,
+    /// A single-level `wchar_t *` field (detected before the scalar typedef collapses
+    /// `wchar_t` to `int`): its accessor decodes a wide string to `?string` via
+    /// {@see Util::wcStringOrNull} instead of exposing an `int` pointer.
+    pub wide_string: bool,
 }
 
 /// Parse the struct definitions the cdef emits with a body (`struct X { int a;
@@ -742,14 +746,32 @@ pub(super) fn parse_struct_fields(cdef: &str) -> BTreeMap<String, Vec<StructFiel
             if !seen.insert(name.clone()) {
                 continue;
             }
+            // Detect a `wchar_t *` field before the scalar typedef collapses
+            // `wchar_t` to `int` (the accessor reads it as a wide string).
+            let wide_string = is_wide_char_pointer(&type_name);
             let mut type_name = resolve_scalar_typedef(&type_name, &scalar_typedefs);
             type_name = resolve_char_pointer_typedef(&type_name, &char_pointer_typedefs);
             type_name = resolve_pointer_typedef(&type_name, &raw_typedefs);
-            fields.push(StructField { name, type_name });
+            fields.push(StructField {
+                name,
+                type_name,
+                wide_string,
+            });
         }
         structs.insert(tag.to_owned(), fields);
     }
     structs
+}
+
+/// Whether a field's raw C type is a single-level pointer to `wchar_t` (ignoring
+/// `const`), e.g. `wchar_t *` or `const wchar_t *`. A `wchar_t **` is not a string.
+fn is_wide_char_pointer(type_name: &str) -> bool {
+    let compact: String = type_name
+        .replace("const", "")
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    compact == "wchar_t*"
 }
 
 /// Split a struct body into its members on top-level `;` only, treating a nested
@@ -1495,10 +1517,12 @@ typedef struct ex_opaque ex_opaque;\n";
                 StructField {
                     name: "x".to_owned(),
                     type_name: "int".to_owned(),
+                    wide_string: false,
                 },
                 StructField {
                     name: "y".to_owned(),
                     type_name: "int".to_owned(),
+                    wide_string: false,
                 },
             ])
         );
