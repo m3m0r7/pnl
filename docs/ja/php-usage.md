@@ -9,6 +9,7 @@
   - [libusb：バージョン・エラー名・デバイス数を表示する](#libusbバージョンエラー名デバイス数を表示する)
   - [SDL：ウィンドウを開く（オブジェクトのメソッド版）](#sdlウィンドウを開くオブジェクトのメソッド版)
   - [SDL：ウィンドウを開く（グローバル関数版）](#sdlウィンドウを開くグローバル関数版)
+  - [`Runtime::compose`：パッケージ間で FFI スコープを共有する](#runtimecompose-パッケージ間で-ffi-スコープを共有する)
 - [生成されるファイル](#生成されるファイル)
 
 ## Composer でのインストール
@@ -398,6 +399,33 @@ try {
     }
 }
 ```
+
+### `Runtime::compose`：パッケージ間で FFI スコープを共有する
+
+既定では各拡張がそれぞれの FFI スコープを開くため、あるパッケージが生成した `CData` を別のパッケージへ渡すことはできません。ハンドルをパッケージをまたいで渡したいとき — 例えば `SDL2_image` の surface をコアの SDL に渡したいとき — は、拡張をまとめて 1 つの共有スコープを持つクラスに合成します。
+
+```php
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/@pnlx/autoload.php';
+
+use Pnlx\Runtime;
+use Pnlx\Libsdl\Libsdl;
+use Pnlx\Sdlimage\Sdlimage;
+
+// 両方の拡張を、単一の共有 FFI スコープを持つ 1 つのオブジェクトに合成。
+$sdl = Runtime::compose([Libsdl::class, Sdlimage::class]);
+
+// SDL_image が確保した surface が、同じスコープなのでコア SDL にそのまま流れます。
+$surface = $sdl->IMG_Load('sprite.png');
+$texture = $sdl->SDL_CreateTextureFromSurface($renderer, $surface);
+```
+
+`Runtime::compose([...])` は各メンバーの生成済み `<Class>LibraryComponent` trait を use する匿名クラスを構築するため、合成されたメソッドは（`__call` プロキシではなく）実メソッドで、参照渡しの out パラメータも往復します。最低 2 つのクラスが必要で、2 つのメンバーが同名関数を公開している場合は例外を投げます。
+
+エディタや静的解析のサポートが欲しい場合は、[`pnl compose --as <Class>`](commands.md#pnl-compose-members---as-class) で同じものを名前付きファイルとして生成できます。`@pnlx/composites/` 配下のファイルは他のクラスと同様にオートロードされます。
 
 ## 生成されるファイル
 

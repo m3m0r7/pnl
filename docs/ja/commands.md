@@ -11,10 +11,12 @@
   - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
   - [`pnl init`](#pnl-init)
   - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl compose <members...> --as <Class>`](#pnl-compose-members---as-class)
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
   - [`pnl list [glob]`](#pnl-list-glob)
   - [`pnl search [glob]`](#pnl-search-glob)
+  - [`pnl info <package>`](#pnl-info-package)
   - [`pnl list native`](#pnl-list-native)
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
@@ -55,7 +57,7 @@ pnl version
 出力例です。
 
 ```text
-0.1.0
+0.5.5
 ```
 
 ### `pnl -i` / `pnl --information`
@@ -69,7 +71,7 @@ pnl -i
 出力例です。
 
 ```text
-  ██████╗ ███╗   ██╗██╗        pnl 0.1.5
+  ██████╗ ███╗   ██╗██╗        pnl 0.5.5
   ██╔══██╗████╗  ██║██║        ─────────
   ██████╔╝██╔██╗ ██║██║        OS:         macos (aarch64)
   ██╔═══╝ ██║╚██╗██║██║        Host:       mymachine.local
@@ -140,6 +142,13 @@ initialized ./pnl.json
 
 - `--alias-class <Class>` … 元のクラスを残したまま、`class_alias` で `<Class>` としても参照できるようにします。
 - `--function-prefix <prefix>` … 生成されるすべての関数名・メソッド名に `<prefix>` を付けます（接頭辞なしの名前は残しません）。
+- `--enable-use-functions` … `features.use_functions = true` を `pnl.json` に書き込み、生成されるグローバル関数 API を有効にします（[設定](configuration.md#pnljson-の書き方)参照）。
+- `--enable-allow-cdata` … `features.allow_cdata = true` を書き込み、生成シグネチャが生の `\FFI\CData` も受け付けるようにします。
+- `--enable-use-php-scalars-in-return` … `features.use_php_scalars_in_return = true` を書き込み、スカラーに収まる戻り値をネイティブの `int`/`float`/`string` で返すようにします。
+- `--enable-use-php-scalars-in-const` … `features.use_php_scalars_in_const = true` を書き込み、`const.php` が `\Pnlx\Types\*` ラッパーではなくネイティブスカラーを使うようにします（無損失な範囲で）。
+
+install スクリプトと整合性に関するフラグ:
+
 - `--allow-install-script-hash <sha256>` … 指定した install script hash をこの実行だけ信頼します。複数回指定できます。
 - `--allow-unverified-install-scripts` … install script hash の不一致／未記録を許可します。
 - `-f` / `--force` … 解決したコンテンツが lockfile に記録された sha256 と一致しなくても再インストールします。中断せず警告を出し、記録済みダイジェストを新しいコンテンツのもので上書きします。
@@ -160,13 +169,17 @@ pnl install
 
 ```text
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
-  ✓ resolved libusb-1.0 1.0.27 libusb-1.0.dylib
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/libusb.ffi.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/Libusb.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/LibusbContext.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/index.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/functions.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/function.aliases.php
+  ✓ resolved libusb-1.0 1.0.29 libusb-1.0.dylib
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/libusb.ffi.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/Libusb.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbContext.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbException.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbLibraryComponent.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbManifest.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/const.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/index.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/function.aliases.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/macro.functions.php
   ✓ installed extension libusb/libusb
 
 added 1 extension in 1.42s
@@ -175,15 +188,42 @@ added 1 extension in 1.42s
 生成される主なファイルです。
 
 ```text
-@pnlx/packages/libusb/libusb/1.0.27/
+@pnlx/packages/libusb/libusb/1.0.29/      ← インストールされたパッケージと src/generated
 pnlx-lock.json
 @pnlx/pnlx-pathmap.json
 @pnlx/autoload.php
+@pnlx/ide-helper.php                       ← エンティティの IDE／静的解析用スタブ
 ```
+
+`src/generated` に書き出される全ファイルは [`pnlx gen`](#pnlx-gen-target---library-key-key) を参照してください。
 
 #### コンテンツ整合性（署名）
 
 パッケージのインストール時、`pnl` はコンテンツの署名を計算します。各ファイルを（ソート順で）sha256 化し、それらのハッシュをまとめてもう一度 sha256 にした 1 つのダイジェストを `pnlx-lock.json` の `dist.sha256` に記録します。次回**同じバージョン**をインストールする際は、取得したコンテンツを再びハッシュ化してロック値と比較し、異なる場合は「コンテンツが改ざんされている」としてエラーを出してインストールを中止します。新しいバージョンのインストールは正当な更新として許可します。（生成物・`.git`・ワークスペースディレクトリはダイジェスト対象から除外します。）
+
+### `pnl compose <members...> --as <Class>`
+
+**インストール済み**の拡張を 2 つ以上まとめ、1 つの共有 FFI スコープを通じてすべての関数を公開する単一クラスを生成します。これは `Pnlx\Runtime::compose([...])`（[PHP の使い方](php-usage.md#runtimecompose-パッケージ間で-ffi-スコープを共有する)参照）に対応する、ファイルとして書き出される名前付きの版です。実ファイルとして生成することで、エディタや静的解析が補完できるようになり、合成されたメソッドは（`__call` プロキシではなく）実メソッドなので参照渡しの out パラメータも往復します。
+
+メンバーが 1 つのスコープを共有するため、あるパッケージが生成した `CData`（例: `Sdlimage::IMG_Load` が返す `SDL2_image` の surface）を別のパッケージ（`Libsdl::SDL_CreateTextureFromSurface`）へそのまま渡せます。
+
+```sh
+# SDL と SDL_image を 1 つの Pnlx\Sdlx\Sdlx クラスに合成。
+pnl compose libsdl sdlimage --as 'Pnlx\Sdlx\Sdlx'
+```
+
+引数とオプション:
+
+- `<members...>` … インストール済みのパッケージ名（`vendor/package` または末尾の leaf）を 2 つ以上。
+- `--as <Class>` … 生成するクラスの完全修飾名（必須）。
+- `--prefix <prefix>` … 2 つのメンバーが同名関数を公開したときの trait メソッド衝突を解決する接頭辞（予約）。
+
+合成結果は `@pnlx/composites/<Class>.php`（`features.use_functions` が有効なら `<Class>Functions.php` も）に書き出し、`pnl.json` に記録し、新しいクラスがメンバーの後に読み込まれるよう `@pnlx/autoload.php` を作り直します。
+
+```text
+composed ./@pnlx/composites/Sdlx.php
+composed Pnlx\Sdlx\Sdlx from libsdl, sdlimage
+```
 
 ### `pnl update [vendor/package]`
 
@@ -257,6 +297,15 @@ pnl search 'lib*'
 ```text
 libusb/libusb 1.0.29 https://github.com/m3m0r7/pnl-packages/tree/main/packages
 libuv/libuv 1.48.0 https://github.com/m3m0r7/pnl-packages/tree/main/packages
+```
+
+### `pnl info <package>`
+
+パッケージのリモート情報 — install コマンド、読み込むヘッダー、リンクするネイティブライブラリ — をリポジトリから取得して表示します。ローカルにインストール済みでもリポジトリから取得します。対象にはベース名・`vendor/package`・URL・パスを指定できます。
+
+```sh
+# libusb パッケージの情報をインストールせずに表示。
+pnl info libusb
 ```
 
 ### `pnl list native`
@@ -412,7 +461,7 @@ pnl self-upgrade --home /opt/pnl
 すでに最新の場合の出力例です。
 
 ```text
-pnl 0.1.5 is already the latest release in 0.25s
+pnl 0.5.5 is already the latest release in 0.25s
 ```
 
 補足:
@@ -459,7 +508,7 @@ pnlx version
 出力例です。
 
 ```text
-0.1.0
+0.5.5
 ```
 
 ### `pnlx init`
@@ -519,22 +568,33 @@ cd pnl-packages/packages/libusb
 pnlx gen libusb
 ```
 
-生成されるファイルです。
+生成されるファイルです（`Libusb` はパッケージのクラス名のプレースホルダ）。
 
 ```text
-src/generated/libusb.ffi.php
-src/generated/Libusb.php
-src/generated/LibusbContext.php
-src/generated/index.php
-src/generated/function.aliases.php
+src/generated/libusb.ffi.php              # FFI cdef を PHP でラップ
+src/generated/Libusb.php                  # エンティティクラス（static ラッパーメソッド）
+src/generated/LibusbContext.php           # CData ハンドルのラッパー
+src/generated/LibusbException.php         # パッケージ用の生成例外
+src/generated/LibusbLibraryComponent.php  # Runtime::compose / pnl compose で使う trait
+src/generated/LibusbManifest.php          # インストール時メタデータ（名前・バージョン・パス）
+src/generated/const.php                   # 生成された定数
+src/generated/index.php                   # 拡張を起動する入口
+src/generated/function.aliases.php        # 関数名の別名
+src/generated/functions.php               # \Pnlx\Func グローバル関数（use_functions 時）
+src/generated/macro.functions.php         # 関数形式マクロを関数として公開
+src/generated/types/                      # struct/typedef ラッパーごとに 1 ファイル
+src/generated/enums/                      # 名前付き C enum ごとに PHP enum
+src/generated/symbol/                     # エクスポートされた C データシンボルのマーカークラス
 ```
+
+機能依存のバリアントも併せて出力されます。`cdata/`（`allow_cdata` 時）と `scalar/`（`use_php_scalars_in_return`/`use_php_scalars_in_const` 時）。
 
 このコマンドは、
 
 - `pnlx.json` を読み、
 - インストール済みプロジェクト内で実行された場合は `@pnlx/pnlx-pathmap.json` からヘッダーを解決し、
 - パスマップにヘッダーが無ければ、パッケージの `headers` 設定にフォールバックし、
-- PHP のクラス・PHPDoc 付きメソッド・別名・FFI 定義・入口を生成します。
+- PHP のクラス・PHPDoc 付きメソッド・別名・FFI 定義・定数・enum・型ラッパー・入口を生成します。
 
 1 つのパッケージが複数の C ライブラリを必要としていて、ターゲット名だけでは区別できないときは `--library-key` を使います。
 

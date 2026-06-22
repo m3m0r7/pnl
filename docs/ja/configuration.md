@@ -19,7 +19,10 @@ project-root/
   pnlx-lock.json               ← ロックファイル（コミット対象。@pnlx の外）
   @pnlx/                       ← 以下はすべて自動生成
     autoload.php
+    ide-helper.php
     pnlx-pathmap.json
+    runtime/                    ← Pnlx SDK ランタイムのコピー
+    composites/                 ← `pnl compose` で合成したクラス（あれば）
     packages/
       vendor/
         package/
@@ -34,6 +37,9 @@ project-root/
 - `pnlx-lock.json`: 入れたバージョンと内容ハッシュを固定するロックファイル。場所が可変な `@pnlx/` の外、`pnl.json` と同じ階層に置かれるので、固定された・コミット可能なパスになります。
 - `@pnlx/pnlx-pathmap.json`: 現在の環境向けに生成される、ライブラリ本体・ヘッダーの場所をまとめた地図。
 - `@pnlx/autoload.php`: インストール済みパッケージをまとめて読み込むための、自動生成された PHP の入口。
+- `@pnlx/ide-helper.php`: 実行時には読み込まれない、IDE／静的解析にエンティティのシグネチャを見せるためのスタブ。
+- `@pnlx/runtime/`: `Pnlx` SDK ランタイムのコピー。Composer の autoloader 無しでもオートローダーが動くようにします。
+- `@pnlx/composites/`: [`pnl compose`](commands.md#pnl-compose-members---as-class) が生成するクラス。複数の拡張を 1 つの共有 FFI スコープに合成したもの（実行するまでは存在しません）。
 
 
 ## `pnl.json` の書き方
@@ -112,6 +118,7 @@ project-root/
 | `features.allow_cdata` | 真偽値 | いいえ | `true` にすると、生成されるメソッド/関数の引数がラッパー型に加えて生の `\FFI\CData` も受け付けます。手書きの FFI コードと連携するときに便利です。 |
 | `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true`（既定）にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false` の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
 | `features.use_php_scalars_in_return` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
+| `features.use_php_scalars_in_const` | 真偽値 | いいえ | `true` にすると、生成される `const.php` が無損失に表現できる定数を `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` で表現します。 |
 | `config` | オブジェクト | いいえ | バイナリに埋め込まれた既定エンドポイントのプロジェクト単位の上書き（下記参照）。省略すると既定値を使います。 |
 | `extensions` | オブジェクト | はい | 入れたい拡張を `vendor/package` をキーにして並べます。`pnl install` がここに自動で追記します。 |
 

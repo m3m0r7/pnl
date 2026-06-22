@@ -11,10 +11,12 @@
   - [`pnl -l` / `pnl --license`](#pnl--l--pnl---license)
   - [`pnl init`](#pnl-init)
   - [`pnl install <source>`](#pnl-install-source)
+  - [`pnl compose <members...> --as <Class>`](#pnl-compose-members---as-class)
   - [`pnl update [vendor/package]`](#pnl-update-vendorpackage)
   - [`pnl uninstall <vendor/package>`](#pnl-uninstall-vendorpackage)
   - [`pnl list [glob]`](#pnl-list-glob)
   - [`pnl search [glob]`](#pnl-search-glob)
+  - [`pnl info <package>`](#pnl-info-package)
   - [`pnl list native`](#pnl-list-native)
   - [`pnl list repos`](#pnl-list-repos)
   - [`pnl repo add <git|file|https> <url> [--key <key>]`](#pnl-repo-add-gitfilehttps-url---key-key)
@@ -55,7 +57,7 @@ pnl version
 Example output:
 
 ```text
-0.1.0
+0.5.5
 ```
 
 ### `pnl -i` / `pnl --information`
@@ -69,7 +71,7 @@ pnl -i
 Example output:
 
 ```text
-  ██████╗ ███╗   ██╗██╗        pnl 0.1.5
+  ██████╗ ███╗   ██╗██╗        pnl 0.5.5
   ██╔══██╗████╗  ██║██║        ─────────
   ██████╔╝██╔██╗ ██║██║        OS:         macos (aarch64)
   ██╔═══╝ ██║╚██╗██║██║        Host:       mymachine.local
@@ -136,10 +138,17 @@ If the package declares an `installation` recipe for your OS or Linux distro, `p
 
 Packages that declare `installation` or `self_build` are checked against the `install_script_hash` stamped into `pnlx.json` by `pnlx publish`. When the hash is missing or differs, interactive installs ask with a default of No. Under `-y`, pnl stops instead of trusting changed scripts. To override deliberately, pass `--allow-install-script-hash <sha256>` (repeatable). `--allow-unverified-install-scripts` is available as an explicit last resort. Packages installed from a built-in **authorized repository** (the first-party `m3m0r7/pnl-packages` registry; see the `repositories.authorized` whitelist baked into the binary) are trusted to run their install scripts and skip this prompt entirely.
 
-Two flags adjust the generated PHP:
+Flags that adjust the generated PHP:
 
 - `--alias-class <Class>` additionally exposes the extension under `<Class>` via `class_alias`, keeping the original class.
 - `--function-prefix <prefix>` prepends `<prefix>` to every generated function and method name (the unprefixed names are not kept).
+- `--enable-use-functions` persists `features.use_functions = true` into `pnl.json`, exposing the generated global-functions API (see [Configuration](configuration.md#writing-pnljson)).
+- `--enable-allow-cdata` persists `features.allow_cdata = true`, so generated signatures also accept a raw `\FFI\CData`.
+- `--enable-use-php-scalars-in-return` persists `features.use_php_scalars_in_return = true`, so methods return native `int`/`float`/`string` for scalars that fit.
+- `--enable-use-php-scalars-in-const` persists `features.use_php_scalars_in_const = true`, so `const.php` uses native scalars instead of `\Pnlx\Types\*` wrappers where lossless.
+
+Flags that gate install scripts and integrity:
+
 - `--allow-install-script-hash <sha256>` trusts the given install-script hash for this run. It can be repeated.
 - `--allow-unverified-install-scripts` allows missing or changed install-script hashes.
 - `-f` / `--force` reinstalls even when the resolved content no longer matches the sha256 recorded in the lockfile; instead of aborting, it warns and overwrites the locked digest with the new content.
@@ -160,13 +169,17 @@ Example output:
 
 ```text
 pnl install https://github.com/m3m0r7/pnl-packages/tree/main/packages/libusb
-  ✓ resolved libusb-1.0 1.0.27 libusb-1.0.dylib
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/libusb.ffi.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/Libusb.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/LibusbContext.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/index.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/functions.php
-  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.27/src/generated/function.aliases.php
+  ✓ resolved libusb-1.0 1.0.29 libusb-1.0.dylib
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/libusb.ffi.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/Libusb.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbContext.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbException.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbLibraryComponent.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/LibusbManifest.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/const.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/index.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/function.aliases.php
+  ✓ generated ./@pnlx/packages/libusb/libusb/1.0.29/src/generated/macro.functions.php
   ✓ installed extension libusb/libusb
 
 added 1 extension in 1.42s
@@ -175,15 +188,42 @@ added 1 extension in 1.42s
 The main files produced:
 
 ```text
-@pnlx/packages/libusb/libusb/1.0.27/
+@pnlx/packages/libusb/libusb/1.0.29/      ← the installed package + its src/generated
 pnlx-lock.json
 @pnlx/pnlx-pathmap.json
 @pnlx/autoload.php
+@pnlx/ide-helper.php                       ← IDE/static-analysis stub for the entities
 ```
+
+See [`pnlx gen`](#pnlx-gen-target---library-key-key) for the full set of files written under `src/generated`.
 
 #### Content integrity
 
 When a package is installed, `pnl` computes a content signature for it: every file is hashed with sha256 (in sorted order), and those per-file hashes are hashed together into one digest, which is recorded as `dist.sha256` in `pnlx-lock.json`. On a later install of the **same version**, the freshly downloaded content is hashed again and compared to the locked digest; if they differ, the install is aborted with an integrity error because the content was modified or tampered with. Installing a new version is treated as a legitimate update. (Generated output, `.git`, and the workspace directory are excluded from the digest.)
+
+### `pnl compose <members...> --as <Class>`
+
+Composes two or more **installed** extensions into a single class that exposes all their functions through one shared FFI scope. This is the named, file-backed counterpart to `Pnlx\Runtime::compose([...])` (see [PHP Usage](php-usage.md#runtimecompose-share-one-ffi-scope-across-packages)) — generating it as a real file gives editors and static analysis something to see, and the composed methods are real (not a `__call` proxy), so by-reference out-parameters round-trip.
+
+Because the members share one scope, a `CData` produced by one package (e.g. an `SDL2_image` surface from `Sdlimage::IMG_Load`) flows straight into another (`Libsdl::SDL_CreateTextureFromSurface`).
+
+```sh
+# Fuse the SDL and SDL_image extensions into one Pnlx\Sdlx\Sdlx class.
+pnl compose libsdl sdlimage --as 'Pnlx\Sdlx\Sdlx'
+```
+
+Arguments and options:
+
+- `<members...>` — two or more installed package names (`vendor/package` or the bare leaf).
+- `--as <Class>` — the fully-qualified class name to generate (required).
+- `--prefix <prefix>` — method-name prefix used to resolve trait-method collisions when two members expose a same-named function (reserved).
+
+It writes the composite under `@pnlx/composites/<Class>.php` (and `<Class>Functions.php` when `features.use_functions` is enabled), records the composite in `pnl.json`, and regenerates `@pnlx/autoload.php` so the new class is loaded after its members.
+
+```text
+composed ./@pnlx/composites/Sdlx.php
+composed Pnlx\Sdlx\Sdlx from libsdl, sdlimage
+```
 
 ### `pnl update [vendor/package]`
 
@@ -257,6 +297,15 @@ Example output (name, available versions, source repository):
 ```text
 libusb/libusb 1.0.29 https://github.com/m3m0r7/pnl-packages/tree/main/packages
 libuv/libuv 1.48.0 https://github.com/m3m0r7/pnl-packages/tree/main/packages
+```
+
+### `pnl info <package>`
+
+Shows a package's remote details — its install commands, the headers it reads, and the native libraries it links — fetched from the repository even when the package is already installed locally. The target can be a bare name, `vendor/package`, a URL, or a path.
+
+```sh
+# Describe the libusb package without installing it.
+pnl info libusb
 ```
 
 ### `pnl list native`
@@ -412,7 +461,7 @@ pnl self-upgrade --home /opt/pnl
 Example output when already up to date:
 
 ```text
-pnl 0.1.5 is already the latest release in 0.25s
+pnl 0.5.5 is already the latest release in 0.25s
 ```
 
 Notes:
@@ -459,7 +508,7 @@ pnlx version
 Example output:
 
 ```text
-0.1.0
+0.5.5
 ```
 
 ### `pnlx init`
@@ -519,22 +568,33 @@ cd pnl-packages/packages/libusb
 pnlx gen libusb
 ```
 
-Generated files:
+Generated files (`Libusb` stands in for the package's class name):
 
 ```text
-src/generated/libusb.ffi.php
-src/generated/Libusb.php
-src/generated/LibusbContext.php
-src/generated/index.php
-src/generated/function.aliases.php
+src/generated/libusb.ffi.php              # the FFI cdef wrapped as PHP
+src/generated/Libusb.php                  # the entity class (static wrapper methods)
+src/generated/LibusbContext.php           # the CData handle wrapper
+src/generated/LibusbException.php         # the package's generated exception
+src/generated/LibusbLibraryComponent.php  # trait used by Runtime::compose / pnl compose
+src/generated/LibusbManifest.php          # install-time metadata (name, version, path)
+src/generated/const.php                   # generated constants
+src/generated/index.php                   # the entrypoint that boots the extension
+src/generated/function.aliases.php        # function-name aliases
+src/generated/functions.php               # \Pnlx\Func global functions (use_functions)
+src/generated/macro.functions.php         # function-like macros surfaced as functions
+src/generated/types/                      # one file per struct/typedef wrapper
+src/generated/enums/                      # one PHP enum per named C enum
+src/generated/symbol/                     # marker classes for exported C data symbols
 ```
+
+Feature-dependent variants are emitted alongside these: `cdata/` (when `allow_cdata`) and `scalar/` (when `use_php_scalars_in_return`/`use_php_scalars_in_const`).
 
 This command:
 
 - reads `pnlx.json`,
 - resolves headers from `@pnlx/pnlx-pathmap.json` when run inside an installed project,
 - falls back to the package's `headers` entries when the pathmap has none,
-- and generates PHP classes, PHPDoc'd wrapper methods, aliases, FFI definitions, and the entrypoint.
+- and generates PHP classes, PHPDoc'd wrapper methods, aliases, FFI definitions, constants, enums, type wrappers, and the entrypoint.
 
 When a single package needs multiple C libraries and the target name alone is ambiguous, use `--library-key`:
 

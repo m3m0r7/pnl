@@ -9,6 +9,7 @@
   - [libusb: version, error name, and device count](#libusb-version-error-name-and-device-count)
   - [SDL: open a window (object methods)](#sdl-open-a-window-object-methods)
   - [SDL: open a window (global functions)](#sdl-open-a-window-global-functions)
+  - [`Runtime::compose`: share one FFI scope across packages](#runtimecompose-share-one-ffi-scope-across-packages)
 - [Generated Files](#generated-files)
 
 ## Install Via Composer
@@ -416,6 +417,33 @@ try {
     }
 }
 ```
+
+### `Runtime::compose`: share one FFI scope across packages
+
+By default each extension opens its own FFI scope, so a `CData` produced by one package can't be handed to another. When you need to pass a handle across packages — say an `SDL2_image` surface into core SDL — compose the extensions into a single class that shares one scope:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/@pnlx/autoload.php';
+
+use Pnlx\Runtime;
+use Pnlx\Libsdl\Libsdl;
+use Pnlx\Sdlimage\Sdlimage;
+
+// Fuse both extensions into one object backed by a single shared FFI scope.
+$sdl = Runtime::compose([Libsdl::class, Sdlimage::class]);
+
+// A surface allocated by SDL_image flows straight into core SDL — same scope.
+$surface = $sdl->IMG_Load('sprite.png');
+$texture = $sdl->SDL_CreateTextureFromSurface($renderer, $surface);
+```
+
+`Runtime::compose([...])` builds an anonymous class that uses each member's generated `<Class>LibraryComponent` trait, so the composed methods are real (not a `__call` proxy) and by-reference out-parameters round-trip. It needs at least two classes and throws if two members expose a same-named function.
+
+For editor and static-analysis support, generate the same thing as a named file with [`pnl compose --as <Class>`](commands.md#pnl-compose-members---as-class); the file under `@pnlx/composites/` is then autoloaded like any other class.
 
 ## Generated Files
 
