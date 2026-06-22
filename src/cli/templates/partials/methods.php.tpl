@@ -22,7 +22,7 @@
             '{{raw_name}} is a C `{{unsupported_reason}}` function with no exported '
             . 'symbol, so it cannot be bound through FFI.'
         );
-{{else}}        static::__callStatic(static::PNLX_BOOT_TOKEN, []);
+{{else}}        \Pnlx\FFI\NativeLibraryRegistry::boot(static::class);
 {{#if enum_return}}        return {{enum_return}}::tryFrom({{> dispatch}});
 {{/if}}{{#if is_void}}        {{> dispatch}};
 {{/if}}{{#if is_string}}{{#if native_string}}        return \Pnlx\Util::cStringOrNull({{> dispatch}});

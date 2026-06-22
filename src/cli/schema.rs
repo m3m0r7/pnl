@@ -9,6 +9,13 @@ use serde_json::{Map, Value};
 /// works no matter where the executable is run from.
 static SCHEMAS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/schemas");
 
+/// A content fingerprint of `schemas/`, produced by `build.rs`. `include_dir!`
+/// does not register the embedded files as rebuild triggers on stable Rust, so
+/// `include_str!`ing this build-generated fingerprint (which cargo DOES track)
+/// forces this module — and the `include_dir!` embed above — to recompile whenever
+/// a schema changes. Intentionally unused.
+const _SCHEMA_FINGERPRINT: &str = include_str!(concat!(env!("OUT_DIR"), "/schema_fingerprint.txt"));
+
 #[derive(Debug, Clone, Copy)]
 pub enum SchemaKind {
     Pnl,

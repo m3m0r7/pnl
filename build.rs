@@ -40,9 +40,17 @@ fn main() {
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
     let mut fingerprint = String::new();
-    fingerprint_sdk_tree(&manifest_dir.join("src/sdk"), &mut fingerprint);
+    fingerprint_tree(&manifest_dir.join("src/sdk"), &mut fingerprint);
     fs::write(out_dir.join("sdk_fingerprint.txt"), fingerprint)
         .expect("failed to write SDK fingerprint");
+
+    // The same `include_dir!` staleness applies to the JSON schemas embedded by
+    // `schema.rs`; fingerprint them too so a schema edit re-embeds (otherwise the
+    // runtime validates against a stale schema — e.g. rejecting a newly-added key).
+    let mut schema_fingerprint = String::new();
+    fingerprint_tree(&manifest_dir.join("schemas"), &mut schema_fingerprint);
+    fs::write(out_dir.join("schema_fingerprint.txt"), schema_fingerprint)
+        .expect("failed to write schema fingerprint");
 
     let dest = out_dir.join("support.lib");
 
@@ -147,11 +155,11 @@ fn generate_config_constants(out_dir: &Path) {
         .expect("failed to write generated config constants");
 }
 
-/// Walk `src/sdk` in sorted order, emitting a `rerun-if-changed` for every file
+/// Walk a directory tree in sorted order, emitting a `rerun-if-changed` for every file
 /// and appending each file's path and length to `fingerprint`. The fingerprint is
 /// written to OUT_DIR and `include_str!`d by `sdk_assets.rs`, so any SDK edit
 /// changes a cargo-tracked input and forces the embedded copy to be rebuilt.
-fn fingerprint_sdk_tree(dir: &Path, fingerprint: &mut String) {
+fn fingerprint_tree(dir: &Path, fingerprint: &mut String) {
     println!("cargo:rerun-if-changed={}", dir.display());
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -160,7 +168,7 @@ fn fingerprint_sdk_tree(dir: &Path, fingerprint: &mut String) {
     paths.sort();
     for path in paths {
         if path.is_dir() {
-            fingerprint_sdk_tree(&path, fingerprint);
+            fingerprint_tree(&path, fingerprint);
         } else {
             println!("cargo:rerun-if-changed={}", path.display());
             let bytes = fs::read(&path).unwrap_or_default();

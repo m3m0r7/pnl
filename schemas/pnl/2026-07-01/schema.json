@@ -53,6 +53,33 @@
             "additionalProperties": {
               "$ref": "#/components/schemas/extensionRequirement"
             }
+          },
+          "composites": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/composite"
+            }
+          }
+        }
+      },
+      "composite": {
+        "title": "Composite class",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "members"
+        ],
+        "properties": {
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/packageName"
+            },
+            "minItems": 2,
+            "uniqueItems": true
+          },
+          "prefix": {
+            "type": "string"
           }
         }
       },

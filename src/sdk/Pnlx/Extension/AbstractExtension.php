@@ -4,80 +4,32 @@ declare(strict_types=1);
 
 namespace Pnlx\Extension;
 
-use Pnlx\Exception\ExtensionLoadException;
-use Pnlx\FFI\NativeLibrary;
-use Pnlx\Runtime;
+use Pnlx\FFI\NativeLibraryRegistry;
 
 /**
  * Static base shared by every generated extension entity.
  *
  * A C library is a bag of functions, not an object, so entities are never
- * instantiated: call them statically, `Libsdl::SDL_Init(...)`. The first static
- * call boots the extension once (opens the native library) and then dispatches
- * the requested C function.
+ * instantiated: call them statically, `Libsdl::SDL_Init(...)`. An entity (and its
+ * generated `<Class>LibraryComponent` trait) carries ONLY the methods named after C
+ * functions — nothing else lives here, so composing several Components into one
+ * class can only ever clash on real C-function names, never on runtime plumbing.
  *
- * Collision-safety is the whole point of this shape: the ONLY named surface the
- * generated subclass inherits is the magic {@see __callStatic()} (a C function
- * can never be named `__callStatic`). Everything else lives in `private` methods
- * reached through `self::` (not inherited, never overridden) or in fully-qualified
- * external helpers (`\Pnlx\FFI\ArgumentMarshaller::…`). So a C function named
- * `boot`, `dispatch`, `name`, … can never clash with the runtime.
- *
- * Metadata is install-time information, baked into the generated subclass as
- * constants (`Libsdl::NAME`, `VERSION`, `HASH`, `DESCRIPTION`, `PATH`) when the
- * package is installed — not read back from the manifest/pathmap at runtime.
+ * The only inherited surface is the two magic methods, which a C function can never
+ * be named: `__construct` (instantiation is forbidden) and `__callStatic`, which
+ * forwards every native dispatch to {@see NativeLibraryRegistry}. All the machinery
+ * — booting, the loaded library, install metadata — lives in that registry, keyed
+ * by class, never as a method on the entity.
  */
 abstract class AbstractExtension
 {
-    /** The package's generated FFI cdef file; the subclass overrides it. */
-    protected const string FFI_FILE = '';
-
-    /** The generated alias-map file (PHP name -> native symbol), a cdef sibling. */
-    protected const string ALIASES_FILE = 'function.aliases.php';
-
-    /** Per-generated-class boot sentinel; subclasses override with a hard-to-collide token. */
-    protected const string PNLX_BOOT_TOKEN = '';
-
-    public const string NAME = '';
-
-    public const string VERSION = '';
-
-    public const string HASH = '';
-
-    public const string DESCRIPTION = '';
-
-    public const string PATH = '';
-
-    /**
-     * Extra shared libraries to co-load alongside this package's own, so its calls
-     * into them resolve (a package's `dependencies` `library_names`, e.g. gsl ->
-     * cblas). Each is an absolute path baked in at install time. Empty by default.
-     *
-     * @var list<string>
-     */
-    public const array LIBRARIES = [];
-
-    /**
-     * Loaded native library per concrete class.
-     *
-     * @var array<class-string, NativeLibrary>
-     */
-    private static array $natives = [];
-
-    /**
-     * Boot guard per concrete class.
-     *
-     * @var array<class-string, true>
-     */
-    private static array $initialized = [];
-
     /** Entities are pure static; instantiating one is forbidden. */
     private function __construct()
     {
     }
 
     /**
-     * The generated static methods also route their native dispatch through here
+     * Forward a native dispatch to the registry. Generated methods route here
      * (`static::__callStatic('SDL_Init', [...])`) because the name `__callStatic`
      * can never collide with a C function.
      *
@@ -85,128 +37,6 @@ abstract class AbstractExtension
      */
     public static function __callStatic(string $name, array $arguments): mixed
     {
-        if (static::PNLX_BOOT_TOKEN !== '' && $name === static::PNLX_BOOT_TOKEN) {
-            if (!isset(self::$initialized[static::class])) {
-                self::boot();
-            }
-
-            return null;
-        }
-
-        if (!isset(self::$initialized[static::class])) {
-            self::boot();
-        }
-
-        return self::$natives[static::class]->call($name, $arguments);
-    }
-
-    /**
-     * The booted {@see NativeLibrary} for this extension, used SDK-internally to
-     * resolve exported globals ({@see \Pnlx\FFI\ArgumentMarshaller}) and allocate
-     * package structs (`new ...\Types\<struct>()`). Examples never call this
-     * directly. Named with a `pnlx` prefix so it can't realistically clash with a
-     * C function (and a data symbol can't share a function symbol's name anyway).
-     */
-    public static function pnlxNativeLibrary(): NativeLibrary
-    {
-        if (!isset(self::$initialized[static::class])) {
-            self::boot();
-        }
-
-        return self::$natives[static::class];
-    }
-
-    /**
-     * Describe what this extension contributes to a composed FFI scope: absolute
-     * paths to its generated cdef and alias-map files, its co-load libraries, and
-     * its own native library path. Consumed by {@see \Pnlx\Runtime::compose()}.
-     *
-     * `pnlx`-prefixed so it cannot collide with a generated C-function method.
-     *
-     * @return array{cdef: string, aliases: string, libraries: list<string>, path: string}
-     */
-    public static function pnlxComposeDescriptor(): array
-    {
-        $directory = self::pnlxGeneratedDirectory();
-
-        return [
-            'cdef' => $directory . '/' . static::FFI_FILE,
-            'aliases' => $directory . '/' . static::ALIASES_FILE,
-            'libraries' => static::LIBRARIES,
-            'path' => static::PATH,
-        ];
-    }
-
-    /**
-     * Adopt a shared {@see NativeLibrary} (assembled by {@see \Pnlx\Runtime::compose()})
-     * as this extension's booted library, so its generated methods dispatch through
-     * the shared FFI scope and can exchange CData with the other composed extensions.
-     * Marks the class booted so the normal per-class {@see boot()} is skipped.
-     *
-     * `pnlx`-prefixed so it cannot collide with a generated C-function method.
-     */
-    public static function pnlxAdoptNativeLibrary(NativeLibrary $library): void
-    {
-        self::$natives[static::class] = $library;
-        self::$initialized[static::class] = true;
-
-        \Pnlx\FFI\ArgumentMarshaller::rememberScalarsAllowed(
-            static::class,
-            Runtime::useScalarsInParams((new Runtime())->projectRoot()),
-        );
-    }
-
-    /**
-     * The generated directory holding the cdef and alias map. Entity variants live
-     * in `cdata/`/`scalar/` subdirs, so walk up from this class's file until the
-     * cdef file appears.
-     */
-    private static function pnlxGeneratedDirectory(): string
-    {
-        $directory = dirname((string) (new \ReflectionClass(static::class))->getFileName());
-        while (!is_file($directory . '/' . static::FFI_FILE) && dirname($directory) !== $directory) {
-            $directory = dirname($directory);
-        }
-
-        return $directory;
-    }
-
-    /**
-     * One-time per-class setup: verify the baked native library against its constant hash
-     * and open it. The cdef and alias map are siblings of the generated entity, so
-     * we locate them from this class's own file — no manifest or pathmap lookup.
-     *
-     * Private and reached only via `self::boot()`, so it is never inherited and a
-     * C function named `boot` cannot interfere.
-     */
-    private static function boot(): void
-    {
-        $runtime = new Runtime();
-
-        // Resolve the scalar-args feature here, where the project root is known,
-        // and hand it to the (collision-safe, fully-qualified) marshaller.
-        \Pnlx\FFI\ArgumentMarshaller::rememberScalarsAllowed(
-            static::class,
-            Runtime::useScalarsInParams($runtime->projectRoot()),
-        );
-
-        if (is_file(static::PATH) && static::HASH !== '') {
-            $actual = hash_file('sha256', static::PATH);
-            if ($actual === false || !hash_equals(static::HASH, $actual)) {
-                throw new ExtensionLoadException('Native library hash does not match the generated constant.');
-            }
-        }
-
-        $directory = self::pnlxGeneratedDirectory();
-
-        self::$natives[static::class] = NativeLibrary::load(
-            $directory . '/' . static::FFI_FILE,
-            static::PATH,
-            $directory . '/' . static::ALIASES_FILE,
-            false,
-            static::LIBRARIES,
-        );
-
-        self::$initialized[static::class] = true;
+        return NativeLibraryRegistry::call(static::class, $name, $arguments);
     }
 }

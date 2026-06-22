@@ -74,6 +74,21 @@ pub struct PnlManifest {
     #[serde(default, skip_serializing_if = "WorkspaceConfig::is_empty")]
     pub config: WorkspaceConfig,
     pub extensions: BTreeMap<String, ExtensionRequirement>,
+    /// Named composite classes (see `pnl compose`): a class FQN -> the member
+    /// packages whose generated Component traits it mixes in. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub composites: BTreeMap<String, Composite>,
+}
+
+/// A composed class declaration: the member packages whose `<Class>LibraryComponent`
+/// traits are mixed into one class sharing a single FFI scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Composite {
+    /// Member package names (`vendor/package`) contributing their method groups.
+    pub members: Vec<String>,
+    /// Optional method-name prefix used to resolve trait method collisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +165,7 @@ impl Default for PnlManifest {
             features: PnlFeatures::default(),
             config: WorkspaceConfig::default(),
             extensions: BTreeMap::new(),
+            composites: BTreeMap::new(),
         }
     }
 }

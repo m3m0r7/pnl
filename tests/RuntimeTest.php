@@ -96,9 +96,10 @@ class RuntimeTest extends TestCase
             'functions.php',
             'macro.functions.php',
             'Example.php',
-            'cdata/Example.php',
-            'scalar/Example.php',
-            'cdata/scalar/Example.php',
+            'ExampleLibraryComponent.php',
+            'cdata/ExampleLibraryComponent.php',
+            'scalar/ExampleLibraryComponent.php',
+            'cdata/scalar/ExampleLibraryComponent.php',
             'ExampleManifest.php',
             'ExampleContext.php',
             'ExampleException.php',
@@ -198,9 +199,10 @@ class RuntimeTest extends TestCase
             'functions.php',
             'macro.functions.php',
             'Example.php',
-            'cdata/Example.php',
-            'scalar/Example.php',
-            'cdata/scalar/Example.php',
+            'ExampleLibraryComponent.php',
+            'cdata/ExampleLibraryComponent.php',
+            'scalar/ExampleLibraryComponent.php',
+            'cdata/scalar/ExampleLibraryComponent.php',
             'ExampleManifest.php',
             'ExampleContext.php',
             'ExampleException.php',
@@ -253,10 +255,11 @@ class RuntimeTest extends TestCase
             $content
         );
 
-        // The native library PATH (absolute, in a random temp workspace), HASH,
-        // and generated boot token are machine/run-specific, so blank them.
+        // The native library path (absolute, in a random temp workspace) and hash
+        // ride on the #[NativeLibrary] attribute and are machine/run-specific, so
+        // blank their argument values.
         $normalized = preg_replace(
-            "/((?:public|protected) const string (?:PATH|HASH|PNLX_BOOT_TOKEN) = ')[^']*(';)/",
+            "/((?:path|hash): ')[^']*(')/",
             '${1}<normalized>${2}',
             $normalized ?? $content
         );
@@ -453,16 +456,19 @@ class RuntimeTest extends TestCase
         self::assertSame(hash_file('sha256', self::$workspace->nativeLibraryPath), $info->hash());
         self::assertSame(self::$workspace->nativeLibraryPath, $info->path());
 
-        // The same metadata is baked into the entity as build-time constants
-        // (HASH/PATH stamped in after the native library was resolved).
+        // The same metadata rides on the entity's #[NativeLibrary] attribute
+        // (path/hash stamped in after the native library was resolved).
         $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
-        $entity = new \ReflectionClass(self::exampleClass());
-        self::assertSame('example/example', $entity->getConstant('NAME'));
-        self::assertSame('1.2.3', $entity->getConstant('VERSION'));
-        self::assertSame(self::$workspace->nativeLibraryPath, $entity->getConstant('PATH'));
+        $attributes = (new \ReflectionClass(self::exampleClass()))
+            ->getAttributes(\Pnlx\Attribute\NativeLibrary::class);
+        self::assertCount(1, $attributes);
+        $lib = $attributes[0]->newInstance();
+        self::assertSame('example/example', $lib->name);
+        self::assertSame('1.2.3', $lib->version);
+        self::assertSame(self::$workspace->nativeLibraryPath, $lib->path);
         self::assertSame(
             hash_file('sha256', self::$workspace->nativeLibraryPath),
-            $entity->getConstant('HASH')
+            $lib->hash
         );
     }
 
@@ -482,18 +488,20 @@ class RuntimeTest extends TestCase
         self::assertTrue($reflection->getMethod('example_version')->isStatic());
         self::assertTrue($reflection->getMethod('exampleAdd')->isStatic());
 
-        // Metadata is baked in as build-time constants, so it never collides with
-        // a generated method named after a C function.
-        foreach (['NAME', 'VERSION', 'HASH', 'DESCRIPTION', 'PATH'] as $field) {
-            self::assertTrue($reflection->hasConstant($field));
-        }
+        // The method group is mixed in from the generated Component trait.
+        self::assertContains(
+            'Pnlx\\Example\\ExampleLibraryComponent',
+            class_uses(self::exampleClass()) ?: []
+        );
 
-        // The class carries the native-library attributes …
-        $libNameAttrs = $reflection->getAttributes(\Pnlx\Attribute\NativeLibraryName::class);
-        self::assertCount(1, $libNameAttrs);
-        $libName = $libNameAttrs[0]->newInstance();
-        self::assertInstanceOf(\Pnlx\Attribute\NativeLibraryName::class, $libName);
-        self::assertSame('example/example', $libName->name);
+        // Metadata rides on the #[NativeLibrary] attribute, not constants, so a
+        // composed class can mix in several Components without colliding metadata.
+        $libAttrs = $reflection->getAttributes(\Pnlx\Attribute\NativeLibrary::class);
+        self::assertCount(1, $libAttrs);
+        $lib = $libAttrs[0]->newInstance();
+        self::assertInstanceOf(\Pnlx\Attribute\NativeLibrary::class, $lib);
+        self::assertSame('example/example', $lib->name);
+        self::assertSame('1.2.3', $lib->version);
         self::assertCount(1, $reflection->getAttributes(\Pnlx\Attribute\AutoGeneratedByPnlx::class));
 
         // … and each generated method records the raw C symbol it wraps.
@@ -502,6 +510,49 @@ class RuntimeTest extends TestCase
         $raw = $rawAttrs[0]->newInstance();
         self::assertInstanceOf(\Pnlx\Attribute\RawNativeName::class, $raw);
         self::assertSame('example_add', $raw->name);
+    }
+
+    public function testComposeExposesBothMembersThroughOneSharedScope(): void
+    {
+        require_once self::$workspace->projectRoot . '/@pnlx/autoload.php';
+
+        $composite = ltrim(RuntimeWorkspace::COMPOSITE_CLASS, '\\');
+        if (!class_exists($composite)) {
+            self::fail("The composite {$composite} was not generated by `pnl compose`.");
+        }
+
+        // example_add comes from the `example` member, extra_triple from `extra`,
+        // and they run through the one shared FFI scope the composite boots.
+        $sum = $composite::example_add(2, 3);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $sum);
+        self::assertSame(5, $sum->toInt());
+
+        $tripled = $composite::extra_triple(4);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $tripled);
+        self::assertSame(12, $tripled->toInt());
+
+        // A struct pointer must round-trip: it is allocated through a member's type
+        // wrapper (Example::pnlxNativeLibrary()) yet filled and read through the
+        // composite — so the member and composite must share one FFI scope, or FFI
+        // rejects the pointer as foreign.
+        $point = new \Pnlx\Example\Types\example_point();
+        $composite::example_point_init($point, 3, 4);
+        $pointSum = $composite::example_point_sum($point);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $pointSum);
+        self::assertSame(7, $pointSum->toInt());
+    }
+
+    public function testComposedGlobalFunctionsDelegateToTheComposite(): void
+    {
+        require_once self::$workspace->projectRoot . '/@pnlx/autoload.php';
+
+        // With use_functions on, `pnl compose` also emits \Pnlx\Func\Demo\* global
+        // functions (from both members) that delegate to the composite class, so
+        // they share its one FFI scope. They carry the AutoGeneratedByPnlx attribute.
+        self::assertTrue(function_exists('Pnlx\\Func\\Demo\\example_add'));
+        self::assertTrue(function_exists('Pnlx\\Func\\Demo\\extra_triple'));
+        self::assertTrue(\Pnlx\Util\is_native_function('Pnlx\\Func\\Demo\\example_add'));
+        self::assertTrue(\Pnlx\Util\is_native_function('Pnlx\\Func\\Demo\\extra_triple'));
     }
 
     public function testStaticUtilHelpers(): void

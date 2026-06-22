@@ -104,6 +104,7 @@ pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
         .into_iter()
         .map(|package| php_single_quoted_path(&package.entrypoint))
         .collect::<Vec<_>>();
+    let composites = collect_composite_requires(root, &workspace)?;
 
     // The absolute pnl.json path as it exists right now (install/init time),
     // baked into autoload.php so the runtime locates it without walking cwd.
@@ -116,12 +117,38 @@ pub(super) fn write_pnlx_autoload(root: &Path) -> Result<()> {
         &workspace.join(crate::config::AUTOLOAD_FILE),
         env!("CARGO_PKG_VERSION"),
         &packages,
+        &composites,
         &manifest_path,
     )?;
     crate::generate::generate_ide_helper_php(&workspace.join("ide-helper.php"))?;
     // Keep the self-contained SDK runtime in sync with the generating binary.
     write_runtime_assets(root)?;
     Ok(())
+}
+
+/// Composite class files (see `pnl compose`) recorded in `pnl.json`, returned as
+/// autoload require paths relative to the workspace — only those whose generated
+/// file actually exists on disk.
+fn collect_composite_requires(root: &Path, workspace: &Path) -> Result<Vec<String>> {
+    let manifest_path = root.join(crate::config::PNL_MANIFEST_FILE);
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest = read_json::<crate::manifest::PnlManifest>(&manifest_path)?;
+    let mut requires = Vec::new();
+    for fqn in manifest.composites.keys() {
+        let class = fqn.rsplit('\\').next().unwrap_or(fqn);
+        // The class file, then its optional global-functions file (sorted so
+        // `<Class>.php` is required before `<Class>Functions.php`, which delegates
+        // to the class).
+        for relative in [format!("composites/{class}.php"), format!("composites/{class}Functions.php")] {
+            if workspace.join(&relative).is_file() {
+                requires.push(php_single_quoted_path(&relative));
+            }
+        }
+    }
+    requires.sort();
+    Ok(requires)
 }
 
 /// Copy the SDK runtime tree and support library into `@pnlx/runtime/`.

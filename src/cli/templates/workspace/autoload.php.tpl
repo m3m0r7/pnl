@@ -62,6 +62,10 @@ require_once __DIR__ . '/ide-helper.php';
 
 {{#each PACKAGES}}require_once __DIR__ . '/{{this}}';
 {{/each}}
+// Composed classes (see `pnl compose`) are required after the packages they mix
+// in, so their Component traits are already defined.
+{{#each COMPOSITES}}require_once __DIR__ . '/{{this}}';
+{{/each}}
 if (!function_exists('pnl_installed_native_libraries')) {
     /**
      * List every native library resolved into this workspace's pathmap.

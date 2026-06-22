@@ -1,0 +1,59 @@
+{
+    "schema_version": "2026-07-01",
+    "name": "extra/extra",
+    "version": "1.0.0",
+    "description": "Second test fixture native library.",
+    "authors": [
+        {
+            "name": "pnl tests"
+        }
+    ],
+    "license": "MIT",
+    "entrypoint": "src/generated/index.php",
+    "class": "Pnlx\\Extra\\Extra",
+    "platforms": [
+        {
+            "os": "darwin",
+            "arch": "aarch64"
+        },
+        {
+            "os": "darwin",
+            "arch": "x86_64"
+        },
+        {
+            "os": "linux",
+            "arch": "x86_64"
+        },
+        {
+            "os": "linux",
+            "arch": "aarch64"
+        },
+        {
+            "os": "windows",
+            "arch": "x86_64"
+        }
+    ],
+    "headers": [
+        {
+            "name": "extra",
+            "path": "include/extra.h",
+            "sha256": "60ce83f2e80d267ae4090b15d7e58f926fb5ce817bdd6177ad5504c1c9c76042"
+        }
+    ],
+    "requires": {
+        "extra": {
+            "symbol_prefix": "extra",
+            "library_names": [
+                "libextra.dylib",
+                "libextra.so",
+                "extra.dll"
+            ],
+            "header_names": [
+                "extra.h"
+            ],
+            "version": ">=1.0.0 & <2.0.0",
+            "required": true
+        }
+    },
+    "dependencies": {}
+}

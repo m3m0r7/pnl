@@ -74,7 +74,7 @@ final class ArgumentMarshaller
      */
     private static function resolveSymbol(string $symbolClass): mixed
     {
-        $library = $symbolClass::extension()::pnlxNativeLibrary();
+        $library = NativeLibraryRegistry::of($symbolClass::extension());
 
         return match ($symbolClass::mode()) {
             SymbolMode::Value => $library->global($symbolClass::name()),

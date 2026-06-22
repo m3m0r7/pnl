@@ -39,8 +39,8 @@ class example_point extends \Pnlx\Example\ExampleContext
     {
         parent::__construct(
             $cdata !== null
-                ? \Pnlx\Example\Example::pnlxNativeLibrary()->reinterpret('example_point', $cdata)
-                : \Pnlx\Example\Example::pnlxNativeLibrary()->allocate(sprintf('example_point[%d]', $size))
+                ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_point', $cdata)
+                : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_point[%d]', $size))
         );
     }
     public function getX(): int

@@ -39,8 +39,8 @@ class {{TYPE}} extends {{BASE}}
     {
         parent::__construct(
             $cdata !== null
-                ? {{ENTITY}}::pnlxNativeLibrary()->reinterpret('{{TYPE}}', $cdata)
-                : {{ENTITY}}::pnlxNativeLibrary()->allocate(sprintf('{{TYPE}}[%d]', $size))
+                ? \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)->reinterpret('{{TYPE}}', $cdata)
+                : \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)->allocate(sprintf('{{TYPE}}[%d]', $size))
         );
     }
 {{#each fields}}

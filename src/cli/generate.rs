@@ -19,6 +19,8 @@ use types::sanitize_php_param_name;
 
 const FFI_TEMPLATE: &str = include_str!("templates/package/src/generated/ffi.php.tpl");
 const ENTITY_TEMPLATE: &str = include_str!("templates/package/src/generated/entity.php.tpl");
+const COMPONENT_TEMPLATE: &str =
+    include_str!("templates/package/src/generated/component.php.tpl");
 const MANIFEST_TEMPLATE: &str = include_str!("templates/package/src/generated/manifest.php.tpl");
 const CONTEXT_TEMPLATE: &str = include_str!("templates/package/src/generated/context.php.tpl");
 const EXCEPTION_TEMPLATE: &str = include_str!("templates/package/src/generated/exception.php.tpl");
@@ -95,6 +97,24 @@ pub fn generate_entity_php(
     write_template(
         out,
         ENTITY_TEMPLATE,
+        options,
+        allow_cdata,
+        scalars_in_return,
+    )
+}
+
+/// Generate one `<Class>LibraryComponent` trait variant (the method group the
+/// entity mixes in). `allow_cdata`/`scalars_in_return` select the same per-variant
+/// method shapes as {@see generate_entity_php}.
+pub fn generate_component_php(
+    out: &Path,
+    options: &PhpPackageTemplateOptions<'_>,
+    allow_cdata: bool,
+    scalars_in_return: bool,
+) -> Result<()> {
+    write_template(
+        out,
+        COMPONENT_TEMPLATE,
         options,
         allow_cdata,
         scalars_in_return,
@@ -282,6 +302,7 @@ pub fn generate_autoload_php(
     out: &Path,
     version: &str,
     packages: &[String],
+    composites: &[String],
     manifest_path: &str,
 ) -> Result<()> {
     let mut context = generated_template_context();
@@ -289,6 +310,10 @@ pub fn generate_autoload_php(
     context.insert(
         "PACKAGES".to_owned(),
         serde_json::to_value(packages).expect("package paths serialize to JSON"),
+    );
+    context.insert(
+        "COMPOSITES".to_owned(),
+        serde_json::to_value(composites).expect("composite paths serialize to JSON"),
     );
     // The absolute pnl.json path, escaped for a single-quoted PHP literal.
     context.insert(
@@ -487,7 +512,7 @@ fn render_template(
     );
     context.insert(
         "METHODS".to_owned(),
-        Value::String(render_methods(options, allow_cdata, scalars_in_return, "")),
+        Value::String(render_methods(options, allow_cdata, scalars_in_return)),
     );
     // The boot token is derived from the same native-library hash as the HASH
     // constant and is filled in beside PATH/HASH once the library is resolved.
@@ -534,8 +559,10 @@ fn php_single_quoted(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Fill the entity variants' `PATH`/`HASH` constants with the resolved native
-/// library path and content hash.
+/// Stamp the resolved native library `path`/`hash`/`libraries` into the generated
+/// entity's `#[\Pnlx\Attribute\NativeLibrary(...)]` attribute. The entity is a
+/// single variant-independent file (the per-variant method shapes live in the
+/// `<Class>LibraryComponent` trait), so there is one file to update.
 pub fn stamp_entity_native_library(
     generated_dir: &Path,
     class_name: &str,
@@ -543,44 +570,46 @@ pub fn stamp_entity_native_library(
     native_hash: &str,
     dependency_libraries: &[String],
 ) -> Result<()> {
-    // The base entity and its three feature variants (cdata/, scalar/, cdata/scalar/).
-    for variant in ["", "cdata", "scalar", "cdata/scalar"] {
-        let file = generated_dir
-            .join(variant)
-            .join(format!("{class_name}.php"));
-        if !file.is_file() {
-            continue;
-        }
-        let content = fs::read_to_string(&file)
-            .with_context(|| format!("failed to read {}", file.display()))?;
-        let content = set_string_const(&content, "PATH", &php_single_quoted(native_path));
-        let content = set_string_const(&content, "HASH", &php_single_quoted(native_hash));
-        let content = set_array_const(&content, "LIBRARIES", dependency_libraries);
-        let content = set_string_const(
-            &content,
-            "PNLX_BOOT_TOKEN",
-            &php_single_quoted(&format!("__pnlx_boot_{native_hash}")),
-        );
-        fs::write(&file, content).with_context(|| format!("failed to write {}", file.display()))?;
+    let file = generated_dir.join(format!("{class_name}.php"));
+    if !file.is_file() {
+        return Ok(());
     }
+    let content =
+        fs::read_to_string(&file).with_context(|| format!("failed to read {}", file.display()))?;
+    let content = set_attribute_string_arg(&content, "path", &php_single_quoted(native_path));
+    let content = set_attribute_string_arg(&content, "hash", &php_single_quoted(native_hash));
+    let content = set_attribute_array_arg(&content, "libraries", dependency_libraries);
+    fs::write(&file, content).with_context(|| format!("failed to write {}", file.display()))?;
     Ok(())
 }
 
-/// Replace the value of `<visibility> const string <name> = '<old>';` with
-/// `<value>` (already escaped). No-op if the constant is not found.
-/// Replace an `public const array <name> = [...];` value with a PHP array literal
-/// of the given strings (each single-quoted). Used to stamp the resolved co-load
-/// library paths into the generated entity.
-fn set_array_const(content: &str, name: &str, items: &[String]) -> String {
-    let prefix = format!("public const array {name} = ");
+/// Replace the value of a single-quoted named attribute argument `<name>: '<old>'`
+/// with `<value>` (already escaped). No-op if the argument is not found.
+fn set_attribute_string_arg(content: &str, name: &str, value: &str) -> String {
+    let prefix = format!("{name}: '");
     let Some(start) = content.find(&prefix) else {
         return content.to_owned();
     };
     let value_start = start + prefix.len();
-    let Some(rel_end) = content[value_start..].find(';') else {
+    let Some(rel_end) = content[value_start..].find('\'') else {
         return content.to_owned();
     };
     let end = value_start + rel_end;
+    format!("{}{value}{}", &content[..value_start], &content[end..])
+}
+
+/// Replace the `[...]` value of a named attribute argument `<name>: [...]` with a
+/// PHP array literal of the given single-quoted strings (co-load library paths).
+fn set_attribute_array_arg(content: &str, name: &str, items: &[String]) -> String {
+    let prefix = format!("{name}: ");
+    let Some(start) = content.find(&prefix) else {
+        return content.to_owned();
+    };
+    let value_start = start + prefix.len();
+    let Some(rel_end) = content[value_start..].find(']') else {
+        return content.to_owned();
+    };
+    let end = value_start + rel_end + 1;
     let literal = if items.is_empty() {
         "[]".to_owned()
     } else {
@@ -592,22 +621,6 @@ fn set_array_const(content: &str, name: &str, items: &[String]) -> String {
         format!("[{joined}]")
     };
     format!("{}{literal}{}", &content[..value_start], &content[end..])
-}
-
-fn set_string_const(content: &str, name: &str, value: &str) -> String {
-    for visibility in ["public", "protected"] {
-        let prefix = format!("{visibility} const string {name} = '");
-        let Some(start) = content.find(&prefix) else {
-            continue;
-        };
-        let value_start = start + prefix.len();
-        let Some(rel_end) = content[value_start..].find('\'') else {
-            return content.to_owned();
-        };
-        let end = value_start + rel_end;
-        return format!("{}{value}{}", &content[..value_start], &content[end..]);
-    }
-    content.to_owned()
 }
 
 fn generated_template_context() -> Map<String, Value> {
@@ -1338,7 +1351,6 @@ double demo_scale(double value, int factor);\n";
             &sample_options(&signatures),
             false,
             false,
-            "__pnlx_boot_test_20260615T000000Z"
         ));
     }
 
@@ -1346,8 +1358,8 @@ double demo_scale(double value, int factor);\n";
     fn out_parameter_param_accepts_wrappers_and_gates_cdata() {
         let signatures = parse_function_signatures("void demo_version(int *major, int *minor);\n");
         let options = sample_options(&signatures);
-        let without_cdata = render_methods(&options, false, false, "");
-        let with_cdata = render_methods(&options, true, false, "");
+        let without_cdata = render_methods(&options, false, false);
+        let with_cdata = render_methods(&options, true, false);
 
         // The scalar-pointer out-param is a by-reference NativePointer that also
         // accepts the integer helper wrapper, in both variants.
@@ -1380,7 +1392,6 @@ double demo_scale(double value, int factor);\n";
             &sample_options(&signatures),
             false,
             true,
-            "__pnlx_boot_test_20260615T000000Z"
         ));
     }
 
@@ -1391,13 +1402,13 @@ double demo_scale(double value, int factor);\n";
     }
 
     #[test]
-    fn stamps_boot_token_from_native_hash() {
+    fn stamps_native_library_attribute_arguments() {
         let dir = tempfile::tempdir().unwrap();
         let generated = dir.path();
         let entity = generated.join("Demo.php");
         fs::write(
             &entity,
-            "<?php\nclass Demo {\n    protected const string PNLX_BOOT_TOKEN = '';\n    public const string PATH = '';\n    public const string HASH = '';\n    public const array LIBRARIES = [];\n}\n",
+            "<?php\n#[\\Pnlx\\Attribute\\NativeLibrary(\n    name: 'demo/demo',\n    path: '',\n    hash: '',\n    libraries: [],\n)]\nclass Demo extends \\Pnlx\\Extension\\AbstractExtension {}\n",
         )
         .unwrap();
 
@@ -1411,10 +1422,10 @@ double demo_scale(double value, int factor);\n";
         .unwrap();
 
         let stamped = fs::read_to_string(entity).unwrap();
-        assert!(stamped.contains("protected const string PNLX_BOOT_TOKEN = '__pnlx_boot_abc123';"));
-        assert!(stamped.contains("public const string HASH = 'abc123';"));
+        assert!(stamped.contains("path: '/usr/lib/libdemo.dylib'"), "{stamped}");
+        assert!(stamped.contains("hash: 'abc123'"), "{stamped}");
         assert!(
-            stamped.contains("public const array LIBRARIES = ['/usr/lib/libcblas.so'];"),
+            stamped.contains("libraries: ['/usr/lib/libcblas.so']"),
             "{stamped}"
         );
     }

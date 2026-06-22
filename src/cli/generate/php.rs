@@ -212,7 +212,6 @@ pub(super) fn render_methods(
     options: &PhpPackageTemplateOptions<'_>,
     allow_cdata: bool,
     scalars_in_return: bool,
-    boot_token: &str,
 ) -> String {
     let prefix = options.function_prefix;
     let mut methods = Vec::new();
@@ -236,10 +235,7 @@ pub(super) fn render_methods(
         }
     }
 
-    super::render_inner_template(
-        super::METHODS_TEMPLATE,
-        json!({ "methods": methods, "boot_token": boot_token }),
-    )
+    super::render_inner_template(super::METHODS_TEMPLATE, json!({ "methods": methods }))
 }
 
 pub(super) fn render_global_functions(options: &PhpPackageTemplateOptions<'_>) -> String {

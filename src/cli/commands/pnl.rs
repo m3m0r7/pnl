@@ -9,6 +9,7 @@ use crate::io::{read_json, read_or_default, write_json, write_json_if_missing};
 use crate::manifest::{PnlLock, PnlManifest, PnlxPathmap, Repository, RepositoryType};
 use crate::validate::{ensure_platform_matches, validate_pnl_workspace};
 
+mod compose;
 mod index;
 mod info;
 mod install;
@@ -96,6 +97,19 @@ enum Command {
         /// recorded in the lockfile; the locked digest is overwritten.
         #[arg(long, short = 'f')]
         force: bool,
+    },
+    /// Compose installed extensions into one class exposing all their functions
+    /// through a single shared FFI scope (a named counterpart to
+    /// `Pnlx\Runtime::compose([...])`).
+    Compose {
+        /// Two or more installed package names (`vendor/package` or bare leaf).
+        members: Vec<String>,
+        /// The composed class FQN to generate, e.g. `Pnlx\Sdlx\Sdlx`.
+        #[arg(long = "as")]
+        as_class: String,
+        /// Method-name prefix to resolve trait method collisions (reserved).
+        #[arg(long)]
+        prefix: Option<String>,
     },
     /// Reinstall an extension (or all of them) from its recorded source.
     Update {
@@ -291,6 +305,11 @@ pub fn run() -> Result<()> {
                 force,
             },
         ),
+        Command::Compose {
+            members,
+            as_class,
+            prefix,
+        } => compose::compose(Path::new("."), &members, &as_class, prefix.as_deref()),
         Command::Update { package } => update(Path::new("."), package.as_deref()),
         Command::Uninstall { package } => uninstall(Path::new("."), &package, interaction),
         Command::List { subject } => list(Path::new("."), subject),

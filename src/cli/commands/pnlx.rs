@@ -4,8 +4,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::generate::{
-    PhpPackageTemplateOptions, generate_aliases_php, generate_const_php, generate_context_php,
-    generate_entity_php, generate_enums_php, generate_exception_php, generate_ffi_php_from_cdef,
+    PhpPackageTemplateOptions, generate_aliases_php, generate_component_php, generate_const_php,
+    generate_context_php, generate_entity_php, generate_enums_php, generate_exception_php,
+    generate_ffi_php_from_cdef,
     generate_functions_php, generate_index_php, generate_macro_functions_php,
     generate_manifest_php, generate_symbols_php, generate_types_php,
 };
@@ -370,7 +371,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
     generate_types_php(&generated_dir.join("types"), &template_options)?;
     generate_enums_php(&generated_dir.join("enums"), &template_options)?;
     generate_symbols_php(&generated_dir.join("symbol"), &template_options)?;
-    // Four entity variants on two axes, selected at runtime by `index.php`:
+    // The method group lives in a `<Class>LibraryComponent` trait, generated in
+    // four variants on two axes and selected at runtime by `index.php`:
     // `allow_cdata` (the `cdata/` subdir, params also accept raw `\FFI\CData`) and
     // `use_php_scalars_in_return` (the `scalar/` subdir, methods return native
     // scalars). `use_php_scalars_in_params` is enforced at runtime, not by variant.
@@ -383,14 +385,23 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<()> {
             if scalars_in_return {
                 dir.push("scalar");
             }
-            generate_entity_php(
-                &dir.join(format!("{class_name}.php")),
+            generate_component_php(
+                &dir.join(format!("{class_name}LibraryComponent.php")),
                 &template_options,
                 allow_cdata,
                 scalars_in_return,
             )?;
         }
     }
+    // The entity itself is variant-independent (it only `use`s the component trait
+    // and carries the metadata attribute), so it is emitted once; `index.php`
+    // requires the chosen component variant before it.
+    generate_entity_php(
+        &generated_dir.join(format!("{class_name}.php")),
+        &template_options,
+        false,
+        false,
+    )?;
     generate_const_php(generated_dir, &template_options, &constants)?;
     generate_macro_functions_php(
         &generated_dir.join("macro.functions.php"),

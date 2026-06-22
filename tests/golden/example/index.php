@@ -47,9 +47,12 @@ foreach (glob(__DIR__ . '/symbol/*.php') ?: [] as $symbolFile) {
     require_once $symbolFile;
 }
 
-// Two feature flags select one of the four generated entity variants at runtime:
-// `allow_cdata` (the cdata/ subdir, params also accept raw \FFI\CData) and
-// `use_php_scalars_in_return` (the scalar/ subdir, methods return native scalars).
+// The method group lives in a `ExampleLibraryComponent` trait, generated in four
+// variants selected at runtime by two feature flags: `allow_cdata` (the cdata/
+// subdir, params also accept raw \FFI\CData) and `use_php_scalars_in_return` (the
+// scalar/ subdir, methods return native scalars). Require the chosen trait variant
+// first, then the variant-independent entity that mixes it in. Booting is lazy: the
+// native library opens on the first static call, not at require time.
 $entityVariant = '';
 if (\Pnlx\Runtime::allowCData()) {
     $entityVariant .= 'cdata/';
@@ -57,9 +60,8 @@ if (\Pnlx\Runtime::allowCData()) {
 if (\Pnlx\Runtime::useScalarsInReturn()) {
     $entityVariant .= 'scalar/';
 }
-// Requiring the entity boots it (its bottom-of-file `initialize()` runs once),
-// so the class is ready for static calls — no runtime instance is kept here.
-require_once __DIR__ . '/' . $entityVariant . 'Example.php';
+require_once __DIR__ . '/' . $entityVariant . 'ExampleLibraryComponent.php';
+require_once __DIR__ . '/Example.php';
 unset($entityVariant);
 
 if (is_file(__DIR__ . '/preload.php')) {
