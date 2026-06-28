@@ -1,5 +1,5 @@
 {{~#*inline "marshal_arg"~}}
-{{#if is_pointer}}\Pnlx\FFI\ArgumentMarshaller::unwrap(${{name}}){{else}}\Pnlx\FFI\ArgumentMarshaller::scalarArg(static::class, ${{name}}){{/if}}
+{{#if is_struct_value}}\Pnlx\FFI\ArgumentMarshaller::structValue(${{name}}){{else}}{{#if is_pointer}}\Pnlx\FFI\ArgumentMarshaller::unwrap(${{name}}){{else}}\Pnlx\FFI\ArgumentMarshaller::scalarArg(static::class, ${{name}}){{/if}}{{/if}}
 {{~/inline~}}
 {{~#*inline "dispatch"~}}
 {{#if has_out_params}}\Pnlx\FFI\OutParameterMarshaller::call(static::class, __FUNCTION__, '{{call_name}}', [{{#each args}}{{#if is_native_pointer}}&${{name}}{{else}}{{> marshal_arg}}{{/if}}{{#unless @last}}, {{/unless}}{{/each}}]){{else}}static::__callStatic('{{call_name}}', {{#if variadic}}array_merge([{{#each args}}{{> marshal_arg}}{{#unless @last}}, {{/unless}}{{/each}}], $__pnlx_varargs){{else}}[{{#each args}}{{> marshal_arg}}{{#unless @last}}, {{/unless}}{{/each}}]{{/if}}){{/if}}

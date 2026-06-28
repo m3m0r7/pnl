@@ -37,12 +37,25 @@ class example_point extends \Pnlx\Example\ExampleContext
      */
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
+        // A struct handed back BY VALUE (e.g. a function returning `example_point`, not
+        // `example_point *`) can't be `reinterpret`-cast to a pointer. Keep it alive and
+        // expose its address, so accessors and pointer uses see a `example_point *` while
+        // by-value re-passing dereferences it (see ArgumentMarshaller::structValue).
+        if ($cdata !== null && \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_STRUCT) {
+            $this->byValue = $cdata;
+            parent::__construct(\FFI::addr($cdata));
+
+            return;
+        }
         parent::__construct(
             $cdata !== null
                 ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_point', $cdata)
                 : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_point[%d]', $size))
         );
     }
+
+    /** Retains a by-value struct so the address handed to the parent stays valid. */
+    private ?\FFI\CData $byValue = null;
     public function getX(): int
     {
         return $this->cdata()[0]->x;

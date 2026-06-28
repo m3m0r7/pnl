@@ -129,6 +129,25 @@ is no allocator to manage by hand:
   Libconfig::config_destroy($cfg);
   ```
 
+- **For raw or batch allocations, use the `Allocator`.** When you need a value the
+  generated wrappers do not cover (an arbitrary C type, a `char` buffer), allocate it
+  in the *extension's* FFI scope — allocating elsewhere makes a value the library's
+  functions reject. An `AllocationScope` keeps its allocations alive until you
+  `release()` it, so their pointers can be handed to C without a stray garbage
+  collection freeing the memory mid-call:
+
+  ```php
+  use Pnlx\FFI\NativeLibraryRegistry;
+
+  $alloc = NativeLibraryRegistry::allocator(Libfoo::class);
+  $buf   = $alloc->cString('hello');        // NUL-terminated char buffer
+
+  $scope = $alloc->scope();
+  $point = $scope->new('struct foo_point'); // pinned until release()
+  // … hand pointers into the native API …
+  $scope->release();                        // memory may be reclaimed now
+  ```
+
 - **A writable `char *` buffer is passed by reference too.** Pre-size it with a string
   and read the written bytes back:
 
@@ -148,7 +167,7 @@ is no allocator to manage by hand:
   ```
 
 Scalar value types live under `\Pnlx\Types\*` (`Int_`, `Float_`, `String_`, …). Under
-`features.use_php_scalars_in_params`/`use_php_scalars_in_return` plain PHP scalars are
+`features.scalar_params`/`scalar_returns` plain PHP scalars are
 accepted and returned directly; otherwise they arrive wrapped in these types.
 
 ### SDL: open a window (object methods)
@@ -277,7 +296,7 @@ try {
 
 ### SDL: open a window (global functions)
 
-Opening an SDL window and drawing "Hello World!" inside it using the generated global functions. To use this style, first set `features.use_functions` to `true` in `pnl.json`.
+Opening an SDL window and drawing "Hello World!" inside it using the generated global functions. To use this style, first set `features.global_functions` to `true` in `pnl.json`.
 
 ```php
 <?php
@@ -318,8 +337,8 @@ use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 if (!function_exists('Pnlx\\Func\\Libsdl\\SDL_Init')) {
-    // @pnlx/autoload.php defines \Pnlx\Func functions only when features.use_functions is true.
-    throw new RuntimeException('SDL global functions are disabled. Set pnl.json features.use_functions to true.');
+    // @pnlx/autoload.php defines \Pnlx\Func functions only when features.global_functions is true.
+    throw new RuntimeException('SDL global functions are disabled. Set pnl.json features.global_functions to true.');
 }
 
 // A tiny 5x7 bitmap font for the characters in "Hello World!".

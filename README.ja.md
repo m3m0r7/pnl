@@ -28,6 +28,7 @@ pnl list 'lib*'      # インストール済みを確認
 - [コマンド](docs/ja/commands.md) — `pnl` と `pnlx` のコマンドリファレンス。
 - [PHP からの使い方](docs/ja/php-usage.md) — 拡張の読み込みと生成されるファイル。
 - [開発](docs/ja/development.md) — 検証・テスト・JSON スキーマ。
+- [規約](docs/ja/conventions.md) — ソースツリーの命名規則・コーディングルール・アーキ層。
 
 公式の既定パッケージリポジトリは **https://github.com/m3m0r7/pnl-packages** です。`repository-index.json` を公開しているため、`pnl search` はクローンせずに一覧できます。リポジトリは短いエイリアス（例: `sdl` → `libsdl`）も公開でき、`pnl install sdl` は参照先のパッケージへ解決されます。組み込みのエンドポイントはプロジェクトごとに上書きできます — [設定](docs/ja/configuration.md) を参照してください。
 

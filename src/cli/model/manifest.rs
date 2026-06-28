@@ -1,0 +1,700 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::SCHEMA_VERSION;
+use crate::model::platform::{current_platform, current_platform_requirement};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Repository {
+    #[serde(rename = "type")]
+    pub kind: RepositoryType,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Higher values are consulted first when resolving a bare package name.
+    /// Defaults to 0; the built-in default repository sits at 0 as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RepositoryType {
+    Git,
+    File,
+    Https,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionRequirement {
+    pub version: String,
+    pub required: bool,
+}
+
+/// One entry in a package's per-architecture `dependencies`: extra shared
+/// libraries to co-load so the package's own symbols resolve. `library_names` are
+/// on-disk libraries resolved the same way as a native requirement (pkg-config /
+/// soname / multiarch). `package_names` are other pnl packages resolved and
+/// installed like an `install` target (bare name, `file://`, `git@`, …), whose
+/// own native library is then co-loaded. `library_names` and `package_names` may
+/// coexist; `repositories` overrides the registries used to resolve a bare
+/// `package_names` entry (defaulting to the workspace/config registries).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DependencyEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_names: Vec<LibraryName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
+}
+
+fn default_output_dir() -> String {
+    crate::model::config::DEFAULT_OUTPUT_DIR.to_owned()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlManifest {
+    pub schema_version: String,
+    pub repositories: Vec<Repository>,
+    /// Extra directories searched for native libraries during resolution.
+    pub library_paths: Vec<String>,
+    /// Directory (relative to the project root) for generated workspace files
+    /// — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`.
+    #[serde(default = "default_output_dir")]
+    pub output_dir: String,
+    #[serde(default)]
+    pub features: PnlFeatures,
+    /// Native-compilation toggles (consumer-side). Opt-in only — omitted when no
+    /// option is set; the default install requires no C compiler.
+    #[serde(default, skip_serializing_if = "CompileOptions::is_empty")]
+    pub compile_options: CompileOptions,
+    /// Per-project overrides for built-in endpoints; omitted when no override
+    /// is set.
+    #[serde(default, skip_serializing_if = "WorkspaceConfig::is_empty")]
+    pub config: WorkspaceConfig,
+    pub extensions: BTreeMap<String, ExtensionRequirement>,
+    /// Named composite classes (see `pnl compose`): a class FQN -> the member
+    /// packages whose generated Component traits it mixes in. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub composites: BTreeMap<String, Composite>,
+}
+
+/// A composed class declaration: the member packages whose `<Class>LibraryComponent`
+/// traits are mixed into one class sharing a single FFI scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Composite {
+    /// Member package names (`vendor/package`) contributing their method groups.
+    pub members: Vec<String>,
+    /// Optional method-name prefix used to resolve trait method collisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlFeatures {
+    /// Emit and load the generated `Pnlx\Func\<Class>\*` global free functions.
+    pub global_functions: bool,
+    /// Expose raw `\FFI\CData` alongside the generated wrapper in entity
+    /// signatures (loads the `cdata/<Class>.php` variant). Defaults to false.
+    #[serde(default)]
+    pub cdata_arguments: bool,
+    /// Accept a raw PHP scalar (not only a generated wrapper) as a generated
+    /// method argument. When false, passing a raw scalar throws at runtime.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub scalar_params: bool,
+    /// Return PHP native `int`/`float`/`string` for scalars that fit losslessly
+    /// (the `scalar/<Class>.php` entity variant) instead of the generated value
+    /// wrappers (64-bit unsigned still wrapped). Defaults to false.
+    #[serde(default)]
+    pub scalar_returns: bool,
+    /// Emit PHP-native scalars for `const.php` values PHP can represent losslessly
+    /// (the `scalar/const.php` variant) instead of `Pnlx\Types\*` wrappers; typed
+    /// and unsigned constants stay wrapped. Defaults to false.
+    #[serde(default)]
+    pub scalar_constants: bool,
+}
+
+impl Default for PnlFeatures {
+    fn default() -> Self {
+        Self {
+            global_functions: false,
+            cdata_arguments: false,
+            scalar_params: true,
+            scalar_returns: false,
+            scalar_constants: false,
+        }
+    }
+}
+
+/// Consumer-side native-compilation toggles (`compile_options` in pnl.json). These
+/// can require a C toolchain at install time, so they are opt-in and never set by a
+/// package author (a package's `pnlx.json` cannot turn them on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Build a compiled trampoline shim (`.so`/`.dylib`) so a library's
+    /// `static inline` functions — which export no symbol and otherwise become
+    /// throwing stubs — become real bound methods. Requires a C compiler (`$CC`,
+    /// then `cc`/`clang`/`gcc`) when a package actually has such functions; the
+    /// install errors if one is needed but none is found. Defaults to false.
+    #[serde(default)]
+    pub static_inline: bool,
+}
+
+impl CompileOptions {
+    /// Whether no option is set, so `compile_options` can be omitted from pnl.json.
+    pub fn is_empty(&self) -> bool {
+        !self.static_inline
+    }
+}
+
+/// Per-project overrides for the built-in service endpoints (see `config.toml`).
+/// Absent fields fall back to the values baked into the binary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceConfig {
+    /// Override the repository pnl releases come from (the startup update check
+    /// and `pnl self-upgrade`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_repository: Option<String>,
+    /// Override the default package registry used as the lowest-priority
+    /// fallback when resolving a bare name like `pnl install <name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_repository: Option<String>,
+}
+
+impl WorkspaceConfig {
+    /// Whether no override is set, so `config` can be omitted from `pnl.json`.
+    pub fn is_empty(&self) -> bool {
+        self.release_repository.is_none() && self.package_repository.is_none()
+    }
+
+    /// The package registry: the workspace override or the built-in default.
+    pub fn package_repository(&self) -> String {
+        self.package_repository
+            .clone()
+            .unwrap_or_else(|| crate::model::config::default_packages_repository().to_owned())
+    }
+}
+
+impl Default for PnlManifest {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            repositories: Vec::new(),
+            library_paths: Vec::new(),
+            output_dir: default_output_dir(),
+            features: PnlFeatures::default(),
+            compile_options: CompileOptions::default(),
+            config: WorkspaceConfig::default(),
+            extensions: BTreeMap::new(),
+            composites: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Platform {
+    pub os: String,
+    pub arch: String,
+    pub libc: Option<String>,
+    pub php_version: String,
+    pub php_sapi: String,
+    pub php_zts: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Source {
+    #[serde(rename = "type")]
+    pub kind: RepositoryType,
+    pub url: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Dist {
+    pub url: String,
+    pub sha256: String,
+}
+
+/// A repository index (`repository-index.json`) — the catalogue a repository
+/// publishes so `pnl find` can list its packages without cloning. Matches the
+/// `repository-index` schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepositoryIndex {
+    pub schema_version: String,
+    pub packages: BTreeMap<String, IndexPackage>,
+}
+
+impl RepositoryIndex {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            packages: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexPackage {
+    /// Alias: when set, this package name redirects to the named package in the
+    /// same index (e.g. `sdl` → `ref: "libsdl"`), so `pnl install sdl` resolves
+    /// and installs the referenced package.
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub versions: BTreeMap<String, IndexPackageVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexPackageVersion {
+    /// Path to the package's pnlx.json within the repository (e.g.
+    /// `packages/<name>/pnlx.json`).
+    pub manifest: String,
+    pub dist: Dist,
+    pub source: Source,
+}
+
+/// A native library as recorded in the lockfile: identity, version, and content
+/// hash only. Install-time file paths live in the pathmap, not the lock, so the
+/// lock stays portable and path-independent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedNativeLibrary {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedExtension {
+    pub version: String,
+    pub constraint: String,
+    pub source: Source,
+    pub dist: Dist,
+    /// Fully-qualified generated entity class names this extension exposes, so
+    /// `pnl_is_installed(<Class>::class)` resolves straight from the lockfile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
+    pub dependencies: BTreeMap<String, String>,
+    pub native_libraries: BTreeMap<String, LockedNativeLibrary>,
+    /// Resolved co-load libraries from the package's `dependencies` (`library_names`),
+    /// as `resolved name -> resolved path`, so a reinstall and the runtime know which
+    /// extra `.so` to load alongside this package. Empty for a single-library package.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub libraries: BTreeMap<String, String>,
+    /// Solved `require_definitions` (name -> chosen value as a string), recorded so a
+    /// reinstall preseeds the prompt with the prior choice and a non-interactive
+    /// install reproduces it without prompting. Empty for packages with none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definitions: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlLock {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub platform: Platform,
+    pub extensions: BTreeMap<String, LockedExtension>,
+}
+
+impl PnlLock {
+    pub fn empty(platform: Platform) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            generated_at: crate::model::platform::now(),
+            platform,
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlatformRequirement {
+    pub os: String,
+    pub arch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub libc: Option<String>,
+}
+
+/// How to read a library's exported symbols (and, by extension, how to treat the
+/// resolved file). `Auto` infers from the file extension (and the running OS); the
+/// explicit variants force a reader, e.g. `tbd` for a macOS SDK text-stub when the
+/// extension is unusual. `Tbd` is special: the symbols come from the `.tbd`, but the
+/// runtime loads the dylib named by the stub's `install-name`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadType {
+    #[default]
+    Auto,
+    Elf,
+    Tbd,
+    Dll,
+    Dylib,
+}
+
+/// A candidate library load route. The `library_names` list is an ordered fallback
+/// chain: each route is tried in turn and the first that resolves wins (so an author
+/// can write `/opt/foo/libfoo.so` → `libfoo.so` → a `virtual` system fallback). A
+/// plain string is an ordinary on-disk library; the object form
+/// `{ "name": "libc.dylib", "virtual": true }` marks a system library linked by
+/// name and never required to exist as a file (libc on macOS lives only in the dyld
+/// shared cache); `load_type` overrides how exports are read (e.g. a `.tbd` stub).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LibraryName {
+    Plain(String),
+    Tagged {
+        name: String,
+        #[serde(rename = "virtual", default)]
+        is_virtual: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load_type: Option<LoadType>,
+    },
+}
+
+impl LibraryName {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Plain(name) => name,
+            Self::Tagged { name, .. } => name,
+        }
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        matches!(
+            self,
+            Self::Tagged {
+                is_virtual: true,
+                ..
+            }
+        )
+    }
+
+    /// The author-specified export reader, or `Auto` (infer from the extension).
+    pub fn load_type(&self) -> LoadType {
+        match self {
+            Self::Tagged {
+                load_type: Some(load_type),
+                ..
+            } => *load_type,
+            _ => LoadType::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeRequirement {
+    pub library_names: Vec<LibraryName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub header_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_prefix: Option<String>,
+    /// Remote source (http/https/ftp/git) to fetch the native library from
+    /// instead of searching the local library path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_url: Option<String>,
+    /// Remote source (http/https/ftp/git) to fetch the C header from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_url: Option<String>,
+    /// C header content embedded directly in the manifest, used as-is for
+    /// binding generation when no header file is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_inline: Option<String>,
+    pub version: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxHeader {
+    pub name: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+/// The C type of a `require_definitions` entry, driving input validation and how
+/// the solved value is rendered (as a `-D` for libclang and as a generated const).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DefinitionType {
+    Int,
+    Float,
+    String,
+    Boolean,
+}
+
+/// A build-time macro the package needs the *user* to define before its header is
+/// parsed (e.g. pcre2's `PCRE2_CODE_UNIT_WIDTH`, which the header itself does not
+/// define and which selects which symbol set is bound). `pnl install` prompts for
+/// it, records the solved value in `pnlx-lock.json`, passes it to libclang as a
+/// `-D`, and emits it as a generated constant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequireDefinition {
+    pub name: String,
+    /// What to enter and why, shown at the prompt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(rename = "type")]
+    pub definition_type: DefinitionType,
+    /// Used when the user enters nothing (interactive) or there is no prior solved
+    /// value (non-interactive). When absent and unresolved, install errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+}
+
+/// A `require_definitions` entry resolved to a concrete value at install time,
+/// carried (with its type) to the header generator so it can pass the value to
+/// libclang as a `-D` and emit it as a generated constant. Runtime-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDefinition {
+    pub name: String,
+    pub value: String,
+    pub definition_type: DefinitionType,
+}
+
+/// One platform's native-dependency installation recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallationEntry {
+    /// Shell command lines that install the native libraries/headers.
+    pub commands: Vec<String>,
+    /// Shell command lines that succeed (exit 0) when the dependency is already
+    /// present; if they all pass, installation is skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_if_exists: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxManifest {
+    pub schema_version: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub authors: Vec<Author>,
+    pub license: String,
+    pub entrypoint: String,
+    pub class: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub class_prefix: String,
+    /// Optional PHP usage snippets shown when the package finishes installing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
+    pub platforms: Vec<PlatformRequirement>,
+    /// The native C libraries this package binds, keyed by library key.
+    pub native_libraries: BTreeMap<String, NativeRequirement>,
+    /// Extra libraries to co-load, keyed by architecture (`aarch64`, `x86_64`, or
+    /// `*`/`any` for all). Empty for a single-library package.
+    pub dependencies: BTreeMap<String, Vec<DependencyEntry>>,
+    /// Compile-time inputs to cdef generation (explicit headers + build-time
+    /// `-D` definitions). Omitted when empty.
+    #[serde(default, skip_serializing_if = "PnlxCompileOptions::is_empty")]
+    pub compile_options: PnlxCompileOptions,
+    /// How to make the native dependencies present (build script and/or per-OS
+    /// install recipes), plus the script's integrity hash. Omitted when empty.
+    #[serde(default, skip_serializing_if = "PnlxSetup::is_empty")]
+    pub setup: PnlxSetup,
+}
+
+/// Compile-time inputs to cdef generation (`compile_options` in pnlx.json).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxCompileOptions {
+    /// Explicit header list resolved into the cdef (rarely needed — most packages
+    /// use each library's `header_names`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<PnlxHeader>,
+    /// Build-time macros the user must supply before the headers parse (e.g. pcre2's
+    /// `PCRE2_CODE_UNIT_WIDTH`). Resolved at install time. Empty for most packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub definitions: Vec<RequireDefinition>,
+}
+
+impl PnlxCompileOptions {
+    /// Whether nothing is set, so `compile_options` can be omitted from pnlx.json.
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty() && self.definitions.is_empty()
+    }
+}
+
+/// How a package's native dependencies are made present (`setup` in pnlx.json).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxSetup {
+    /// Package-relative script that builds/installs the native library. Mutually
+    /// exclusive with `install`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_script: Option<String>,
+    /// SHA-256 of the build script / install-recipe material, stamped by `pnlx publish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_script_hash: Option<String>,
+    /// Per-OS native-dependency install recipes, keyed by OS or Linux distro name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub install: BTreeMap<String, InstallationEntry>,
+}
+
+impl PnlxSetup {
+    /// Whether nothing is set, so `setup` can be omitted from pnlx.json.
+    pub fn is_empty(&self) -> bool {
+        self.build_script.is_none() && self.build_script_hash.is_none() && self.install.is_empty()
+    }
+}
+
+impl PnlxManifest {
+    /// The dependency entries that apply to the current architecture: those keyed by
+    /// the running arch plus the wildcard keys (`*`/`any`/`all`).
+    pub fn dependencies_for_current_arch(&self) -> Vec<&DependencyEntry> {
+        let arch = crate::model::platform::current_platform_requirement().arch;
+        self.dependencies
+            .iter()
+            .filter(|(key, _)| key.as_str() == arch || matches!(key.as_str(), "*" | "any" | "all"))
+            .flat_map(|(_, entries)| entries.iter())
+            .collect()
+    }
+}
+
+impl Default for PnlxManifest {
+    fn default() -> Self {
+        let mut native_libraries = BTreeMap::new();
+        native_libraries.insert(
+            "native".to_owned(),
+            NativeRequirement {
+                library_names: vec![
+                    LibraryName::Plain("libnative.so".to_owned()),
+                    LibraryName::Plain("native.dll".to_owned()),
+                ],
+                header_names: Vec::new(),
+                symbol_prefix: None,
+                library_url: None,
+                header_url: None,
+                header_inline: None,
+                version: ">=0.0.0".to_owned(),
+                required: true,
+            },
+        );
+
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            name: "example/extension".to_owned(),
+            version: "0.1.0".to_owned(),
+            description: String::new(),
+            authors: Vec::new(),
+            license: "MIT".to_owned(),
+            entrypoint: "src/generated/index.php".to_owned(),
+            class: "Example\\Extension\\Extension".to_owned(),
+            class_prefix: String::new(),
+            examples: Vec::new(),
+            platforms: vec![current_platform_requirement()],
+            native_libraries,
+            dependencies: BTreeMap::new(),
+            compile_options: PnlxCompileOptions::default(),
+            setup: PnlxSetup::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxLock {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub dependencies: BTreeMap<String, PnlxLockedDependency>,
+}
+
+impl Default for PnlxLock {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            generated_at: crate::model::platform::now(),
+            dependencies: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxLockedDependency {
+    pub version: String,
+    pub constraint: String,
+    pub source: Source,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedNativeLibrary {
+    pub resolved_name: String,
+    pub path: String,
+    /// Where to read this library's exported symbols, when that is NOT `path`
+    /// itself. A `.tbd` stub declares the exports while `path` is the dylib the
+    /// runtime loads (its `install-name`); for an ordinary library this is `None`
+    /// and exports are read from `path`. Not serialized into the pathmap (a
+    /// resolution-time detail).
+    #[serde(skip)]
+    pub export_source: Option<String>,
+    /// Extra shared libraries to co-load alongside `path`, as `name -> path`,
+    /// discovered when the unversioned dev name was a GNU ld linker script
+    /// (`INPUT(libncurses.so.6 -ltinfo)`): the real symbols are split across several
+    /// `.so`s, so they are co-loaded (and their exports unioned) like a multi-`.so`
+    /// dependency. Empty for an ordinary single-file library. Resolution-time only.
+    #[serde(skip)]
+    pub co_load: std::collections::BTreeMap<String, String>,
+    pub version: String,
+    pub sha256: String,
+    /// RFC3339 timestamp of when this native library was first resolved into the
+    /// pathmap, preserved across reinstalls. Optional: virtual/system libraries
+    /// and entries not stamped by `pnl install` carry no timestamp (the pathmap
+    /// schema and the PHP reader both treat it as nullable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedHeader {
+    pub path: String,
+    pub sha256: String,
+    /// `pkg-config --cflags` include directories on this machine, passed to the
+    /// libclang parse so libdir devel headers (GLib's `glibconfig.h`,
+    /// `pango-features.h`) resolve. Per-machine, like `path`; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_dirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PnlxPathmap {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub platform: Platform,
+    /// Lockfile path relative to this pathmap's directory (the workspace),
+    /// recorded at install so the generated autoload locates the lock without
+    /// assuming a fixed `../` layout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lock: String,
+    /// Absolute path of the `pnl.json` this workspace was generated from, recorded
+    /// at install/init so tooling can locate the project even when run from an
+    /// unrelated directory. (Runtime resolution itself uses the move-safe
+    /// `PNLX_PROJECT_MANIFEST` constant in the generated autoload.)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manifest: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, ResolvedHeader>,
+    pub native_libraries: BTreeMap<String, ResolvedNativeLibrary>,
+}
+
+impl PnlxPathmap {
+    pub fn empty_current() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_owned(),
+            generated_at: crate::model::platform::now(),
+            platform: current_platform(),
+            lock: String::new(),
+            manifest: String::new(),
+            headers: BTreeMap::new(),
+            native_libraries: BTreeMap::new(),
+        }
+    }
+}

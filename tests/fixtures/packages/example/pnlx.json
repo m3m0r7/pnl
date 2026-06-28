@@ -33,14 +33,7 @@
       "arch": "x86_64"
     }
   ],
-  "headers": [
-    {
-      "name": "example",
-      "path": "include/example.h",
-      "sha256": "dd68db1b84d7653b7b1498ce460f2cdcf03de5775ad7eba8beef633e98bacdaf"
-    }
-  ],
-  "requires": {
+  "native_libraries": {
     "example": {
       "symbol_prefix": "example",
       "library_names": [
@@ -55,5 +48,14 @@
       "required": true
     }
   },
-  "dependencies": {}
+  "dependencies": {},
+  "compile_options": {
+    "headers": [
+      {
+        "name": "example",
+        "path": "include/example.h",
+        "sha256": "dd68db1b84d7653b7b1498ce460f2cdcf03de5775ad7eba8beef633e98bacdaf"
+      }
+    ]
+  }
 }

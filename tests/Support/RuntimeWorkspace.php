@@ -113,14 +113,14 @@ class RuntimeWorkspace
             'repositories' => [
                 ['type' => 'file', 'url' => 'file://packages'],
             ],
-            'load_paths' => [
+            'library_paths' => [
                 dirname($this->nativeLibraryPath),
             ],
             'features' => [
-                'use_functions' => true,
+                'global_functions' => true,
                 // Accept raw PHP scalars as arguments (tests pass plain ints); the
                 // default wrapper-return entity variant is exercised.
-                'use_php_scalars_in_params' => true,
+                'scalar_params' => true,
             ],
             'extensions' => [
                 'example/example' => ['version' => '=1.2.3', 'required' => true],
@@ -145,7 +145,7 @@ class RuntimeWorkspace
 
     /**
      * Install a second, distinct package (`extra`) so composition can be exercised.
-     * Its native library lands beside the example one (both on `load_paths`).
+     * Its native library lands beside the example one (both on `library_paths`).
      */
     private function installExtraPackage(): void
     {

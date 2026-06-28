@@ -20,7 +20,7 @@ declare(strict_types=1);
  *
  * Function-like C macros surfaced as PHP functions under the Pnlx\Func\Example
  * namespace. They delegate to the static entity (and, for cross-package macros,
- * to a dependency's entity). Always loaded, independent of features.use_functions.
+ * to a dependency's entity). Always loaded, independent of features.global_functions.
  */
 
 namespace Pnlx\Func\Example;

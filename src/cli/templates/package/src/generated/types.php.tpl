@@ -37,12 +37,25 @@ class {{TYPE}} extends {{BASE}}
      */
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
+        // A struct handed back BY VALUE (e.g. a function returning `{{TYPE}}`, not
+        // `{{TYPE}} *`) can't be `reinterpret`-cast to a pointer. Keep it alive and
+        // expose its address, so accessors and pointer uses see a `{{TYPE}} *` while
+        // by-value re-passing dereferences it (see ArgumentMarshaller::structValue).
+        if ($cdata !== null && \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_STRUCT) {
+            $this->byValue = $cdata;
+            parent::__construct(\FFI::addr($cdata));
+
+            return;
+        }
         parent::__construct(
             $cdata !== null
                 ? \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)->reinterpret('{{TYPE}}', $cdata)
                 : \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)->allocate(sprintf('{{TYPE}}[%d]', $size))
         );
     }
+
+    /** Retains a by-value struct so the address handed to the parent stays valid. */
+    private ?\FFI\CData $byValue = null;
 {{#each fields}}
 {{#if is_int}}
     public function {{getter}}(): int

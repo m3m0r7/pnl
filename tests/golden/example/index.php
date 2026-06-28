@@ -24,7 +24,7 @@ require_once __DIR__ . '/ExampleContext.php';
 require_once __DIR__ . '/ExampleException.php';
 
 // Object-like #define constants from the C header, as namespaced PHP consts.
-// `use_php_scalars_in_const` selects the scalar/ variant: plain int/float/string
+// `scalar_constants` selects the scalar/ variant: plain int/float/string
 // for losslessly representable values (typed/unsigned values stay wrapped).
 require_once __DIR__ . '/' . (\Pnlx\Runtime::useScalarsInConst() ? 'scalar/' : '') . 'const.php';
 
@@ -48,8 +48,8 @@ foreach (glob(__DIR__ . '/symbol/*.php') ?: [] as $symbolFile) {
 }
 
 // The method group lives in a `ExampleLibraryComponent` trait, generated in four
-// variants selected at runtime by two feature flags: `allow_cdata` (the cdata/
-// subdir, params also accept raw \FFI\CData) and `use_php_scalars_in_return` (the
+// variants selected at runtime by two feature flags: `cdata_arguments` (the cdata/
+// subdir, params also accept raw \FFI\CData) and `scalar_returns` (the
 // scalar/ subdir, methods return native scalars). Require the chosen trait variant
 // first, then the variant-independent entity that mixes it in. Booting is lazy: the
 // native library opens on the first static call, not at require time.

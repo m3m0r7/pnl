@@ -53,7 +53,7 @@
           "entrypoint",
           "class",
           "platforms",
-          "requires",
+          "native_libraries",
           "dependencies"
         ],
         "properties": {
@@ -97,55 +97,6 @@
             },
             "description": "Paths to usage example files (e.g. EXAMPLES.md), relative to the package root. Their content is printed when pnl install finishes."
           },
-          "install_script_hash": {
-            "$ref": "#/components/schemas/sha256"
-          },
-          "self_build": {
-            "$ref": "#/components/schemas/packageRelativePath"
-          },
-          "installation": {
-            "type": "object",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/installationEntry"
-            },
-            "description": "Native-dependency install recipes keyed by OS or Linux distro name: darwin, windows, alpine, ubuntu, debian, fedora, rhel, ..., or the generic linux fallback. On Linux the distro ID and ID_LIKE values from /etc/os-release are matched first."
-          },
-          "headers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/header"
-            },
-            "uniqueItems": true
-          },
-          "require_definitions": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "name",
-                "type"
-              ],
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "description": {
-                  "type": "string"
-                },
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "int",
-                    "float",
-                    "string",
-                    "boolean"
-                  ]
-                },
-                "default": {}
-              }
-            }
-          },
           "platforms": {
             "type": "array",
             "items": {
@@ -154,7 +105,7 @@
             "minItems": 1,
             "uniqueItems": true
           },
-          "requires": {
+          "native_libraries": {
             "type": "object",
             "minProperties": 1,
             "additionalProperties": {
@@ -215,6 +166,67 @@
                 }
               }
             }
+          },
+          "compile_options": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "headers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/header"
+                },
+                "uniqueItems": true
+              },
+              "definitions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "type"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "int",
+                        "float",
+                        "string",
+                        "boolean"
+                      ]
+                    },
+                    "default": {}
+                  }
+                }
+              }
+            }
+          },
+          "setup": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "build_script": {
+                "$ref": "#/components/schemas/packageRelativePath"
+              },
+              "build_script_hash": {
+                "$ref": "#/components/schemas/sha256"
+              },
+              "install": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/installationEntry"
+                },
+                "description": "Native-dependency install recipes keyed by OS or Linux distro name: darwin, windows, alpine, ubuntu, debian, fedora, rhel, ..., or the generic linux fallback. On Linux the distro ID and ID_LIKE values from /etc/os-release are matched first."
+              }
+            }
           }
         }
       },
@@ -269,10 +281,10 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "install"
+          "commands"
         ],
         "properties": {
-          "install": {
+          "commands": {
             "type": "array",
             "items": {
               "type": "string",
@@ -280,7 +292,7 @@
             },
             "minItems": 1
           },
-          "checkIfExists": {
+          "check_if_exists": {
             "type": "array",
             "items": {
               "type": "string",

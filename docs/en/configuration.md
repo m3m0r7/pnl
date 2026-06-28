@@ -60,11 +60,11 @@ Minimal config:
   // If you only install directly from a URL, you can leave repositories empty.
   "repositories": [],
   // Extra folders to search for C libraries.
-  "load_paths": [],
+  "library_paths": [],
   // Switches for optional features.
   "features": {
     // Keep generated global functions off by default.
-    "use_functions": false
+    "global_functions": false
   },
   // The extensions you want, listed as vendor/package.
   "extensions": {}
@@ -86,13 +86,13 @@ A typical local-development config:
     }
   ],
   // C library folders to check before system defaults.
-  "load_paths": [
+  "library_paths": [
     "/opt/homebrew/lib",
     "/usr/local/lib"
   ],
   // Generate C-style global PHP functions so you can use them.
   "features": {
-    "use_functions": true
+    "global_functions": true
   },
   // The extensions this project needs.
   "extensions": {
@@ -112,13 +112,13 @@ What each field means:
 | --- | --- | --- | --- |
 | `schema_version` | string | yes | The config schema version. Currently `2026-07-01`. |
 | `repositories` | array | yes | Where packages come from. Currently used as a file-repository fallback; full index solving is not complete. |
-| `load_paths` | array | yes | Folders for C libraries, checked before system defaults and environment-derived paths. |
+| `library_paths` | array | yes | Folders for C libraries, checked before system defaults and environment-derived paths. |
 | `output_dir` | string | no | Directory (relative to the project root) for generated workspace files — the lock, pathmap, installed packages, and autoload. Defaults to `@pnlx`. |
-| `features.use_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. Required whenever a `features` object is present (the object itself is optional). |
-| `features.allow_cdata` | boolean | no | When `true`, generated method/function parameters also accept a raw `\FFI\CData` alongside the wrapper types — useful when interoperating with hand-written FFI code. |
-| `features.use_php_scalars_in_params` | boolean | no | When `true` (the default), methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false`, a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
-| `features.use_php_scalars_in_return` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Types\*` wrapper. |
-| `features.use_php_scalars_in_const` | boolean | no | When `true`, generated `const.php` uses native `int`/`float`/`string` for losslessly representable constants instead of `\Pnlx\Types\*` wrappers. |
+| `features.global_functions` | boolean | yes | When `true`, generated entrypoints define PHP functions named after the C functions under the `\Pnlx\Func` namespace. Required whenever a `features` object is present (the object itself is optional). |
+| `features.cdata_arguments` | boolean | no | When `true`, generated method/function parameters also accept a raw `\FFI\CData` alongside the wrapper types — useful when interoperating with hand-written FFI code. |
+| `features.scalar_params` | boolean | no | When `true` (the default), methods accept plain PHP scalars (`int`/`float`/`string`) as arguments directly. When `false`, a scalar must be passed wrapped in its `\Pnlx\Types\*` value type. |
+| `features.scalar_returns` | boolean | no | When `true`, methods whose C return type fits a PHP scalar return a native `int`/`float`/`string` instead of a `\Pnlx\Types\*` wrapper. |
+| `features.scalar_constants` | boolean | no | When `true`, generated `const.php` uses native `int`/`float`/`string` for losslessly representable constants instead of `\Pnlx\Types\*` wrappers. |
 | `compile_options.static_inline` | boolean | no | When `true`, build a compiled trampoline shim so a library's `static inline` functions become callable methods instead of throwing stubs. Requires a C compiler at install time (see below). Defaults to `false`. |
 | `config` | object | no | Per-project overrides for the endpoints baked into the binary (see below). Omit it to use the built-in defaults. |
 | `extensions` | object | yes | The extensions you want, keyed by `vendor/package`. `pnl install` adds entries here automatically. |
@@ -150,9 +150,9 @@ pnl ships with two default endpoints baked in from `config.toml` at build time: 
 ```jsonc
 "config": {
   // Where `pnl self-upgrade` and the update check look for new pnl releases.
-  "self_repository": "https://github.com/acme/pnl",
+  "release_repository": "https://github.com/acme/pnl",
   // The lowest-priority fallback registry for bare-name installs.
-  "packages_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
+  "package_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
 }
 ```
 
@@ -176,14 +176,14 @@ Examples of `repositories` entries:
 
 `type` can be `file`, `git`, or `https`. A `file` repository points at a **local directory** that holds your packages — give it either a `file://` URL or a plain filesystem path (absolute or relative to the project root). `pnl search` and bare-name `pnl install` enumerate it from disk, preferring a committed `repository-index.json` (see [`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url)) and falling back to a directory walk. `key` is optional and reserved for future signed indexes. If you pass a local path, a `file://` URL, or a Git URL directly to `pnl install`, you don't need a `repositories` entry at all.
 
-`load_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses libraries' `.pc` files (parsed directly — the `pkg-config` binary is not needed), C include environment variables, package-local includes, and common system include directories.
+`library_paths` are folders for the C *library* files (`.so` / `.dylib`, etc.), not header (include) folders. Header lookup uses libraries' `.pc` files (parsed directly — the `pkg-config` binary is not needed), C include environment variables, package-local includes, and common system include directories.
 
 ### Native library discovery
 
-By default `pnl install` looks for each required C library on the local machine (`load_paths`, `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`, `PATH`, and common system folders) and for headers via libraries' `.pc` files and include paths. A package's `pnlx.json` can instead point a requirement at a remote source, in which case the asset is downloaded once and cached:
+By default `pnl install` looks for each required C library on the local machine (`library_paths`, `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`, `PATH`, and common system folders) and for headers via libraries' `.pc` files and include paths. A package's `pnlx.json` can instead point a requirement at a remote source, in which case the asset is downloaded once and cached:
 
 ```jsonc
-"requires": {
+"native_libraries": {
   "mylib-1.0": {
     "library_names": ["libmylib.so", "mylib.dll"],
     // Fetch the binary over http(s), ftp, or a git tree URL instead of $PATH.
@@ -199,7 +199,7 @@ By default `pnl install` looks for each required C library on the local machine 
 }
 ```
 
-Supported source schemes are `http`/`https`, `ftp`, and `git` (use a `/tree/<branch>/<path>` URL or an `ssh`/`git`/`.git` URL to fetch a file from a repository). `ftps` is not implemented yet — use `https` or `ftp`. Local discovery remains the fallback whenever a requirement has no remote source.
+Supported source schemes are `http`/`https`, `ftp`, `ftps` (FTP over TLS), and `git` (use a `/tree/<branch>/<path>` URL or an `ssh`/`git`/`.git` URL to fetch a file from a repository). Local discovery remains the fallback whenever a requirement has no remote source.
 
 Example of pinning an extension's version:
 
@@ -224,7 +224,7 @@ Example of global-function mode:
 // Optional features go under the top-level "features" object.
 "features": {
   // true lets generated entrypoints define C-style global PHP functions.
-  "use_functions": true
+  "global_functions": true
 }
 ```
 

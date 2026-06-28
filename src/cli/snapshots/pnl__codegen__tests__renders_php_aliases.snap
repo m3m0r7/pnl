@@ -1,0 +1,21 @@
+---
+source: src/cli/codegen.rs
+assertion_line: 1459
+expression: render_aliases(&sample_signatures())
+---
+    'DemoAdd' => 'demo_add',
+    'DemoLog' => 'demo_log',
+    'DemoName' => 'demo_name',
+    'DemoScale' => 'demo_scale',
+    'demoAdd' => 'demo_add',
+    'demoLog' => 'demo_log',
+    'demoName' => 'demo_name',
+    'demoScale' => 'demo_scale',
+    'demo_add' => 'demo_add',
+    'demo_log' => 'demo_log',
+    'demo_name' => 'demo_name',
+    'demo_scale' => 'demo_scale',
+    'demoadd' => 'demo_add',
+    'demolog' => 'demo_log',
+    'demoname' => 'demo_name',
+    'demoscale' => 'demo_scale',

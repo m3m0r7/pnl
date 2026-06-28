@@ -25,6 +25,7 @@
   - [`pnl repo sign <repository-index.json> --key <key>`](#pnl-repo-sign-repository-indexjson---key-key)
   - [`pnl repo remove <url>`](#pnl-repo-remove-url)
   - [`pnl validate`](#pnl-validate)
+  - [`pnl doctor`](#pnl-doctor)
   - [`pnl self-upgrade`](#pnl-self-upgrade)
   - [起動時のアップデート確認](#起動時のアップデート確認)
   - [`pnl purge cache`](#pnl-purge-cache)
@@ -115,10 +116,10 @@ initialized ./pnl.json
   // 初期状態ではリポジトリ未設定。
   "repositories": [],
   // 初期状態では追加の C ライブラリフォルダ未設定。
-  "load_paths": [],
+  "library_paths": [],
   // グローバル関数の生成は初期状態でオフ。
   "features": {
-    "use_functions": false
+    "global_functions": false
   },
   // まだ拡張は入っていません。
   "extensions": {}
@@ -135,18 +136,18 @@ initialized ./pnl.json
 
 インストール対象の `pnlx.json` に `dependencies` がある場合は、各依存パッケージを version constraint に合う最新バージョンで先に解決します。既に lock 済みで constraint を満たす依存は再インストールしません。解決結果は lockfile の `dependencies` に記録されます。
 
-パッケージが対象 OS / Linux ディストリビューションの `installation` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `checkIfExists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。Linux ではレシピは `/etc/os-release` から選択されます。ディストリビューションの `ID`（例: `alpine`・`ubuntu`・`fedora`）→ `ID_LIKE` の各祖先（例: `debian`・`rhel`）→ 汎用の `linux` キーの順で照合します。インストールコマンドが失敗した場合は、どのコマンドが失敗したかを表示し、手動でライブラリとヘッダーをインストールしてから改めて `pnl install` を実行するよう案内します。
+パッケージが対象 OS / Linux ディストリビューションの `setup.install` を宣言している場合、`pnl install` はネイティブライブラリの解決前にそれ（例: `brew install …`）の実行を確認します。パッケージの `check_if_exists` が既に通る場合はスキップします。`-y` / `--yes` でその確認を自動的に許可（`-n` / `--no-interaction` で既定値を採用）できます。Linux ではレシピは `/etc/os-release` から選択されます。ディストリビューションの `ID`（例: `alpine`・`ubuntu`・`fedora`）→ `ID_LIKE` の各祖先（例: `debian`・`rhel`）→ 汎用の `linux` キーの順で照合します。インストールコマンドが失敗した場合は、どのコマンドが失敗したかを表示し、手動でライブラリとヘッダーをインストールしてから改めて `pnl install` を実行するよう案内します。
 
-`installation` または `self_build` を持つパッケージは、`pnlx publish` が `pnlx.json` に記録した `install_script_hash` と現在のコマンド／スクリプト内容を照合します。不一致または未記録の場合、対話時は既定 No で確認します。`-y` 指定時は安全のため停止します。確認を明示的に上書きする場合は `--allow-install-script-hash <sha256>`（複数指定可）を使います。検証なしで通す最後の手段として `--allow-unverified-install-scripts` もあります。組み込みの**認可済みリポジトリ**（ファーストパーティの `m3m0r7/pnl-packages` レジストリ。バイナリに埋め込まれた `repositories.authorized` ホワイトリスト参照）からインストールするパッケージは、install スクリプトの実行を信頼してこの確認を省略します。
+`setup.install` または `setup.build_script` を持つパッケージは、`pnlx publish` が `pnlx.json` に記録した `setup.build_script_hash` と現在のコマンド／スクリプト内容を照合します。不一致または未記録の場合、対話時は既定 No で確認します。`-y` 指定時は安全のため停止します。確認を明示的に上書きする場合は `--allow-install-script-hash <sha256>`（複数指定可）を使います。検証なしで通す最後の手段として `--allow-unverified-install-scripts` もあります。組み込みの**認可済みリポジトリ**（ファーストパーティの `m3m0r7/pnl-packages` レジストリ。バイナリに埋め込まれた `repositories.authorized` ホワイトリスト参照）からインストールするパッケージは、install スクリプトの実行を信頼してこの確認を省略します。
 
 生成される PHP を調整するフラグ:
 
 - `--alias-class <Class>` … 元のクラスを残したまま、`class_alias` で `<Class>` としても参照できるようにします。
 - `--function-prefix <prefix>` … 生成されるすべての関数名・メソッド名に `<prefix>` を付けます（接頭辞なしの名前は残しません）。
-- `--enable-use-functions` … `features.use_functions = true` を `pnl.json` に書き込み、生成されるグローバル関数 API を有効にします（[設定](configuration.md#pnljson-の書き方)参照）。
-- `--enable-allow-cdata` … `features.allow_cdata = true` を書き込み、生成シグネチャが生の `\FFI\CData` も受け付けるようにします。
-- `--enable-use-php-scalars-in-return` … `features.use_php_scalars_in_return = true` を書き込み、スカラーに収まる戻り値をネイティブの `int`/`float`/`string` で返すようにします。
-- `--enable-use-php-scalars-in-const` … `features.use_php_scalars_in_const = true` を書き込み、`const.php` が `\Pnlx\Types\*` ラッパーではなくネイティブスカラーを使うようにします（無損失な範囲で）。
+- `--enable-use-functions` … `features.global_functions = true` を `pnl.json` に書き込み、生成されるグローバル関数 API を有効にします（[設定](configuration.md#pnljson-の書き方)参照）。
+- `--enable-allow-cdata` … `features.cdata_arguments = true` を書き込み、生成シグネチャが生の `\FFI\CData` も受け付けるようにします。
+- `--enable-use-php-scalars-in-return` … `features.scalar_returns = true` を書き込み、スカラーに収まる戻り値をネイティブの `int`/`float`/`string` で返すようにします。
+- `--enable-use-php-scalars-in-const` … `features.scalar_constants = true` を書き込み、`const.php` が `\Pnlx\Types\*` ラッパーではなくネイティブスカラーを使うようにします（無損失な範囲で）。
 - `--enable-static-inline` … `compile_options.static_inline = true` を書き込み、ライブラリの `static inline` 関数を例外スタブではなく呼び出し可能な shim にコンパイルします（C コンパイラが必要 — [設定](configuration.md#static-inline-関数compile_options)参照）。
 
 install スクリプトと整合性に関するフラグ:
@@ -234,7 +235,7 @@ pnl compose libsdl sdlimage --as 'Pnlx\Sdlx\Sdlx'
 - `--as <Class>` … 生成するクラスの完全修飾名（必須）。
 - `--prefix <prefix>` … 2 つのメンバーが同名関数を公開したときの trait メソッド衝突を解決する接頭辞（予約）。
 
-合成結果は `@pnlx/composites/<Class>.php`（`features.use_functions` が有効なら `<Class>Functions.php` も）に書き出し、`pnl.json` に記録し、新しいクラスがメンバーの後に読み込まれるよう `@pnlx/autoload.php` を作り直します。
+合成結果は `@pnlx/composites/<Class>.php`（`features.global_functions` が有効なら `<Class>Functions.php` も）に書き出し、`pnl.json` に記録し、新しいクラスがメンバーの後に読み込まれるよう `@pnlx/autoload.php` を作り直します。
 
 ```text
 composed ./@pnlx/composites/Sdlx.php
@@ -452,6 +453,24 @@ pnl workspace is valid
 - ロック／パスマップの環境一致チェック
 - パスマップ／ロックの整合性チェック
 
+### `pnl doctor`
+
+pnl 拡張のインストール・実行に向けたローカル環境を診断します。
+
+```sh
+pnl doctor
+```
+
+チェック内容:
+
+- **libclang** — バインディング生成（`pnl install`）に必須。ここの失敗だけが致命的。
+- **C コンパイラ** — 任意。`compile_options.static_inline` のシムにのみ必要。
+- **pkg-config** — 参考情報。pnl は `.pc` を自前で解析するため、システムの pkg-config は不要。
+- **PHP + FFI** — `php` が `PATH` 上にあり、FFI 拡張が読み込まれているか（`ffi.enable` 設定も表示）。
+- **ワークスペース** — `pnl.json` の有無とロック済み拡張数。
+
+必須チェックが 1 つでも失敗すると非ゼロ終了します。
+
 ### `pnl self-upgrade`
 
 `pnl` / `pnlx` 自身をアップグレードします。https://github.com/m3m0r7/pnl.git からリリースタグを取得し、実行中のバージョンより新しいタグがあれば、そのタグのソースアーカイブをダウンロードして `cargo build --release` でビルドし、バージョン別のレイアウトにインストールします。
@@ -596,14 +615,14 @@ src/generated/LibusbManifest.php          # インストール時メタデータ
 src/generated/const.php                   # 生成された定数
 src/generated/index.php                   # 拡張を起動する入口
 src/generated/function.aliases.php        # 関数名の別名
-src/generated/functions.php               # \Pnlx\Func グローバル関数（use_functions 時）
+src/generated/functions.php               # \Pnlx\Func グローバル関数（global_functions 時）
 src/generated/macro.functions.php         # 関数形式マクロを関数として公開
 src/generated/types/                      # struct/typedef ラッパーごとに 1 ファイル
 src/generated/enums/                      # 名前付き C enum ごとに PHP enum
 src/generated/symbol/                     # エクスポートされた C データシンボルのマーカークラス
 ```
 
-機能依存のバリアントも併せて出力されます。`cdata/`（`allow_cdata` 時）と `scalar/`（`use_php_scalars_in_return`/`use_php_scalars_in_const` 時）。
+機能依存のバリアントも併せて出力されます。`cdata/`（`cdata_arguments` 時）と `scalar/`（`scalar_returns`/`scalar_constants` 時）。
 
 このコマンドは、
 
@@ -621,13 +640,13 @@ pnlx gen libfoo --library-key libfoo-2.0
 
 ### `pnlx publish`
 
-`pnlx.json` の publish 前メタデータを更新します。現在は `installation` の全コマンド、または `self_build` で指定されたパッケージ相対スクリプトの内容を正規化して sha256 を計算し、`install_script_hash` として `pnlx.json` に書き込みます。
+`pnlx.json` の publish 前メタデータを更新します。現在は `setup.install` の全コマンド、または `setup.build_script` で指定されたパッケージ相対スクリプトの内容を正規化して sha256 を計算し、`setup.build_script_hash` として `pnlx.json` に書き込みます。
 
 ```sh
 pnlx publish
 ```
 
-`self_build` は `installation` と同時には使えません。指定したスクリプトパスはパッケージ相対で、絶対パスや `..` によるトラバーサルは拒否されます。
+`setup.build_script` は `setup.install` と同時には使えません。指定したスクリプトパスはパッケージ相対で、絶対パスや `..` によるトラバーサルは拒否されます。
 
 ### `pnlx package`
 

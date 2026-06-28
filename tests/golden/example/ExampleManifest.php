@@ -77,7 +77,7 @@ class ExampleManifest implements ManifestInterface
      */
     protected function native(): array
     {
-        $native = $this->runtime->pathmap()['requires']['example'] ?? null;
+        $native = $this->runtime->pathmap()['native_libraries']['example'] ?? null;
         if (!is_array($native)) {
             throw new ExtensionLoadException('Native library example is not installed.');
         }

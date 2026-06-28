@@ -16,7 +16,7 @@ use Pnlx\Types\ValueInterface;
 final class ArgumentMarshaller
 {
     /**
-     * Per-class `features.use_php_scalars_in_params`, resolved against the right
+     * Per-class `features.scalar_params`, resolved against the right
      * project root when the extension boots (see {@see rememberScalarsAllowed()}).
      *
      * @var array<class-string, bool>
@@ -66,6 +66,26 @@ final class ArgumentMarshaller
     }
 
     /**
+     * Marshal a struct passed BY VALUE (e.g. quickjs's `JSValue`, gdbm's `datum`).
+     * Its wrapper normalises to a `T *` pointer (so field accessors and pointer uses
+     * work), but the native function wants the struct itself — FFI passes a struct
+     * argument by value. Dereference a pointer to the struct value; a value `\FFI\CData`
+     * is forwarded as-is.
+     */
+    public static function structValue(mixed $value): mixed
+    {
+        $cdata = $value instanceof ValueInterface ? $value->toValue() : $value;
+
+        if (!$cdata instanceof CData) {
+            return $cdata;
+        }
+
+        return \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_POINTER
+            ? $cdata[0]
+            : $cdata;
+    }
+
+    /**
      * Resolve an exported-data-symbol marker to its `\FFI\CData` in the owning
      * extension's FFI scope: a pointer symbol yields its value, a data symbol yields
      * its address.
@@ -85,7 +105,7 @@ final class ArgumentMarshaller
     /**
      * Coerce a scalar argument for a call on `$class`: a generated wrapper yields
      * its inner value; a raw PHP scalar is allowed only when that class's
-     * `features.use_php_scalars_in_params` is set, otherwise it must be wrapped.
+     * `features.scalar_params` is set, otherwise it must be wrapped.
      *
      * @param class-string $class
      */
@@ -107,7 +127,7 @@ final class ArgumentMarshaller
 
         if (!(self::$scalarsAllowed[$class] ?? false)) {
             throw new PHPNativeLibraryException(
-                'Passing a raw PHP scalar requires features.use_php_scalars_in_params; '
+                'Passing a raw PHP scalar requires features.scalar_params; '
                 . 'wrap it instead (e.g. new \Pnlx\Types\Int_($value)).'
             );
         }

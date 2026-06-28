@@ -77,7 +77,7 @@ class {{CLASS}}Manifest implements ManifestInterface
      */
     protected function native(): array
     {
-        $native = $this->runtime->pathmap()['requires']['{{LIBRARY_KEY}}'] ?? null;
+        $native = $this->runtime->pathmap()['native_libraries']['{{LIBRARY_KEY}}'] ?? null;
         if (!is_array($native)) {
             throw new ExtensionLoadException('Native library {{LIBRARY_KEY}} is not installed.');
         }

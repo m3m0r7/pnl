@@ -31,7 +31,7 @@ final class InstalledLibraries
     public static function nativeLibraries(string $pathmapPath): array
     {
         $pathmap = self::readJson($pathmapPath);
-        $requires = self::section($pathmap, 'requires');
+        $requires = self::section($pathmap, 'native_libraries');
         $headers = self::section($pathmap, 'headers');
 
         $libraries = [];

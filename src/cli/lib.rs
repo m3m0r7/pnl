@@ -4,49 +4,28 @@
 /// executable when this is empty.
 pub const SUPPORT_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/support.lib"));
 
-pub mod about;
-pub mod archive;
-pub mod cache;
-pub mod cc;
-pub mod commands;
-pub mod config;
-pub mod fetch;
-pub mod ffi;
-pub mod generate;
-pub mod git_source;
-pub mod glob;
-pub mod header_adapter;
-pub mod highlight;
-pub mod install_script;
-pub mod interaction;
-pub mod io;
-pub mod manifest;
-pub mod pkg_config;
-pub mod platform;
-pub mod release;
-pub mod repository_index;
-pub mod schema;
-pub mod sdk_assets;
-pub mod self_upgrade;
-pub mod shim;
-pub mod tbd;
-pub mod ui;
-pub mod validate;
-pub mod version;
-pub mod workspace;
+// Source layers — imports flow one way: util ← model ← {native, sources} ←
+// codegen ← app, with embed at the binary boundary. See docs/en/conventions.md.
+pub mod app;
+pub mod codegen;
+pub mod embed;
+pub mod model;
+pub mod native;
+pub mod sources;
+pub mod util;
 
-pub use crate::config::SCHEMA_VERSION;
+pub use crate::model::config::SCHEMA_VERSION;
 
 #[cfg(test)]
 mod tests {
     use crate::SCHEMA_VERSION;
-    use crate::git_source::GitSource;
-    use crate::io::{read_json, write_json_if_missing};
-    use crate::manifest::PnlxManifest;
-    use crate::validate::{
+    use crate::model::manifest::PnlxManifest;
+    use crate::model::validate::{
         validate_package_name, validate_pnlx_manifest_values, validate_rfc3339_datetime,
         validate_schema_version, validate_semver, validate_sha256, validate_version_constraint,
     };
+    use crate::sources::git_source::GitSource;
+    use crate::util::io::{read_json, write_json_if_missing};
 
     #[test]
     fn parses_https_github_source() {
@@ -198,7 +177,7 @@ mod tests {
 
     #[test]
     fn parses_plain_and_virtual_library_names() {
-        use crate::manifest::LibraryName;
+        use crate::model::manifest::LibraryName;
         let names: Vec<LibraryName> = serde_json::from_str(
             r#"["widget-1.0.dylib", {"name": "libc.dylib", "virtual": true}, {"name": "x.so"}]"#,
         )
@@ -219,11 +198,11 @@ mod tests {
 
     #[test]
     fn default_pnl_manifest_has_no_repositories() {
-        use crate::manifest::PnlManifest;
+        use crate::model::manifest::PnlManifest;
         // The default repository is kept internally, not written into pnl.json.
         let manifest = PnlManifest::default();
         assert!(manifest.repositories.is_empty());
-        assert!(!manifest.features.use_functions);
+        assert!(!manifest.features.global_functions);
     }
 
     #[test]
@@ -262,7 +241,7 @@ mod tests {
 
     #[test]
     fn validates_example_paths_are_package_relative() {
-        use crate::validate::validate_relative_package_path;
+        use crate::model::validate::validate_relative_package_path;
         validate_relative_package_path("examples", "EXAMPLES.md").unwrap();
         validate_relative_package_path("examples", "docs/EXAMPLES.md").unwrap();
         assert!(validate_relative_package_path("examples", "/etc/passwd").is_err());
@@ -279,22 +258,20 @@ mod tests {
     #[test]
     fn rejects_pnlx_manifest_without_native_requirements() {
         let mut manifest = PnlxManifest::default();
-        manifest.requires.clear();
+        manifest.native_libraries.clear();
 
         assert!(validate_pnlx_manifest_values(&manifest).is_err());
     }
 
     #[test]
     fn rejects_self_build_together_with_installation() {
-        use crate::manifest::InstallationEntry;
-        let mut manifest = PnlxManifest {
-            self_build: Some("build.sh".to_owned()),
-            ..PnlxManifest::default()
-        };
-        manifest.installation.insert(
+        use crate::model::manifest::InstallationEntry;
+        let mut manifest = PnlxManifest::default();
+        manifest.setup.build_script = Some("build.sh".to_owned());
+        manifest.setup.install.insert(
             "linux".to_owned(),
             InstallationEntry {
-                install: vec!["apt-get install libexample-dev".to_owned()],
+                commands: vec!["apt-get install libexample-dev".to_owned()],
                 check_if_exists: Vec::new(),
             },
         );
@@ -305,7 +282,7 @@ mod tests {
     #[test]
     fn init_writes_pnlx_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(crate::config::PNLX_MANIFEST_FILE);
+        let path = dir.path().join(crate::model::config::PNLX_MANIFEST_FILE);
         write_json_if_missing(&path, &PnlxManifest::default()).unwrap();
         let manifest = read_json::<PnlxManifest>(&path).unwrap();
         assert_eq!(manifest.schema_version, SCHEMA_VERSION);

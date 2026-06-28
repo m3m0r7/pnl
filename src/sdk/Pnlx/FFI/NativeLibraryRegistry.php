@@ -57,6 +57,17 @@ final class NativeLibraryRegistry
     }
 
     /**
+     * An {@see Allocator} bound to an entity class's FFI scope, for allocating
+     * structs/buffers that are type-compatible with that extension's functions.
+     *
+     * @param class-string $class
+     */
+    public static function allocator(string $class): Allocator
+    {
+        return new Allocator(self::of($class));
+    }
+
+    /**
      * Ensure an entity class's native library is loaded (idempotent). Generated
      * methods call this before marshalling arguments, which needs the booted scope.
      *

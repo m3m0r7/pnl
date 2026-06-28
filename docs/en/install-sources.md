@@ -52,4 +52,4 @@ The clone is placed temporarily in the system temp directory — somewhere like 
 
 In every case, install fails if the resolved local path does not contain `pnlx.json`.
 
-FTP/FTPS sources are recognized, but they fail with a clear error until a downloader and signature verification are implemented.
+Native libraries and headers can also be fetched over FTP (`ftp://`) and FTPS (`ftps://`, FTP over TLS); anonymous login is used unless the URL carries credentials.

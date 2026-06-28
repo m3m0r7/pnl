@@ -19,7 +19,7 @@ final class InstalledLibrariesTest extends TestCase
             'headers' => [
                 'sdl2' => ['path' => '/opt/include/SDL2/SDL.h', 'sha256' => str_repeat('a', 64)],
             ],
-            'requires' => [
+            'native_libraries' => [
                 'sdl2' => [
                     'resolved_name' => 'libSDL2.dylib',
                     'path' => '/opt/lib/libSDL2.dylib',

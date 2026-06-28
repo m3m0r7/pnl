@@ -31,7 +31,7 @@ class WorkspaceRepository implements WorkspaceRepositoryInterface
                 'repositories' => [
                     ['type' => 'file', 'url' => 'file://packages'],
                 ],
-                'load_paths' => [],
+                'library_paths' => [],
                 'extensions' => [],
             ];
         }

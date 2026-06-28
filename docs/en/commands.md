@@ -25,6 +25,7 @@
   - [`pnl repo sign <repository-index.json> --key <key>`](#pnl-repo-sign-repository-indexjson---key-key)
   - [`pnl repo remove <url>`](#pnl-repo-remove-url)
   - [`pnl validate`](#pnl-validate)
+  - [`pnl doctor`](#pnl-doctor)
   - [`pnl self-upgrade`](#pnl-self-upgrade)
   - [Update check on startup](#update-check-on-startup)
   - [`pnl purge cache`](#pnl-purge-cache)
@@ -115,10 +116,10 @@ What gets created:
   // No repositories configured initially.
   "repositories": [],
   // No extra C library folders configured initially.
-  "load_paths": [],
+  "library_paths": [],
   // Global function generation is off initially.
   "features": {
-    "use_functions": false
+    "global_functions": false
   },
   // No extensions installed yet.
   "extensions": {}
@@ -135,18 +136,18 @@ A bare name is resolved against your configured `repositories`, highest [`priori
 
 When the target package's `pnlx.json` declares `dependencies`, pnl resolves each dependency first at the newest version satisfying its version constraint. Already locked dependencies that satisfy the constraint are reused. The resolved dependency constraints are written into the lockfile.
 
-If the package declares an `installation` recipe for your OS or Linux distro, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `checkIfExists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default). On Linux the recipe is selected from `/etc/os-release`: the distro `ID` (e.g. `alpine`, `ubuntu`, `fedora`) is tried first, then each `ID_LIKE` ancestor (e.g. `debian`, `rhel`), then a generic `linux` key. If the install commands fail, pnl reports which command failed and asks you to install the libraries and headers manually before running `pnl install` again.
+If the package declares an `setup.install` recipe for your OS or Linux distro, `pnl install` offers to run it (e.g. `brew install …`) before resolving the native library, skipping it when the package's `check_if_exists` check already passes. Pass `-y` / `--yes` to accept that prompt automatically (or `-n` / `--no-interaction` to take the default). On Linux the recipe is selected from `/etc/os-release`: the distro `ID` (e.g. `alpine`, `ubuntu`, `fedora`) is tried first, then each `ID_LIKE` ancestor (e.g. `debian`, `rhel`), then a generic `linux` key. If the install commands fail, pnl reports which command failed and asks you to install the libraries and headers manually before running `pnl install` again.
 
-Packages that declare `installation` or `self_build` are checked against the `install_script_hash` stamped into `pnlx.json` by `pnlx publish`. When the hash is missing or differs, interactive installs ask with a default of No. Under `-y`, pnl stops instead of trusting changed scripts. To override deliberately, pass `--allow-install-script-hash <sha256>` (repeatable). `--allow-unverified-install-scripts` is available as an explicit last resort. Packages installed from a built-in **authorized repository** (the first-party `m3m0r7/pnl-packages` registry; see the `repositories.authorized` whitelist baked into the binary) are trusted to run their install scripts and skip this prompt entirely.
+Packages that declare `setup.install` or `setup.build_script` are checked against the `setup.build_script_hash` stamped into `pnlx.json` by `pnlx publish`. When the hash is missing or differs, interactive installs ask with a default of No. Under `-y`, pnl stops instead of trusting changed scripts. To override deliberately, pass `--allow-install-script-hash <sha256>` (repeatable). `--allow-unverified-install-scripts` is available as an explicit last resort. Packages installed from a built-in **authorized repository** (the first-party `m3m0r7/pnl-packages` registry; see the `repositories.authorized` whitelist baked into the binary) are trusted to run their install scripts and skip this prompt entirely.
 
 Flags that adjust the generated PHP:
 
 - `--alias-class <Class>` additionally exposes the extension under `<Class>` via `class_alias`, keeping the original class.
 - `--function-prefix <prefix>` prepends `<prefix>` to every generated function and method name (the unprefixed names are not kept).
-- `--enable-use-functions` persists `features.use_functions = true` into `pnl.json`, exposing the generated global-functions API (see [Configuration](configuration.md#writing-pnljson)).
-- `--enable-allow-cdata` persists `features.allow_cdata = true`, so generated signatures also accept a raw `\FFI\CData`.
-- `--enable-use-php-scalars-in-return` persists `features.use_php_scalars_in_return = true`, so methods return native `int`/`float`/`string` for scalars that fit.
-- `--enable-use-php-scalars-in-const` persists `features.use_php_scalars_in_const = true`, so `const.php` uses native scalars instead of `\Pnlx\Types\*` wrappers where lossless.
+- `--enable-use-functions` persists `features.global_functions = true` into `pnl.json`, exposing the generated global-functions API (see [Configuration](configuration.md#writing-pnljson)).
+- `--enable-allow-cdata` persists `features.cdata_arguments = true`, so generated signatures also accept a raw `\FFI\CData`.
+- `--enable-use-php-scalars-in-return` persists `features.scalar_returns = true`, so methods return native `int`/`float`/`string` for scalars that fit.
+- `--enable-use-php-scalars-in-const` persists `features.scalar_constants = true`, so `const.php` uses native scalars instead of `\Pnlx\Types\*` wrappers where lossless.
 - `--enable-static-inline` persists `compile_options.static_inline = true`, so a library's `static inline` functions are compiled into a callable shim instead of throwing stubs (needs a C compiler — see [Configuration](configuration.md#static-inline-functions-compile_options)).
 
 Flags that gate install scripts and integrity:
@@ -234,7 +235,7 @@ Arguments and options:
 - `--as <Class>` — the fully-qualified class name to generate (required).
 - `--prefix <prefix>` — method-name prefix used to resolve trait-method collisions when two members expose a same-named function (reserved).
 
-It writes the composite under `@pnlx/composites/<Class>.php` (and `<Class>Functions.php` when `features.use_functions` is enabled), records the composite in `pnl.json`, and regenerates `@pnlx/autoload.php` so the new class is loaded after its members.
+It writes the composite under `@pnlx/composites/<Class>.php` (and `<Class>Functions.php` when `features.global_functions` is enabled), records the composite in `pnl.json`, and regenerates `@pnlx/autoload.php` so the new class is loaded after its members.
 
 ```text
 composed ./@pnlx/composites/Sdlx.php
@@ -452,6 +453,24 @@ It checks:
 - environment-match checks for the lock/pathmap files,
 - and pathmap/lock consistency checks.
 
+### `pnl doctor`
+
+Diagnoses the local environment for installing and running pnl extensions.
+
+```sh
+pnl doctor
+```
+
+It checks:
+
+- **libclang** — required for binding generation (`pnl install`); a failure here is the one fatal check.
+- **C compiler** — optional, only needed for `compile_options.static_inline` shims.
+- **pkg-config** — informational: pnl parses `.pc` files itself, so the system pkg-config is not required.
+- **PHP + FFI** — that `php` is on `PATH` and the FFI extension is loaded (with the `ffi.enable` setting noted).
+- **workspace** — whether a `pnl.json` is present and how many extensions are locked.
+
+It exits non-zero if any required check fails.
+
 ### `pnl self-upgrade`
 
 Upgrades `pnl` / `pnlx` themselves. It fetches the release tags from https://github.com/m3m0r7/pnl.git, and when a tag newer than the running version exists, it downloads that tag's source archive, builds it with `cargo build --release`, and installs it into a versioned layout:
@@ -596,14 +615,14 @@ src/generated/LibusbManifest.php          # install-time metadata (name, version
 src/generated/const.php                   # generated constants
 src/generated/index.php                   # the entrypoint that boots the extension
 src/generated/function.aliases.php        # function-name aliases
-src/generated/functions.php               # \Pnlx\Func global functions (use_functions)
+src/generated/functions.php               # \Pnlx\Func global functions (global_functions)
 src/generated/macro.functions.php         # function-like macros surfaced as functions
 src/generated/types/                      # one file per struct/typedef wrapper
 src/generated/enums/                      # one PHP enum per named C enum
 src/generated/symbol/                     # marker classes for exported C data symbols
 ```
 
-Feature-dependent variants are emitted alongside these: `cdata/` (when `allow_cdata`) and `scalar/` (when `use_php_scalars_in_return`/`use_php_scalars_in_const`).
+Feature-dependent variants are emitted alongside these: `cdata/` (when `cdata_arguments`) and `scalar/` (when `scalar_returns`/`scalar_constants`).
 
 This command:
 
@@ -621,13 +640,13 @@ pnlx gen libfoo --library-key libfoo-2.0
 
 ### `pnlx publish`
 
-Updates publish-time metadata in `pnlx.json`. Currently it hashes every `installation` command, or the package-relative script contents referenced by `self_build`, and writes the resulting sha256 into `install_script_hash`.
+Updates publish-time metadata in `pnlx.json`. Currently it hashes every `setup.install` command, or the package-relative script contents referenced by `setup.build_script`, and writes the resulting sha256 into `setup.build_script_hash`.
 
 ```sh
 pnlx publish
 ```
 
-`self_build` is mutually exclusive with `installation`. The script path must stay inside the package: absolute paths and `..` traversal are rejected.
+`setup.build_script` is mutually exclusive with `setup.install`. The script path must stay inside the package: absolute paths and `..` traversal are rejected.
 
 ### `pnlx package`
 

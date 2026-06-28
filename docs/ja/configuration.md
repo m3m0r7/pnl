@@ -60,11 +60,11 @@ project-root/
   // URL から直接インストールするだけなら、リポジトリ指定は空でかまいません。
   "repositories": [],
   // C ライブラリを探す追加のフォルダ。
-  "load_paths": [],
+  "library_paths": [],
   // オプション機能のスイッチ。
   "features": {
     // 生成されるグローバル関数は、初期状態ではオフにしておきます。
-    "use_functions": false
+    "global_functions": false
   },
   // 入れたい拡張を vendor/package の形で並べます。
   "extensions": {}
@@ -86,13 +86,13 @@ project-root/
     }
   ],
   // システム標準より先に探す、C ライブラリのフォルダ。
-  "load_paths": [
+  "library_paths": [
     "/opt/homebrew/lib",
     "/usr/local/lib"
   ],
   // C 言語風のグローバル関数を生成して使えるようにします。
   "features": {
-    "use_functions": true
+    "global_functions": true
   },
   // このプロジェクトが必要とする拡張。
   "extensions": {
@@ -112,13 +112,13 @@ project-root/
 | --- | --- | --- | --- |
 | `schema_version` | 文字列 | はい | 設定ファイルのスキーマバージョン。現在は `2026-07-01`。 |
 | `repositories` | 配列 | はい | パッケージの取得元。現状はファイルリポジトリのフォールバック用で、本格的なインデックス解決は未完成です。 |
-| `load_paths` | 配列 | はい | システム標準や環境変数由来のパスより先に探す、C ライブラリのフォルダ。 |
+| `library_paths` | 配列 | はい | システム標準や環境変数由来のパスより先に探す、C ライブラリのフォルダ。 |
 | `output_dir` | 文字列 | いいえ | 生成物（ロック・パスマップ・インストール済みパッケージ・autoload）の出力先（プロジェクトルートからの相対）。既定は `@pnlx`。 |
-| `features.use_functions` | 真偽値 | はい | `true` にすると、C 関数名の PHP 関数を `\Pnlx\Func` 名前空間配下に生成します。`features` オブジェクトを書く場合は必須です（オブジェクト自体は省略可能）。 |
-| `features.allow_cdata` | 真偽値 | いいえ | `true` にすると、生成されるメソッド/関数の引数がラッパー型に加えて生の `\FFI\CData` も受け付けます。手書きの FFI コードと連携するときに便利です。 |
-| `features.use_php_scalars_in_params` | 真偽値 | いいえ | `true`（既定）にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false` の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
-| `features.use_php_scalars_in_return` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
-| `features.use_php_scalars_in_const` | 真偽値 | いいえ | `true` にすると、生成される `const.php` が無損失に表現できる定数を `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` で表現します。 |
+| `features.global_functions` | 真偽値 | はい | `true` にすると、C 関数名の PHP 関数を `\Pnlx\Func` 名前空間配下に生成します。`features` オブジェクトを書く場合は必須です（オブジェクト自体は省略可能）。 |
+| `features.cdata_arguments` | 真偽値 | いいえ | `true` にすると、生成されるメソッド/関数の引数がラッパー型に加えて生の `\FFI\CData` も受け付けます。手書きの FFI コードと連携するときに便利です。 |
+| `features.scalar_params` | 真偽値 | いいえ | `true`（既定）にすると、メソッドが素の PHP スカラー（`int`/`float`/`string`）をそのまま引数に取れます。`false` の場合、スカラーは対応する `\Pnlx\Types\*` 値型でラップして渡す必要があります。 |
+| `features.scalar_returns` | 真偽値 | いいえ | `true` にすると、C の戻り値型が PHP スカラーに収まるメソッドは `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` を返します。 |
+| `features.scalar_constants` | 真偽値 | いいえ | `true` にすると、生成される `const.php` が無損失に表現できる定数を `\Pnlx\Types\*` ラッパーではなくネイティブの `int`/`float`/`string` で表現します。 |
 | `compile_options.static_inline` | 真偽値 | いいえ | `true` にすると、ライブラリの `static inline` 関数を、例外を投げるスタブではなく呼び出し可能なメソッドにするためのコンパイル済みトランポリン shim をビルドします。インストール時に C コンパイラが必要です（下記参照）。既定は `false`。 |
 | `config` | オブジェクト | いいえ | バイナリに埋め込まれた既定エンドポイントのプロジェクト単位の上書き（下記参照）。省略すると既定値を使います。 |
 | `extensions` | オブジェクト | はい | 入れたい拡張を `vendor/package` をキーにして並べます。`pnl install` がここに自動で追記します。 |
@@ -150,9 +150,9 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 ```jsonc
 "config": {
   // `pnl self-upgrade` と更新チェックが新しい pnl リリースを探す先。
-  "self_repository": "https://github.com/acme/pnl",
+  "release_repository": "https://github.com/acme/pnl",
   // 名前指定インストールの最も優先度が低いフォールバックレジストリ。
-  "packages_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
+  "package_repository": "https://github.com/acme/pnl-packages/tree/main/packages"
 }
 ```
 
@@ -176,14 +176,14 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 
 `type` には `file`・`git`・`https` を指定できます。`file` リポジトリは、パッケージを置いた**ローカルディレクトリ**を指します。`file://` URL でも、プレーンなファイルパス（絶対パス、またはプロジェクトルートからの相対パス）でも構いません。`pnl search` とベース名指定の `pnl install` はこのディレクトリをディスクから列挙し、コミット済みの `repository-index.json`（[`pnl repo index`](commands.md#pnl-repo-index-dir---base-url-url) を参照）があれば優先し、なければディレクトリを走査します。`key` は任意で、将来の署名付きインデックス用に予約されています。なお、ローカルパス・`file://` URL・Git URL を `pnl install` に直接渡す場合は、`repositories` の指定は不要です。
 
-`load_paths` は「C ライブラリ本体（.so / .dylib など）」を探すフォルダで、ヘッダー（include）のフォルダではありません。ヘッダーの探索にはライブラリの `.pc` ファイル（直接パースします。`pkg-config` バイナリは不要）、C の include 用環境変数、パッケージ同梱の include、一般的なシステムの include フォルダを使います。
+`library_paths` は「C ライブラリ本体（.so / .dylib など）」を探すフォルダで、ヘッダー（include）のフォルダではありません。ヘッダーの探索にはライブラリの `.pc` ファイル（直接パースします。`pkg-config` バイナリは不要）、C の include 用環境変数、パッケージ同梱の include、一般的なシステムの include フォルダを使います。
 
 ### ネイティブライブラリの探索
 
-既定では `pnl install` は各 C ライブラリをローカル（`load_paths`、`DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`、`PATH`、一般的なシステムフォルダ）から、ヘッダーをライブラリの `.pc` ファイルや include パスから探します。`pnlx.json` の各要件はリモート取得元を指定でき、その場合アセットは一度だけダウンロードしてキャッシュされます。
+既定では `pnl install` は各 C ライブラリをローカル（`library_paths`、`DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH`、`PATH`、一般的なシステムフォルダ）から、ヘッダーをライブラリの `.pc` ファイルや include パスから探します。`pnlx.json` の各要件はリモート取得元を指定でき、その場合アセットは一度だけダウンロードしてキャッシュされます。
 
 ```jsonc
-"requires": {
+"native_libraries": {
   "mylib-1.0": {
     "library_names": ["libmylib.so", "mylib.dll"],
     // $PATH の代わりに http(s) / ftp / git tree URL から取得します。
@@ -199,7 +199,7 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 }
 ```
 
-対応スキームは `http`/`https`・`ftp`・`git`（リポジトリ内のファイルは `/tree/<branch>/<path>` URL か `ssh`/`git`/`.git` URL で取得）です。`ftps` は未対応のため `https` か `ftp` を使ってください。リモート取得元が無い要件では従来どおりローカル探索にフォールバックします。
+対応スキームは `http`/`https`・`ftp`・`ftps`（TLS 上の FTP）・`git`（リポジトリ内のファイルは `/tree/<branch>/<path>` URL か `ssh`/`git`/`.git` URL で取得）です。リモート取得元が無い要件では従来どおりローカル探索にフォールバックします。
 
 拡張のバージョン指定の例です。
 
@@ -224,7 +224,7 @@ pnl はビルド時に `config.toml` から 2 つの既定エンドポイント�
 // オプション機能は、トップレベルの "features" に書きます。
 "features": {
   // true にすると、C 言語風のグローバル PHP 関数を生成できます。
-  "use_functions": true
+  "global_functions": true
 }
 ```
 

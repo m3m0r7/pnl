@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    pnl::commands::pnlx::run()
+    pnl::app::commands::pnlx::run()
 }

@@ -178,7 +178,7 @@
           "source",
           "dist",
           "dependencies",
-          "requires"
+          "native_libraries"
         ],
         "properties": {
           "version": {
@@ -211,7 +211,7 @@
               "type": "string"
             }
           },
-          "requires": {
+          "native_libraries": {
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/lockedNativeLibrary"

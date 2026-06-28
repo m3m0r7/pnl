@@ -77,51 +77,51 @@ class Runtime implements RuntimeInterface
     /**
      * Whether the workspace's `pnl.json` opts into the global functions API.
      *
-     * Reads `features.use_functions` from the manifest without constructing a full runtime.
+     * Reads `features.global_functions` from the manifest without constructing a full runtime.
      */
     public static function enableFunctions(?string $projectRoot = null): bool
     {
-        return self::feature('use_functions', $projectRoot);
+        return self::feature('global_functions', $projectRoot);
     }
 
     /**
      * Whether the workspace's `pnl.json` opts into exposing raw `\FFI\CData` in
      * generated signatures (the `cdata/<Class>.php` entity variant).
      *
-     * Reads `features.allow_cdata` from the manifest without constructing a full runtime.
+     * Reads `features.cdata_arguments` from the manifest without constructing a full runtime.
      */
     public static function allowCData(?string $projectRoot = null): bool
     {
-        return self::feature('allow_cdata', $projectRoot);
+        return self::feature('cdata_arguments', $projectRoot);
     }
 
     /**
-     * Whether `features.use_php_scalars_in_params` is on, i.e. generated methods
+     * Whether `features.scalar_params` is on, i.e. generated methods
      * accept a raw PHP scalar argument (otherwise a raw scalar throws and the
      * caller must pass a `Pnlx\Types\*` wrapper).
      */
     public static function useScalarsInParams(?string $projectRoot = null): bool
     {
-        return self::feature('use_php_scalars_in_params', $projectRoot, true);
+        return self::feature('scalar_params', $projectRoot, true);
     }
 
     /**
-     * Whether `features.use_php_scalars_in_return` is on, i.e. methods return PHP
+     * Whether `features.scalar_returns` is on, i.e. methods return PHP
      * native scalars (the `scalar/<Class>.php` entity variant) instead of wrappers.
      */
     public static function useScalarsInReturn(?string $projectRoot = null): bool
     {
-        return self::feature('use_php_scalars_in_return', $projectRoot);
+        return self::feature('scalar_returns', $projectRoot);
     }
 
     /**
-     * Whether `features.use_php_scalars_in_const` is on, i.e. `const.php` uses PHP
+     * Whether `features.scalar_constants` is on, i.e. `const.php` uses PHP
      * native scalars for losslessly representable values (the `scalar/const.php`
      * variant) instead of `Pnlx\Types\*` wrappers.
      */
     public static function useScalarsInConst(?string $projectRoot = null): bool
     {
-        return self::feature('use_php_scalars_in_const', $projectRoot);
+        return self::feature('scalar_constants', $projectRoot);
     }
 
     /**

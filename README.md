@@ -28,6 +28,7 @@ See the [Quick Start](docs/en/quick-start.md) to call C `printf` from PHP in a m
 - [Commands](docs/en/commands.md) — `pnl` and `pnlx` command reference.
 - [PHP Usage](docs/en/php-usage.md) — Loading extensions and the generated files.
 - [Development](docs/en/development.md) — Validation, testing, and the JSON schemas.
+- [Conventions](docs/en/conventions.md) — Source-tree naming, coding rules, and the architecture layers.
 
 The official default package repository is **https://github.com/m3m0r7/pnl-packages**, which publishes a `repository-index.json` so `pnl search` can browse it without cloning. A repository may also expose short aliases (e.g. `sdl` → `libsdl`), so `pnl install sdl` resolves to the referenced package. The built-in endpoints can be overridden per project — see [Configuration](docs/en/configuration.md).
 

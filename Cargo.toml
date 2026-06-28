@@ -1,6 +1,6 @@
 [package]
 name = "pnl"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 
 [lib]
@@ -16,6 +16,14 @@ path = "src/cli/bin/pnl.rs"
 [[bin]]
 name = "pnlx"
 path = "src/cli/bin/pnlx.rs"
+
+# Lint level lives in-tree (not only in CI) so a local `cargo build`/`cargo clippy`
+# enforces the same bar CI does. See docs/en/conventions.md §3.
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
 
 [dependencies]
 anyhow = "1.0.100"
@@ -36,7 +44,9 @@ semver = "1.0.28"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
-suppaftp = "8.0.4"
+# `native-tls-vendored` adds FTPS: Security.framework on macOS, schannel on
+# Windows, and vendored OpenSSL on Linux (shared with git2's vendored OpenSSL).
+suppaftp = { version = "8.0.4", features = ["native-tls-vendored"] }
 tar = "0.4.46"
 ureq = "3.3.0"
 url = "2.5.8"

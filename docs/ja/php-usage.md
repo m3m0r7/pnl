@@ -117,6 +117,24 @@ libusb_exit: ok
   Libconfig::config_destroy($cfg);
   ```
 
+- **生のアロケーションやまとめての確保には `Allocator` を使う。** 生成ラッパーが
+  カバーしない値（任意の C 型や `char` バッファ）が必要なときは、**その拡張の** FFI
+  スコープで確保する（別スコープで確保するとライブラリの関数に渡せない）。
+  `AllocationScope` は `release()` するまで確保した値を保持するため、呼び出しの途中で
+  GC に解放されることなくポインタを C に渡せます。
+
+  ```php
+  use Pnlx\FFI\NativeLibraryRegistry;
+
+  $alloc = NativeLibraryRegistry::allocator(Libfoo::class);
+  $buf   = $alloc->cString('hello');        // NUL 終端の char バッファ
+
+  $scope = $alloc->scope();
+  $point = $scope->new('struct foo_point'); // release() まで保持される
+  // … ネイティブ API にポインタを渡す …
+  $scope->release();                        // ここで解放されてよい
+  ```
+
 - **書き込み可能な `char *` バッファも参照渡し**です。文字列で事前にサイズを確保し、書き込まれたバイトを読み戻します。
 
   ```php
@@ -133,7 +151,7 @@ libusb_exit: ok
   $opts = Liboniguruma::onig_get_syntax_options(OnigDefaultSyntax::class);
   ```
 
-スカラー値型は `\Pnlx\Types\*`（`Int_`・`Float_`・`String_` など）にあります。`features.use_php_scalars_in_params`/`use_php_scalars_in_return` を有効にすると素の PHP スカラーをそのまま受け渡しでき、無効なときはこれらの型でラップされて届きます。
+スカラー値型は `\Pnlx\Types\*`（`Int_`・`Float_`・`String_` など）にあります。`features.scalar_params`/`scalar_returns` を有効にすると素の PHP スカラーをそのまま受け渡しでき、無効なときはこれらの型でラップされて届きます。
 
 ### SDL：ウィンドウを開く（オブジェクトのメソッド版）
 
@@ -260,7 +278,7 @@ try {
 
 ### SDL：ウィンドウを開く（グローバル関数版）
 
-生成されたグローバル関数を使って、SDL のウィンドウを開き、その中に "Hello World!" を描画する例です。この書き方を使うには、先に `pnl.json` の `features.use_functions` を `true` にしておく必要があります。
+生成されたグローバル関数を使って、SDL のウィンドウを開き、その中に "Hello World!" を描画する例です。この書き方を使うには、先に `pnl.json` の `features.global_functions` を `true` にしておく必要があります。
 
 ```php
 <?php
@@ -300,8 +318,8 @@ use const Pnlx\Libsdl\SDL_WINDOW_SHOWN;
 use const Pnlx\Libsdl\SDL_WINDOWPOS_CENTERED;
 
 if (!function_exists('Pnlx\\Func\\Libsdl\\SDL_Init')) {
-    // @pnlx/autoload.php は features.use_functions が true のときだけ \Pnlx\Func 関数を定義します。
-    throw new RuntimeException('SDL global functions are disabled. Set pnl.json features.use_functions to true.');
+    // @pnlx/autoload.php は features.global_functions が true のときだけ \Pnlx\Func 関数を定義します。
+    throw new RuntimeException('SDL global functions are disabled. Set pnl.json features.global_functions to true.');
 }
 
 // "Hello World!" に使う文字用の小さな 5x7 ビットマップフォント。

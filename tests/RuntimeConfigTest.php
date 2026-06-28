@@ -57,7 +57,7 @@ class RuntimeConfigTest extends TestCase
         $manifest = [
             'schema_version' => '2026-07-01',
             'repositories' => [],
-            'load_paths' => [],
+            'library_paths' => [],
             'output_dir' => $outputDir,
             'extensions' => new \stdClass(),
         ];
