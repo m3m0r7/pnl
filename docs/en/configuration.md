@@ -216,7 +216,7 @@ Example of pinning an extension's version:
 }
 ```
 
-Version constraints support exact versions, comparison ranges, caret and tilde. Combine comparators with `&` (and) and `|` (or), where `&` binds tighter than `|`, and group with parentheses — e.g. `>=1.0.0 & <2.0.0`, or `>=1.0.0 & <2.0.0 | >=3.0.0`, or `(>=1.0.0 & <2.0.0) | >=3.0.0`. A bare version such as `1.2.3` means an exact match. `required` is currently just a note about dependency intent; in this MVP, install still expects you to name the source explicitly.
+Version constraints support exact versions, comparison ranges, caret and tilde. `*` accepts any semantic version. Combine comparators with `&` (and) and `|` (or), where `&` binds tighter than `|`, and group with parentheses — e.g. `>=1.0.0 & <2.0.0`, or `>=1.0.0 & <2.0.0 | >=3.0.0`, or `(>=1.0.0 & <2.0.0) | >=3.0.0`. A bare version such as `1.2.3` means an exact match. `required` is currently just a note about dependency intent; in this MVP, install still expects you to name the source explicitly.
 
 Example of global-function mode:
 

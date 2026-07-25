@@ -8,6 +8,7 @@
 //! >=1.2.3 & <2.0.0
 //! >=1.2.3 & <2.0.0 | >=3.0.0
 //! (>=1.2.3 & <2.0.0) | >=3.0.0
+//! *
 //! ```
 //!
 //! Whitespace is insignificant; two comparators are only combined when an
@@ -38,6 +39,7 @@ pub fn to_canonical_semver(version: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub enum VersionConstraint {
+    AnyVersion,
     Comparator(VersionReq),
     All(Vec<VersionConstraint>),
     Any(Vec<VersionConstraint>),
@@ -59,6 +61,7 @@ impl VersionConstraint {
 
     pub fn matches(&self, version: &Version) -> bool {
         match self {
+            Self::AnyVersion => true,
             Self::Comparator(req) => req.matches(version),
             Self::All(items) => items.iter().all(|item| item.matches(version)),
             Self::Any(items) => items.iter().any(|item| item.matches(version)),
@@ -77,6 +80,7 @@ enum Token {
     Or,
     Open,
     Close,
+    Wildcard,
     Comparator(VersionReq),
 }
 
@@ -103,6 +107,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             }
             ')' => {
                 tokens.push(Token::Close);
+                index += 1;
+            }
+            '*' => {
+                tokens.push(Token::Wildcard);
                 index += 1;
             }
             '<' | '>' | '=' | '^' | '~' | '0'..='9' => {
@@ -194,6 +202,10 @@ impl Parser {
                 self.pos += 1;
                 Ok(VersionConstraint::Comparator(req))
             }
+            Some(Token::Wildcard) => {
+                self.pos += 1;
+                Ok(VersionConstraint::AnyVersion)
+            }
             _ => bail!("invalid version constraint: expected a version comparator or '('"),
         }
     }
@@ -246,9 +258,17 @@ mod tests {
             "(>=1.2.3 & <2.0.0) | >=3.0.0",
             "  >=1.2.3  ",
             "1.2.3-alpha.1",
+            "*",
         ] {
             validate_version_constraint(constraint)
                 .unwrap_or_else(|err| panic!("{constraint:?} should be valid: {err}"));
+        }
+    }
+
+    #[test]
+    fn wildcard_matches_any_semver() {
+        for version in ["0.0.0", "1.2.3", "999.0.0-alpha.1"] {
+            assert!(matches("*", version));
         }
     }
 
