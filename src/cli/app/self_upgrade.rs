@@ -219,6 +219,7 @@ fn extract_source_tarball(tarball: &Path) -> Result<ExtractedSource> {
 
 /// Find the directory holding `Cargo.toml`: the extraction root, or a single
 /// top-level subdirectory.
+#[cfg(any(unix, test))]
 fn locate_cargo_root(destination: &Path) -> Result<PathBuf> {
     if destination.join("Cargo.toml").is_file() {
         return Ok(destination.to_path_buf());
