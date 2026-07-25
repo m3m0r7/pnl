@@ -51,6 +51,30 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  windows:
+    name: Windows (release check)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check release build
+        run: cargo check --locked --release
+
   php:
     name: PHP (phpstan max, cs, phpunit)
     runs-on: ubuntu-latest

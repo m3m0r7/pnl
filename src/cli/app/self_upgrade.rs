@@ -19,8 +19,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+#[cfg(any(unix, test))]
 use semver::Version;
 
+#[cfg(unix)]
 use crate::model::config::BINARIES;
 
 #[cfg(not(unix))]
@@ -102,10 +104,12 @@ pub fn self_upgrade(bin_dir: &Path, home: Option<&Path>) -> Result<()> {
 }
 
 /// Where versions, the `current` link, and the binaries live.
+#[cfg(any(unix, test))]
 struct Layout {
     home: PathBuf,
 }
 
+#[cfg(any(unix, test))]
 impl Layout {
     /// `--home` when given; otherwise `PNL_HOME`, then the XDG base directory
     /// `$XDG_DATA_HOME/pnl` (`~/.local/share/pnl` when `XDG_DATA_HOME` is unset).
@@ -140,6 +144,7 @@ impl Layout {
 }
 
 /// The XDG-based default install root, from the raw environment values.
+#[cfg(any(unix, test))]
 fn default_home(
     pnl_home: Option<std::ffi::OsString>,
     xdg_data_home: Option<std::ffi::OsString>,
@@ -163,6 +168,7 @@ struct ExtractedSource {
     root: PathBuf,
     /// The directory containing `Cargo.toml` (GitHub source tarballs wrap the
     /// tree in a single `<repo>-<version>/` directory).
+    #[cfg(unix)]
     source_root: PathBuf,
 }
 
@@ -202,12 +208,18 @@ fn extract_source_tarball(tarball: &Path) -> Result<ExtractedSource> {
         }
     }
 
+    #[cfg(unix)]
     let source_root = locate_cargo_root(&root)?;
-    Ok(ExtractedSource { root, source_root })
+    Ok(ExtractedSource {
+        root,
+        #[cfg(unix)]
+        source_root,
+    })
 }
 
 /// Find the directory holding `Cargo.toml`: the extraction root, or a single
 /// top-level subdirectory.
+#[cfg(any(unix, test))]
 fn locate_cargo_root(destination: &Path) -> Result<PathBuf> {
     if destination.join("Cargo.toml").is_file() {
         return Ok(destination.to_path_buf());
