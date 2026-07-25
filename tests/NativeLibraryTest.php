@@ -50,6 +50,32 @@ class NativeLibraryTest extends TestCase
         $library->allocateOpaque('struct ex_opaque', 4, 3);
     }
 
+    public function testCallReinterpretsPointerFromAnotherFfiScope(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            self::markTestSkipped('gettimeofday is not available on Windows.');
+        }
+
+        $cdef = <<<'CDEF'
+            struct timeval {
+                long tv_sec;
+                long tv_usec;
+            };
+            int gettimeofday(struct timeval *tv, void *timezone);
+            CDEF;
+        $target = FFI::cdef($cdef);
+        $foreign = FFI::cdef($cdef);
+        $time = $foreign->new('struct timeval');
+        self::assertInstanceOf(CData::class, $time);
+        $empty = FFI::string(FFI::addr($time), FFI::sizeof($time));
+        $library = new NativeLibrary($target, []);
+
+        $result = $library->call('gettimeofday', [FFI::addr($time), null]);
+
+        self::assertSame(0, $result);
+        self::assertNotSame($empty, FFI::string(FFI::addr($time), FFI::sizeof($time)));
+    }
+
     private static function cdataInteger(CData $value): int
     {
         $width = FFI::sizeof($value);

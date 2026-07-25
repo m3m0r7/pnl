@@ -80,7 +80,9 @@ final class ArgumentMarshaller
             return $cdata;
         }
 
-        return \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_POINTER
+        $kind = \FFI::typeof($cdata)->getKind();
+
+        return $kind === \FFI\CType::TYPE_POINTER || $kind === \FFI\CType::TYPE_ARRAY
             ? $cdata[0]
             : $cdata;
     }

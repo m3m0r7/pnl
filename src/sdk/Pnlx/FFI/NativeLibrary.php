@@ -159,6 +159,25 @@ class NativeLibrary
 
         try {
             return $this->ffi->{$native}(...$arguments);
+        } catch (\FFI\Exception $e) {
+            if (!str_contains($e->getMessage(), 'Passing incompatible argument')) {
+                throw new NativeFunctionCallException(
+                    sprintf('Native function %s could not be called.', $native),
+                    0,
+                    $e,
+                );
+            }
+            try {
+                $arguments = $this->reinterpretPointerArguments($native, $arguments);
+
+                return $this->ffi->{$native}(...$arguments);
+            } catch (Throwable $retryError) {
+                throw new NativeFunctionCallException(
+                    sprintf('Native function %s could not be called.', $native),
+                    0,
+                    $retryError,
+                );
+            }
         } catch (Throwable $e) {
             throw new NativeFunctionCallException(
                 sprintf('Native function %s could not be called.', $native),
@@ -166,6 +185,56 @@ class NativeLibrary
                 $e
             );
         }
+    }
+
+    /**
+     * 別 extension の FFI スコープで作られたポインタを、このライブラリの関数が
+     * 宣言する引数型へキャストする。同名の C 型でも FFI スコープが異なると PHP
+     * FFI は互換とみなさないため、依存パッケージ間でポインタを受け渡す直前に
+     * 呼び出し先スコープへ所属させ直す。
+     *
+     * @param list<mixed> $arguments
+     * @return list<mixed>
+     */
+    private function reinterpretPointerArguments(string $native, array $arguments): array
+    {
+        try {
+            $callable = $this->ffi->{$native};
+            if (!$callable instanceof CData) {
+                return $arguments;
+            }
+
+            $functionType = FFI::typeof($callable);
+            if ($functionType->getKind() === \FFI\CType::TYPE_POINTER) {
+                $functionType = $functionType->getPointerType();
+            }
+            if ($functionType->getKind() !== \FFI\CType::TYPE_FUNC) {
+                return $arguments;
+            }
+
+            $parameterCount = min(
+                $functionType->getFuncParameterCount(),
+                count($arguments),
+            );
+            for ($index = 0; $index < $parameterCount; $index++) {
+                if (!$arguments[$index] instanceof CData) {
+                    continue;
+                }
+                $parameterType = $functionType->getFuncParameterType($index);
+                if ($parameterType->getKind() !== \FFI\CType::TYPE_POINTER) {
+                    continue;
+                }
+
+                $cast = $this->ffi->cast($parameterType->getName(), $arguments[$index]);
+                if ($cast instanceof CData) {
+                    $arguments[$index] = $cast;
+                }
+            }
+        } catch (Throwable) {
+            // 型情報を取得できない特殊な宣言では、従来どおり元の引数を渡す。
+        }
+
+        return $arguments;
     }
 
     /**

@@ -59,8 +59,20 @@ fn validate_workspace_consistency(
     };
 
     for (name, requirement) in &manifest.extensions {
-        if requirement.required && !lock.extensions.contains_key(name) {
-            bail!("pnl.json requires {name}, but it is missing from pnlx-lock.json");
+        let Some(locked) = lock.extensions.get(name) else {
+            if requirement.required {
+                bail!("pnl.json requires {name}, but it is missing from pnlx-lock.json");
+            }
+            continue;
+        };
+        let constraint = crate::model::version::VersionConstraint::parse(&requirement.version)?;
+        let locked_version = normalize_semver(&locked.version)?;
+        if !constraint.matches(&locked_version) {
+            bail!(
+                "pnl.json requires {name} {}, but pnlx-lock.json records {}",
+                requirement.version,
+                locked.version
+            );
         }
     }
 
@@ -340,7 +352,13 @@ pub fn sanitize_package_segment(value: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_semver;
+    use std::collections::BTreeMap;
+
+    use super::{normalize_semver, validate_workspace_consistency};
+    use crate::model::manifest::{
+        Dist, ExtensionRequirement, LockedExtension, PnlLock, PnlManifest, RepositoryType, Source,
+    };
+    use crate::model::platform::current_platform;
 
     #[test]
     fn normalizes_partial_and_overlong_versions() {
@@ -360,5 +378,47 @@ mod tests {
         assert_eq!(normalize_semver("00.00.00").unwrap().to_string(), "0.0.0");
         // Non-numeric components are rejected.
         assert!(normalize_semver("1.x").is_err());
+    }
+
+    #[test]
+    fn workspace_consistency_rejects_locked_version_outside_manifest_constraint() {
+        let mut manifest = PnlManifest::default();
+        manifest.extensions.insert(
+            "vendor/pkg".to_owned(),
+            ExtensionRequirement {
+                version: "=1.0.0".to_owned(),
+                required: true,
+            },
+        );
+        let mut lock = PnlLock::empty(current_platform());
+        lock.extensions.insert(
+            "vendor/pkg".to_owned(),
+            LockedExtension {
+                version: "1.1.0".to_owned(),
+                constraint: "=1.1.0".to_owned(),
+                source: Source {
+                    kind: RepositoryType::File,
+                    url: "file:///pkg".to_owned(),
+                    reference: "1.1.0".to_owned(),
+                },
+                dist: Dist {
+                    url: "file:///pkg".to_owned(),
+                    sha256: "a".repeat(64),
+                },
+                classes: Vec::new(),
+                dependencies: BTreeMap::new(),
+                native_libraries: BTreeMap::new(),
+                libraries: BTreeMap::new(),
+                definitions: BTreeMap::new(),
+            },
+        );
+
+        let error = validate_workspace_consistency(&manifest, Some(&lock), None).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("pnl.json requires vendor/pkg =1.0.0")
+        );
     }
 }

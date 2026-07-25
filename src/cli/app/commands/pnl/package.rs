@@ -390,13 +390,44 @@ struct InstalledPackage {
 
 fn collect_installed_packages(root: &Path) -> Result<Vec<InstalledPackage>> {
     let mut packages = Vec::new();
-    collect_packages_in(
-        root,
-        &pnlx_workspace_dir(root).join("packages"),
-        &mut packages,
-    )?;
+    let lock_path = pnl_lock_path(root);
+    if !lock_path.is_file() {
+        return Ok(packages);
+    }
+    let lock = read_json::<PnlLock>(&lock_path)?;
+    ensure_platform_matches(&lock.platform)?;
+    let packages_root = pnlx_workspace_dir(root).join("packages");
+    for (name, extension) in &lock.extensions {
+        collect_package_version(
+            root,
+            &extension_install_dir(&packages_root, name, &extension.version),
+            &mut packages,
+        )?;
+    }
     packages.sort_by(|a, b| a.entrypoint.cmp(&b.entrypoint));
     Ok(packages)
+}
+
+/// Collect one lock-selected package version and every private dependency nested
+/// below it. Other top-level versions may remain cached on disk, but must not be
+/// required into the same PHP process because generated classes share an FQCN.
+fn collect_package_version(
+    root: &Path,
+    version_dir: &Path,
+    packages: &mut Vec<InstalledPackage>,
+) -> Result<()> {
+    let manifest_path = version_dir.join(crate::model::config::PNLX_MANIFEST_FILE);
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let manifest = read_json::<PnlxManifest>(&manifest_path)?;
+    let entrypoint = version_dir.join(&manifest.entrypoint);
+    if entrypoint.is_file() {
+        packages.push(InstalledPackage {
+            entrypoint: relative_to_pnlx(root, &entrypoint),
+        });
+    }
+    collect_packages_in(root, &version_dir.join("packages"), packages)
 }
 
 /// Walk a `packages/` directory, collecting every installed package's entrypoint
@@ -492,15 +523,48 @@ mod tests {
         std::fs::write(version_dir.join("index.php"), "<?php\n").unwrap();
     }
 
+    fn write_lock(root: &Path, package: &str, version: &str) {
+        use std::collections::BTreeMap;
+
+        use crate::model::manifest::{Dist, LockedExtension, PnlLock, RepositoryType, Source};
+
+        let mut lock = PnlLock::empty(crate::model::platform::current_platform());
+        lock.extensions.insert(
+            package.to_owned(),
+            LockedExtension {
+                version: version.to_owned(),
+                constraint: format!("={version}"),
+                source: Source {
+                    kind: RepositoryType::File,
+                    url: "file:///pkg".to_owned(),
+                    reference: version.to_owned(),
+                },
+                dist: Dist {
+                    url: "file:///pkg".to_owned(),
+                    sha256: "a".repeat(64),
+                },
+                classes: Vec::new(),
+                dependencies: BTreeMap::new(),
+                native_libraries: BTreeMap::new(),
+                libraries: BTreeMap::new(),
+                definitions: BTreeMap::new(),
+            },
+        );
+        crate::util::io::write_json(&pnl_lock_path(root), &lock).unwrap();
+    }
+
     #[test]
-    fn collect_installed_packages_recurses_into_nested_dependencies() {
+    fn collect_installed_packages_uses_locked_version_and_nested_dependencies() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path();
         let packages = pnlx_workspace_dir(root).join("packages");
 
-        // A top-level package and a dependency nested under its own subtree.
+        // Only the lock-selected top-level version is loaded. Its nested private
+        // dependency remains part of the same autoload graph.
+        write_package(&packages.join("acme/parent/0.9.0"));
         write_package(&packages.join("acme/parent/1.0.0"));
         write_package(&packages.join("acme/parent/1.0.0/packages/acme/child/2.0.0"));
+        write_lock(root, "acme/parent", "1.0.0");
 
         let found = collect_installed_packages(root).unwrap();
         assert_eq!(
@@ -508,6 +572,11 @@ mod tests {
             2,
             "expected the parent and its nested child, found {}",
             found.len()
+        );
+        assert!(
+            found
+                .iter()
+                .all(|package| !package.entrypoint.contains("/0.9.0/"))
         );
     }
 }
