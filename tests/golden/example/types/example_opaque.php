@@ -26,22 +26,22 @@ declare(strict_types=1);
 
 namespace Pnlx\Example\Types;
 
-/** Typed wrapper for a C `example_point` value. */
-class example_point extends \Pnlx\Example\ExampleContext
+/** Typed wrapper for a C `example_opaque` value. */
+class example_opaque extends \Pnlx\Example\ExampleContext
 {
     /**
-     * extension が返した既存の `example_point` をラップする。
-     * `\FFI\CData` がない場合は extension 自身の FFI スコープで `example_point[$size]` を確保し、
-     * C API がポインタを要求する箇所へ `new example_point()` で完全な aggregate を渡せるようにする。
+     * extension が返した既存の `example_opaque` をラップする。
+     * `\FFI\CData` がない場合は extension 自身の FFI スコープで `example_opaque[$size]` を確保し、
+     * C API がポインタを要求する箇所へ `new example_opaque()` で完全な aggregate を渡せるようにする。
      */
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
         if ($size < 1) {
             throw new \InvalidArgumentException('The allocation size must be at least 1.');
         }
-        // 値で返された aggregate（`example_point *` ではなく `example_point` を返す関数など）は、
+        // 値で返された aggregate（`example_opaque *` ではなく `example_opaque` を返す関数など）は、
         // ポインタへ `reinterpret` cast できない。値を保持してアドレスを公開することで、
-        // アクセサやポインタ利用では `example_point *` として扱い、値で再度渡すときは
+        // アクセサやポインタ利用では `example_opaque *` として扱い、値で再度渡すときは
         // デリファレンスする（ArgumentMarshaller::structValue を参照）。
         // PHP は union を TYPE_STRUCT と ATTR_UNION の組で表すため、両方をここで扱う。
         if ($cdata !== null && \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_STRUCT) {
@@ -50,37 +50,23 @@ class example_point extends \Pnlx\Example\ExampleContext
 
             return;
         }
+        if ($cdata === null) {
+            $this->opaqueAllocation = \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)
+                ->allocateOpaque('example_opaque', 4, 4, $size);
+            parent::__construct($this->opaqueAllocation->pointer());
+
+            return;
+        }
         parent::__construct(
             $cdata !== null
-                ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_point', $cdata)
-                : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_point[%d]', $size))
+                ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_opaque', $cdata)
+                : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_opaque[%d]', $size))
         );
     }
 
     /** 親へ渡したアドレスを有効に保つため、値渡しされた aggregate を保持する。 */
     private ?\FFI\CData $byValue = null;
-    public function getX(): int
-    {
-        return $this->cdata()[0]->x;
-    }
 
-    public function setX(int $value): static
-    {
-        $this->cdata()[0]->x = $value;
-
-        return $this;
-    }
-
-    public function getY(): int
-    {
-        return $this->cdata()[0]->y;
-    }
-
-    public function setY(int $value): static
-    {
-        $this->cdata()[0]->y = $value;
-
-        return $this;
-    }
-
+    /** opaque な aggregate 用のアライン済み実体領域を保持する。 */
+    private ?\Pnlx\FFI\OpaqueAllocation $opaqueAllocation = null;
 }

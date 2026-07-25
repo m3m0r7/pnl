@@ -300,6 +300,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBu
         symbol_aliases,
         mut unsupported_functions,
         enums,
+        aggregate_layouts,
     ) = if args.headers.is_empty() {
         (
             read_existing_ffi_cdef(&out)?,
@@ -309,6 +310,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBu
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            std::collections::BTreeMap::new(),
         )
     } else {
         let artifacts = cdef_from_header(
@@ -334,6 +336,7 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBu
             artifacts.symbol_aliases,
             artifacts.unsupported_functions,
             artifacts.enums,
+            artifacts.aggregate_layouts,
         )
     };
     // The generated PHP enums, by C name, so signature parsing can tag enum-typed
@@ -416,8 +419,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBu
     if !shim_aliases.is_empty() {
         signatures.retain(|signature| !signature.name.starts_with("pnl_si_"));
     }
-    // Field accessors for the struct wrappers come from the cdef's own struct bodies.
-    let struct_fields = crate::codegen::parse_struct_fields(&cdef);
+    // aggregate ラッパーのフィールドアクセサは、cdef 内にある型本体から生成する。
+    let aggregate_fields = crate::codegen::parse_aggregate_fields(&cdef);
     generate_ffi_php_from_cdef(&cdef, &out)?;
     let ffi_file = out
         .file_name()
@@ -436,7 +439,8 @@ fn generate_all(args: &GenerateArtifacts<'_>) -> Result<Option<std::path::PathBu
         description: args.description,
         symbols: &symbols,
         enums: &enums,
-        struct_fields: &struct_fields,
+        aggregate_fields: &aggregate_fields,
+        aggregate_layouts: &aggregate_layouts,
     };
     // Metadata, the CData wrapper, and the per-extension exception are shared by
     // every entity variant.

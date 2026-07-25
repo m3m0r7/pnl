@@ -211,11 +211,6 @@ pub(super) fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<S
         out.push('\n');
     }
 
-    // The structs/unions the cdef emits with a full body (everything else stays
-    // forward-declared/opaque). Computed once: a union must be structurally safe and
-    // every by-value aggregate member must itself be emittable (transitively).
-    let (emit_structs, emit_unions) = emittable_aggregates(collected);
-
     // Every type name the cdef will emit, including pool types resolved on demand
     // (`resolved_names`) and the final typedef set. Used to detect an aggregate whose
     // field name was corrupted into a type token (see `body_has_type_named_field`):
@@ -227,6 +222,18 @@ pub(super) fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<S
     // PHP FFI's intrinsic type names (`off_t`, `time_t`, `size_t`, …) are never
     // emitted as typedefs but still collide with a same-named param/field.
     all_type_names.extend(builtin_type_names());
+
+    // cdef に完全な本体を出力できる struct/union。それ以外は前方宣言された
+    // opaque 型のままにする。無効な本体は値依存の不動点計算より前に除外するため、
+    // その型へ依存する aggregate も opaque のままになる。
+    let opaque_type_names = missing_types
+        .iter()
+        .filter_map(|(name, kind)| {
+            matches!(kind, MissingTypeKind::OpaqueStruct).then_some(name.clone())
+        })
+        .collect();
+    let (emit_structs, emit_unions) =
+        emittable_aggregates(collected, &all_type_names, &opaque_type_names);
 
     // Re-run the parameter/type collision rename against the COMPLETE type set: the
     // earlier pass used `declared_type_names`, which lacks pool-resolved and
@@ -241,23 +248,7 @@ pub(super) fn render(collected: &Collected, exported_symbols: Option<&BTreeSet<S
 
     out.push('\n');
     out.push_str("struct timeval { long tv_sec; int tv_usec; };\n");
-    for (name, definition) in &collected.unions {
-        if !emit_unions.contains(name) {
-            continue;
-        }
-        if body_has_type_named_field(definition, &all_type_names) {
-            continue;
-        }
-        out.push_str(&project_enums_to_int(definition, &no_enums));
-        out.push('\n');
-    }
-    for definition in ordered_struct_definitions(collected) {
-        // A struct with a by-value member of a type the cdef leaves incomplete
-        // (an embedded system `struct sockaddr_in`, or an unsafe union) can't be
-        // laid out; keep it opaque (forward-declared only).
-        if struct_definition_tag(definition).is_none_or(|tag| !emit_structs.contains(tag)) {
-            continue;
-        }
+    for definition in ordered_aggregate_definitions(collected, &emit_structs, &emit_unions) {
         if body_has_type_named_field(definition, &all_type_names) {
             continue;
         }
@@ -946,19 +937,24 @@ fn next_nonspace(input: &str, index: usize) -> Option<char> {
     input[index..].chars().find(|ch| !ch.is_whitespace())
 }
 
-/// The set of struct tags and union tags the cdef will actually EMIT with a full
-/// body, computed once for the whole package by fixpoint. A union must be
-/// structurally safe (reference no struct and no other union) AND every aggregate
-/// any kept aggregate embeds BY VALUE must itself be emitted — so a struct embedding
-/// a union (`JSValue` ← `JSValueUnion`) is emitted only if that union is, and one
-/// embedding an unsafe union (`config_setting_t` ← `config_value_t`) is not. Doing
-/// this as a fixpoint (vs per-aggregate recursion) keeps it cheap on big headers.
-fn emittable_aggregates(collected: &Collected) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut structs: BTreeSet<String> = collected.structs.keys().cloned().collect();
+/// cdef に完全な本体を出力できる struct/union タグの集合。
+/// パッケージ全体に対して不動点計算を一度行う。値として埋め込まれた aggregate は
+/// すべて出力可能でなければならないが、ポインタメンバーにはその制約を課さない。
+fn emittable_aggregates(
+    collected: &Collected,
+    type_names: &BTreeSet<String>,
+    opaque_type_names: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut structs: BTreeSet<String> = collected
+        .structs
+        .iter()
+        .filter(|(_, definition)| !body_has_type_named_field(definition, type_names))
+        .map(|(name, _)| name.clone())
+        .collect();
     let mut unions: BTreeSet<String> = collected
         .unions
         .iter()
-        .filter(|(name, definition)| union_structurally_safe(name, definition, collected))
+        .filter(|(_, definition)| !body_has_type_named_field(definition, type_names))
         .map(|(name, _)| name.clone())
         .collect();
     loop {
@@ -970,6 +966,7 @@ fn emittable_aggregates(collected: &Collected) -> (BTreeSet<String>, BTreeSet<St
                     collected,
                     &structs,
                     &unions,
+                    opaque_type_names,
                 )
             })
             .cloned()
@@ -982,6 +979,7 @@ fn emittable_aggregates(collected: &Collected) -> (BTreeSet<String>, BTreeSet<St
                     collected,
                     &structs,
                     &unions,
+                    opaque_type_names,
                 )
             })
             .cloned()
@@ -999,53 +997,18 @@ fn emittable_aggregates(collected: &Collected) -> (BTreeSet<String>, BTreeSet<St
     (structs, unions)
 }
 
-/// The tag of a `struct TAG { … };` definition (the identifier after `struct `),
-/// or `None` if the string is not a named struct definition.
-fn struct_definition_tag(definition: &str) -> Option<&str> {
-    let rest = definition.trim_start().strip_prefix("struct ")?;
-    let tag = rest.trim_start();
-    let end = tag
-        .find(|ch: char| !is_c_identifier_char(ch))
-        .unwrap_or(tag.len());
-    (end > 0).then(|| &tag[..end])
-}
-
-/// Whether a union's body references no `struct`/`struct`-alias (PHP FFI can't place
-/// those in a union here) and no OTHER union — a fixed structural prerequisite for
-/// emitting the union, independent of which aggregates end up emittable.
-fn union_structurally_safe(name: &str, definition: &str, collected: &Collected) -> bool {
-    for candidate in collected
-        .structs
-        .keys()
-        .chain(collected.struct_aliases.keys())
-    {
-        if contains_c_identifier(definition, candidate) {
-            return false;
-        }
-    }
-    for candidate in collected
-        .unions
-        .keys()
-        .chain(collected.union_aliases.keys())
-    {
-        if candidate != name && contains_c_identifier(definition, candidate) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Whether an aggregate body has a *by-value* member of a `struct`/`union` NOT in
-/// the emittable sets — a forward-declared system type (`struct sockaddr_in`), an
-/// unsafe union (`config_value_t`), or a struct itself incomplete. PHP FFI can't
-/// size such a member, so the enclosing aggregate must stay opaque. Pointer members
-/// are fine and ignored. Non-recursive: the sets already capture transitive
-/// emittability (see [`emittable_aggregates`]).
+/// aggregate 本体が、出力可能集合に含まれない `struct`/`union` を値メンバーとして
+/// 持つかを判定する。対象には前方宣言だけのシステム型（`struct sockaddr_in`）、
+/// 利用できない union（`config_value_t`）、不完全な struct が含まれる。
+/// PHP FFI はそのメンバーのサイズを決定できないため、外側の aggregate も opaque にする。
+/// ポインタメンバーは問題ないため無視する。集合側で推移的な出力可否を表現済みなので、
+/// この判定自体は再帰しない（[`emittable_aggregates`] を参照）。
 fn aggregate_has_unemittable_member(
     definition: &str,
     collected: &Collected,
     structs: &BTreeSet<String>,
     unions: &BTreeSet<String>,
+    opaque_type_names: &BTreeSet<String>,
 ) -> bool {
     // Scan the MEMBERS only — skip the aggregate's own `struct/union NAME {` header,
     // or its leading tag would be read as a by-value member of itself. Members all
@@ -1101,15 +1064,22 @@ fn aggregate_has_unemittable_member(
     let incomplete_struct_aliases = collected
         .struct_aliases
         .iter()
+        .chain(collected.pool_struct_aliases.iter())
         .filter(|(_, tag)| !structs.contains(*tag))
         .map(|(alias, _)| alias);
     let incomplete_union_aliases = collected
         .union_aliases
         .iter()
+        .chain(collected.pool_union_aliases.iter())
         .filter(|(_, tag)| !unions.contains(*tag))
         .map(|(alias, _)| alias);
     for alias in incomplete_struct_aliases.chain(incomplete_union_aliases) {
         if contains_value_member(definition, alias) {
+            return true;
+        }
+    }
+    for name in opaque_type_names {
+        if contains_value_member(definition, name) {
             return true;
         }
     }
@@ -1145,55 +1115,128 @@ fn contains_value_member(definition: &str, identifier: &str) -> bool {
     false
 }
 
-fn ordered_struct_definitions(collected: &Collected) -> Vec<&String> {
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum AggregateTag {
+    Struct(String),
+    Union(String),
+}
+
+/// 完全な struct/union 定義をまとめて並べ替え、値依存する型を埋め込み元より先に定義する。
+/// C の通常の宣言順を守れば、PHP FFI は struct/union が混在するレイアウトを受理する。
+fn ordered_aggregate_definitions<'a>(
+    collected: &'a Collected,
+    emit_structs: &BTreeSet<String>,
+    emit_unions: &BTreeSet<String>,
+) -> Vec<&'a String> {
     fn visit<'a>(
-        name: &str,
+        tag: &AggregateTag,
         collected: &'a Collected,
-        visiting: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<String>,
+        emit_structs: &BTreeSet<String>,
+        emit_unions: &BTreeSet<String>,
+        visiting: &mut BTreeSet<AggregateTag>,
+        visited: &mut BTreeSet<AggregateTag>,
         ordered: &mut Vec<&'a String>,
     ) {
-        if visited.contains(name) || !visiting.insert(name.to_owned()) {
+        if visited.contains(tag) || !visiting.insert(tag.clone()) {
             return;
         }
 
-        if let Some(definition) = collected.structs.get(name) {
-            for dependency in struct_definition_dependencies(name, definition, collected) {
-                visit(&dependency, collected, visiting, visited, ordered);
+        if let Some(definition) = aggregate_definition(tag, collected) {
+            for dependency in aggregate_definition_dependencies(tag, definition, collected) {
+                let emitted = match &dependency {
+                    AggregateTag::Struct(name) => emit_structs.contains(name),
+                    AggregateTag::Union(name) => emit_unions.contains(name),
+                };
+                if emitted {
+                    visit(
+                        &dependency,
+                        collected,
+                        emit_structs,
+                        emit_unions,
+                        visiting,
+                        visited,
+                        ordered,
+                    );
+                }
             }
             ordered.push(definition);
         }
 
-        visiting.remove(name);
-        visited.insert(name.to_owned());
+        visiting.remove(tag);
+        visited.insert(tag.clone());
     }
 
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut ordered = Vec::new();
-    for name in collected.structs.keys() {
-        visit(name, collected, &mut visiting, &mut visited, &mut ordered);
+    let tags = emit_structs
+        .iter()
+        .cloned()
+        .map(AggregateTag::Struct)
+        .chain(emit_unions.iter().cloned().map(AggregateTag::Union));
+    for tag in tags {
+        visit(
+            &tag,
+            collected,
+            emit_structs,
+            emit_unions,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        );
     }
     ordered
 }
 
-fn struct_definition_dependencies(
-    name: &str,
+fn aggregate_definition<'a>(tag: &AggregateTag, collected: &'a Collected) -> Option<&'a String> {
+    match tag {
+        AggregateTag::Struct(name) => collected.structs.get(name),
+        AggregateTag::Union(name) => collected.unions.get(name),
+    }
+}
+
+fn aggregate_definition_dependencies(
+    current: &AggregateTag,
     definition: &str,
     collected: &Collected,
-) -> Vec<String> {
+) -> Vec<AggregateTag> {
     let mut dependencies = BTreeSet::new();
     for candidate in collected.structs.keys() {
-        if candidate != name && contains_c_identifier(definition, candidate) {
-            dependencies.insert(candidate.clone());
+        let dependency = AggregateTag::Struct(candidate.clone());
+        if &dependency != current && contains_value_member(definition, candidate) {
+            dependencies.insert(dependency);
         }
     }
-    for (alias, tag) in &collected.struct_aliases {
-        if tag != name
+    for (alias, tag) in collected
+        .struct_aliases
+        .iter()
+        .chain(collected.pool_struct_aliases.iter())
+    {
+        let dependency = AggregateTag::Struct(tag.clone());
+        if &dependency != current
             && collected.structs.contains_key(tag)
-            && contains_c_identifier(definition, alias)
+            && contains_value_member(definition, alias)
         {
-            dependencies.insert(tag.clone());
+            dependencies.insert(dependency);
+        }
+    }
+    for candidate in collected.unions.keys() {
+        let dependency = AggregateTag::Union(candidate.clone());
+        if &dependency != current && contains_value_member(definition, candidate) {
+            dependencies.insert(dependency);
+        }
+    }
+    for (alias, tag) in collected
+        .union_aliases
+        .iter()
+        .chain(collected.pool_union_aliases.iter())
+    {
+        let dependency = AggregateTag::Union(tag.clone());
+        if &dependency != current
+            && collected.unions.contains_key(tag)
+            && contains_value_member(definition, alias)
+        {
+            dependencies.insert(dependency);
         }
     }
     dependencies.into_iter().collect()

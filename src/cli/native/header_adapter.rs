@@ -100,6 +100,15 @@ pub struct HeaderArtifacts {
     pub unsupported_functions: Vec<UnsupportedFunction>,
     /// Named C enums surfaced as PHP `enum`s (see [`EnumDef`]).
     pub enums: Vec<EnumDef>,
+    /// ソース上で完全な aggregate の ABI レイアウト。
+    /// PHP FFI の cdef パーサーで本体を安全に表現できない型も含む。
+    pub aggregate_layouts: BTreeMap<String, AggregateLayout>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AggregateLayout {
+    pub size: usize,
+    pub alignment: usize,
 }
 
 /// A function with no FFI binding, surfaced as a throwing stub method. `declaration`
@@ -312,8 +321,23 @@ pub fn cdef_from_header(header: &str, options: &HeaderAdapterOptions) -> Result<
         symbol_aliases: macro_symbol_aliases(&collected, &options.definitions),
         unsupported_functions: unsupported_functions(&collected),
         enums: enum_definitions(&collected, prefix),
+        aggregate_layouts: aggregate_layouts_with_aliases(&collected),
         constants,
     })
+}
+
+fn aggregate_layouts_with_aliases(collected: &Collected) -> BTreeMap<String, AggregateLayout> {
+    let mut layouts = collected.aggregate_layouts.clone();
+    for (alias, tag) in collected
+        .struct_aliases
+        .iter()
+        .chain(collected.union_aliases.iter())
+    {
+        if let Some(layout) = layouts.get(tag).copied() {
+            layouts.insert(alias.clone(), layout);
+        }
+    }
+    layouts
 }
 
 /// The named C enums to surface as PHP enums: package-owned, prefix-matching (the
@@ -763,6 +787,7 @@ struct Collected {
     struct_aliases: BTreeMap<String, String>,
     unions: BTreeMap<String, String>,
     union_aliases: BTreeMap<String, String>,
+    aggregate_layouts: BTreeMap<String, AggregateLayout>,
     enums: BTreeSet<String>,
     typedef_names: BTreeSet<String>,
     typedefs: Vec<String>,
@@ -1661,6 +1686,7 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
     if is_synthetic_anonymous_name(&name) {
         return;
     }
+    collect_aggregate_layout(entity, &name, collected);
 
     // If any field cannot be rendered cleanly, leave the struct opaque
     // (forward-declared) instead of emitting an invalid definition.
@@ -1668,7 +1694,7 @@ fn collect_struct(entity: &Entity<'_>, collected: &mut Collected) {
         .get_children()
         .into_iter()
         .filter(|child| child.get_kind() == EntityKind::FieldDecl)
-        .map(|field| render_union_field(&field, collected))
+        .map(|field| render_union_field(&field))
         .collect();
 
     if let Some(fields) = fields {
@@ -1689,6 +1715,7 @@ fn collect_union(entity: &Entity<'_>, collected: &mut Collected) {
     if is_synthetic_anonymous_name(&name) {
         return;
     }
+    collect_aggregate_layout(entity, &name, collected);
 
     let fields: Option<Vec<String>> = entity
         .get_children()
@@ -1705,7 +1732,22 @@ fn collect_union(entity: &Entity<'_>, collected: &mut Collected) {
     }
 }
 
-fn render_union_field(field: &Entity<'_>, collected: &Collected) -> Option<String> {
+fn collect_aggregate_layout(entity: &Entity<'_>, name: &str, collected: &mut Collected) {
+    let Some(type_) = entity.get_type() else {
+        return;
+    };
+    let (Ok(size), Ok(alignment)) = (type_.get_sizeof(), type_.get_alignof()) else {
+        return;
+    };
+    if size == 0 || alignment == 0 {
+        return;
+    }
+    collected
+        .aggregate_layouts
+        .insert(name.to_owned(), AggregateLayout { size, alignment });
+}
+
+fn render_union_field(field: &Entity<'_>) -> Option<String> {
     let field_type = field.get_type()?;
     // A function-pointer field — inline `void (*destroy)(…)` or a typedef'd callback
     // (libconfig's `config_include_fn_t include_fn`) — is rendered as an opaque,
@@ -1722,27 +1764,10 @@ fn render_union_field(field: &Entity<'_>, collected: &Collected) -> Option<Strin
     let is_enum_field = field_type.get_canonical_type().get_kind() == TypeKind::Enum;
     let display = field_type.get_display_name();
     if !display.contains('*') && !is_enum_field {
-        if let Some(declaration) = field_type.get_declaration()
-            && matches!(
-                declaration.get_kind(),
-                EntityKind::StructDecl | EntityKind::UnionDecl
-            )
-            && declaration.is_anonymous()
-        {
-            return render_struct_field(field);
-        }
-        // A by-value member that is a known aggregate (`JSValueUnion u`) is rendered
-        // here, and the EMISSION-TIME gate decides safety: `has_incomplete_value_member`
-        // (with full collected state) keeps the enclosing aggregate opaque when the
-        // member's aggregate is not actually emitted, and `ordered_struct_definitions`
-        // emits dependencies first. The safety predicates MUST run at render time, not
-        // here — during collection the state is partial (a referenced type may not be
-        // collected yet), so `is_safe_union_definition` would answer inconsistently.
-        if collected.struct_aliases.contains_key(&display)
-            || collected.structs.contains_key(&display)
-            || collected.union_aliases.contains_key(&display)
-            || collected.unions.contains_key(&display)
-        {
+        // 値として埋め込まれた record は、収集順にかかわらずここで出力する。
+        // 依存先に完全な cdef 本体が得られない場合は、後段の出力時の不動点計算が
+        // 外側の aggregate を opaque のまま保つ。
+        if field_type.get_canonical_type().get_kind() == TypeKind::Record {
             return render_struct_field(field);
         }
         if !is_builtin_value_field_type(&display) {
@@ -1966,6 +1991,14 @@ fn collect_typedef(entity: &Entity<'_>, collected: &mut Collected) {
             collected.enums.insert(name);
         }
         TypeKind::Record => {
+            if let (Ok(size), Ok(alignment)) = (canonical.get_sizeof(), canonical.get_alignof())
+                && size > 0
+                && alignment > 0
+            {
+                collected
+                    .aggregate_layouts
+                    .insert(name.clone(), AggregateLayout { size, alignment });
+            }
             // `typedef struct { … } jpeg_component_info;` has no tag of its own;
             // libclang names it `(unnamed struct at …)`, which is not valid C.
             // Use the typedef's own name as the (opaque) tag instead.
@@ -2921,7 +2954,7 @@ void *malloc(size_t n);\n";
     }
 
     #[test]
-    fn leaves_union_with_named_aggregate_values_opaque() {
+    fn emits_union_with_named_aggregate_values_in_dependency_order() {
         let cdef = cdef_from_header(
             "struct ex_common { int type; };\n\
              typedef struct ex_common ex_common;\n\
@@ -2937,9 +2970,180 @@ void *malloc(size_t n);\n";
         .unwrap()
         .cdef;
 
-        assert!(cdef.contains("union ex_event;"), "{cdef}");
-        assert!(!cdef.contains("union ex_event {"), "{cdef}");
+        let common = cdef
+            .find("struct ex_common { int type; };")
+            .unwrap_or(usize::MAX);
+        let event = cdef
+            .find("union ex_event { ex_common common; int type; };")
+            .unwrap_or(usize::MAX);
+        assert!(common < event, "{cdef}");
         assert!(cdef.contains("int ex_poll(ex_event *event);"), "{cdef}");
+    }
+
+    #[test]
+    fn retains_layout_for_an_aggregate_left_opaque_in_the_cdef() {
+        let artifacts = cdef_from_header(
+            "typedef int ex_word;\n\
+             struct ex_opaque { ex_word ex_word; };\n\
+             struct ex_parent { struct ex_opaque value; };\n\
+             int ex_use(struct ex_parent *value);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !artifacts
+                .cdef
+                .contains("struct ex_opaque { ex_word ex_word; };"),
+            "{}",
+            artifacts.cdef
+        );
+        assert!(
+            !artifacts
+                .cdef
+                .contains("struct ex_parent { struct ex_opaque value; };"),
+            "{}",
+            artifacts.cdef
+        );
+        assert_eq!(
+            artifacts.aggregate_layouts.get("ex_opaque"),
+            Some(&super::AggregateLayout {
+                size: std::mem::size_of::<i32>(),
+                alignment: std::mem::align_of::<i32>(),
+            })
+        );
+    }
+
+    #[test]
+    fn leaves_parent_of_pooled_by_value_struct_opaque() {
+        let include_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            include_dir.path().join("dependency.h"),
+            "typedef struct dependency_value { int hidden; } dependency_value;\n",
+        )
+        .expect("write dependency header");
+
+        let cdef = cdef_from_header(
+            "#include <dependency.h>\n\
+             struct ex_parent { dependency_value value; };\n\
+             int ex_use(struct ex_parent *value);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                extra_include_dirs: vec![include_dir.path().to_path_buf()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(
+            cdef.contains("typedef struct dependency_value dependency_value;"),
+            "{cdef}"
+        );
+        assert!(
+            !cdef.contains("struct ex_parent { dependency_value value; };"),
+            "{cdef}"
+        );
+        assert!(
+            cdef.contains("int ex_use(struct ex_parent *value);"),
+            "{cdef}"
+        );
+    }
+
+    #[test]
+    fn leaves_parent_of_pooled_by_value_union_opaque() {
+        let include_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            include_dir.path().join("dependency.h"),
+            "typedef union dependency_value { int integer; float decimal; } dependency_value;\n",
+        )
+        .expect("write dependency header");
+
+        let cdef = cdef_from_header(
+            "#include <dependency.h>\n\
+             struct ex_parent { dependency_value value; };\n\
+             int ex_use(struct ex_parent *value);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                extra_include_dirs: vec![include_dir.path().to_path_buf()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(
+            cdef.contains("typedef union dependency_value dependency_value;"),
+            "{cdef}"
+        );
+        assert!(
+            !cdef.contains("struct ex_parent { dependency_value value; };"),
+            "{cdef}"
+        );
+        assert!(
+            cdef.contains("int ex_use(struct ex_parent *value);"),
+            "{cdef}"
+        );
+    }
+
+    #[test]
+    fn leaves_parent_of_unrendered_record_alias_opaque() {
+        let cdef = cdef_from_header(
+            "typedef struct ex_buffer { int value; } ex_buffer;\n\
+             typedef ex_buffer ex_alias;\n\
+             struct ex_parent { ex_alias value; };\n\
+             int ex_read_alias(const ex_alias *value);\n\
+             int ex_use(struct ex_parent *value);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        assert!(cdef.contains("typedef struct ex_alias ex_alias;"), "{cdef}");
+        assert!(
+            !cdef.contains("struct ex_parent { ex_alias value; };"),
+            "{cdef}"
+        );
+        assert!(
+            cdef.contains("int ex_use(struct ex_parent *value);"),
+            "{cdef}"
+        );
+    }
+
+    #[test]
+    fn orders_union_definitions_before_struct_value_dependants() {
+        let cdef = cdef_from_header(
+            "union ex_params { int integer; float decimal; };\n\
+             typedef union ex_params ex_params;\n\
+             struct ex_mode { int mode; ex_params params; };\n\
+             typedef struct ex_mode ex_mode;\n\
+             int ex_use(ex_mode *mode);",
+            &HeaderAdapterOptions {
+                symbol_prefix: "ex_".to_owned(),
+                entity_fqcn: "\\Pnlx\\Ex\\Ex".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .cdef;
+
+        let params = cdef
+            .find("union ex_params { int integer; float decimal; };")
+            .unwrap_or(usize::MAX);
+        let mode = cdef
+            .find("struct ex_mode { int mode; ex_params params; };")
+            .unwrap_or(usize::MAX);
+        assert!(params < mode, "{cdef}");
     }
 
     #[test]

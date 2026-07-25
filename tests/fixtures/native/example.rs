@@ -50,3 +50,45 @@ pub extern "C" fn example_point_init(point: *mut ExamplePoint, x: c_int, y: c_in
 pub extern "C" fn example_point_sum(point: *const ExamplePoint) -> c_int {
     unsafe { (*point).x + (*point).y }
 }
+
+#[repr(C)]
+pub union ExampleNumber {
+    integer: c_int,
+    decimal: f32,
+}
+
+#[repr(C)]
+pub struct ExampleValue {
+    kind: c_int,
+    number: ExampleNumber,
+}
+
+#[no_mangle]
+pub extern "C" fn example_value_integer(value: *const ExampleValue) -> c_int {
+    unsafe { (*value).number.integer }
+}
+
+#[no_mangle]
+pub extern "C" fn example_value_init(value: *mut ExampleValue, integer: c_int) {
+    unsafe {
+        (*value).kind = 1;
+        (*value).number.integer = integer;
+    }
+}
+
+#[repr(C)]
+pub struct ExampleOpaque {
+    word: c_int,
+}
+
+#[no_mangle]
+pub extern "C" fn example_opaque_write(value: *mut ExampleOpaque, word: c_int) {
+    unsafe {
+        (*value).word = word;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn example_opaque_read(value: *const ExampleOpaque) -> c_int {
+    unsafe { (*value).word }
+}

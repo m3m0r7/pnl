@@ -26,22 +26,22 @@ declare(strict_types=1);
 
 namespace Pnlx\Example\Types;
 
-/** Typed wrapper for a C `example_point` value. */
-class example_point extends \Pnlx\Example\ExampleContext
+/** Typed wrapper for a C `example_value` value. */
+class example_value extends \Pnlx\Example\ExampleContext
 {
     /**
-     * extension が返した既存の `example_point` をラップする。
-     * `\FFI\CData` がない場合は extension 自身の FFI スコープで `example_point[$size]` を確保し、
-     * C API がポインタを要求する箇所へ `new example_point()` で完全な aggregate を渡せるようにする。
+     * extension が返した既存の `example_value` をラップする。
+     * `\FFI\CData` がない場合は extension 自身の FFI スコープで `example_value[$size]` を確保し、
+     * C API がポインタを要求する箇所へ `new example_value()` で完全な aggregate を渡せるようにする。
      */
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
         if ($size < 1) {
             throw new \InvalidArgumentException('The allocation size must be at least 1.');
         }
-        // 値で返された aggregate（`example_point *` ではなく `example_point` を返す関数など）は、
+        // 値で返された aggregate（`example_value *` ではなく `example_value` を返す関数など）は、
         // ポインタへ `reinterpret` cast できない。値を保持してアドレスを公開することで、
-        // アクセサやポインタ利用では `example_point *` として扱い、値で再度渡すときは
+        // アクセサやポインタ利用では `example_value *` として扱い、値で再度渡すときは
         // デリファレンスする（ArgumentMarshaller::structValue を参照）。
         // PHP は union を TYPE_STRUCT と ATTR_UNION の組で表すため、両方をここで扱う。
         if ($cdata !== null && \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_STRUCT) {
@@ -52,33 +52,34 @@ class example_point extends \Pnlx\Example\ExampleContext
         }
         parent::__construct(
             $cdata !== null
-                ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_point', $cdata)
-                : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_point[%d]', $size))
+                ? \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->reinterpret('example_value', $cdata)
+                : \Pnlx\FFI\NativeLibraryRegistry::of(\Pnlx\Example\Example::class)->allocate(sprintf('example_value[%d]', $size))
         );
     }
 
     /** 親へ渡したアドレスを有効に保つため、値渡しされた aggregate を保持する。 */
     private ?\FFI\CData $byValue = null;
-    public function getX(): int
+    public function getKind(): int
     {
-        return $this->cdata()[0]->x;
+        return $this->cdata()[0]->kind;
     }
 
-    public function setX(int $value): static
+    public function setKind(int $value): static
     {
-        $this->cdata()[0]->x = $value;
+        $this->cdata()[0]->kind = $value;
 
         return $this;
     }
 
-    public function getY(): int
+
+    public function getNumber(): \Pnlx\Example\Types\example_number
     {
-        return $this->cdata()[0]->y;
+        return new \Pnlx\Example\Types\example_number($this->cdata()[0]->number);
     }
 
-    public function setY(int $value): static
+    public function setNumber(\Pnlx\Example\Types\example_number $value): static
     {
-        $this->cdata()[0]->y = $value;
+        $this->cdata()[0]->number = $value->cdata()[0];
 
         return $this;
     }

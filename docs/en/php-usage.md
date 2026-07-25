@@ -96,7 +96,7 @@ libusb_init: 0 (LIBUSB_SUCCESS / LIBUSB_TRANSFER_COMPLETED)
 libusb_exit: ok
 ```
 
-### Pointers, structs, and out-parameters
+### Pointers, aggregates, and out-parameters
 
 The generated bindings map C's pointer/value distinction onto PHP directly — there
 is no allocator to manage by hand:
@@ -116,9 +116,11 @@ is no allocator to manage by hand:
   Libfreetype::FT_Done_FreeType($library);
   ```
 
-- **A struct you own is allocated with `new`.** Each package exposes its struct types
-  under `\Pnlx\<Pkg>\Types\<struct>`; `new` allocates it in the library's own FFI
-  scope, and it decays to the pointer the C API expects:
+- **An aggregate you own is allocated with `new`.** Each package exposes complete
+  struct and union types under `\Pnlx\<Pkg>\Types\<aggregate>`. Scalar fields and
+  embedded aggregates have typed getters/setters, so application code does not need
+  `FFI\CData` casts or byte offsets. `new` allocates the value in the library's own
+  FFI scope, and it decays to the pointer the C API expects:
 
   ```php
   use Pnlx\Libconfig\Types\config_t;
@@ -128,6 +130,12 @@ is no allocator to manage by hand:
   Libconfig::config_read_string($cfg, 'answer = 42;');
   Libconfig::config_destroy($cfg);
   ```
+
+  Aggregate definitions are emitted in by-value dependency order. If a valid C
+  aggregate still cannot be represented by PHP FFI's cdef parser, the same wrapper
+  remains constructible through internal ABI-sized, ABI-aligned storage; raw
+  `FFI\CData` remains an implementation detail. Truly incomplete forward
+  declarations remain pointer-only handles.
 
 - **For raw or batch allocations, use the `Allocator`.** When you need a value the
   generated wrappers do not cover (an arbitrary C type, a `char` buffer), allocate it

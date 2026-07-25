@@ -80,19 +80,32 @@ typedef void *gpointer;
 typedef const void *gconstpointer;
 
 struct timeval;
+struct example_opaque;
 struct example_point;
+struct example_value;
+union example_number;
 
+typedef struct example_opaque example_opaque;
 typedef struct example_point example_point;
+typedef struct example_value example_value;
+typedef union example_number example_number;
 typedef int example_mode;
+typedef int example_storage_word;
 
 struct timeval { long tv_sec; int tv_usec; };
 struct example_point { int x; int y; };
+union example_number { int integer; float decimal; };
+struct example_value { int kind; union example_number number; };
 
 const char *example_version(void);
 example_mode example_next_mode(example_mode mode);
 int example_add(int left, int right);
 int example_apply(int value, int (*callback)(int));
+int example_opaque_read(const struct example_opaque *value);
 int example_point_sum(const struct example_point *point);
+int example_value_integer(const struct example_value *value);
+void example_opaque_write(struct example_opaque *value, int word);
 void example_point_init(struct example_point *point, int x, int y);
+void example_value_init(struct example_value *value, int integer);
 
 CDEF;

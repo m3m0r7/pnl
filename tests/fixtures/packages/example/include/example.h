@@ -43,6 +43,29 @@ struct example_point {
 void example_point_init(struct example_point *point, int x, int y);
 int example_point_sum(const struct example_point *point);
 
+// struct に値として埋め込まれた union。両方のラッパーへ型付きアクセサを生成し、
+// aggregate 定義を依存順に出力する。
+union example_number {
+    int integer;
+    float decimal;
+};
+struct example_value {
+    int kind;
+    union example_number number;
+};
+int example_value_integer(const struct example_value *value);
+void example_value_init(struct example_value *value, int integer);
+
+// メンバー名は独自の名前空間を持つため正しい C だが、フィールド名と typedef が
+// 衝突するので PHP FFI は生成した本体を解釈できない。ラッパーは CData を内部に
+// 隠したまま、サイズとアラインメントを使うフォールバックへ切り替える。
+typedef int example_storage_word;
+struct example_opaque {
+    example_storage_word example_storage_word;
+};
+void example_opaque_write(struct example_opaque *value, int word);
+int example_opaque_read(const struct example_opaque *value);
+
 // A static inline helper has no exported symbol, so it cannot be bound through FFI;
 // it is surfaced as a throwing stub method (marked #[StaticInline]) instead of
 // being dropped.

@@ -40,3 +40,56 @@ class example_point
     {
     }
 }
+
+class example_number
+{
+    public function __construct(?\FFI\CData $cdata = null, int $size = 1)
+    {
+    }
+
+    public function getInteger(): int
+    {
+    }
+
+    public function setInteger(int $value): static
+    {
+    }
+
+    public function getDecimal(): float
+    {
+    }
+
+    public function setDecimal(float|int $value): static
+    {
+    }
+}
+
+class example_value
+{
+    public function __construct(?\FFI\CData $cdata = null, int $size = 1)
+    {
+    }
+
+    public function getKind(): int
+    {
+    }
+
+    public function setKind(int $value): static
+    {
+    }
+
+    public function getNumber(): example_number
+    {
+    }
+
+    public function setNumber(example_number $value): static
+    {
+    }
+}
+
+class example_opaque
+{
+    public function __construct(?\FFI\CData $cdata = null, int $size = 1)
+    {
+    }
+}
