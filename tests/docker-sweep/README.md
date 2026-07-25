@@ -33,9 +33,9 @@ at the end. (`results/` is git-ignored.)
 When driving this sweep, evaluate results in this order — do **not** treat raw
 example-FAIL counts as the bottom line:
 
-1. **Install PASS count** is the primary signal. The only acceptable install FAILs
-   are libraries the distro does not package (skipped by the resolver). A new
-   install FAIL is a real regression.
+1. **Install PASS count** is the primary signal. Expected install FAILs are packages
+   that do not support the current platform or whose native development package is
+   unavailable in the distro. A new install FAIL is a real regression.
 2. **Load-time errors are the regression signal.** Grep example logs for
    `Failed resolving C function`, `ParserException`, `Undefined C type`,
    `Failed loading`, `file too short`. These mean a generated cdef broke — this
@@ -52,9 +52,20 @@ example-FAIL counts as the bottom line:
    Triage each by reading its log; fix the example or document the limitation. Do
    not "fix" the harness to paper over a real binding gap.
 4. **Compare against the baseline**, not zero. The achievable floor is "every
-   installable, non-hardware, non-service package passes". As of the last full run:
-   Alpine 138/144 install, 138/138 installable examples PASS; Ubuntu 141/144
-   install, only hardware-gated libhidapi/libserialport remain.
+   installable, non-hardware, non-service package passes". As of the 2026-07-25
+   full run over 180 packages:
+   - Alpine: 172 install PASS / 8 FAIL; 171/172 installed examples PASS.
+     Unsupported platform: `libduckdb`, `libnfc`, `libnlopt`, `libnng`,
+     `libserialport`, `libtcc`. Missing native development package: `libmatio`,
+     `libmecab`. `libp11kit` installs and loads, but its example calls the
+     unavailable `p11_kit_check_version` symbol.
+   - Ubuntu: 174 install PASS / 6 FAIL; 172/174 installed examples PASS.
+     Unsupported platform: `libduckdb`, `libquickjs`, `libtcc`. Unavailable native
+     development package: `libjasper`, `libmpdecimal`. `libmagic` finds the runtime
+     library but not its development header. `libnss` and `libp11kit` install and
+     load, but their examples call unavailable symbols (`NSS_GetVersion` and
+     `p11_kit_check_version`).
+   - Generated-cdef parser/load failures: **0 on both distros**.
 
 ## Speed/isolation tradeoff
 

@@ -30,23 +30,35 @@ namespace {{NAMESPACE}}\Types;
 class {{TYPE}} extends {{BASE}}
 {
     /**
-     * Wrap an existing `{{TYPE}}` the extension returned, or — when no `\FFI\CData`
-     * is given — allocate a fresh `{{TYPE}}[$size]` in the extension's own FFI scope
-     * (so a complete struct can be created with `new {{TYPE}}()` and passed where the
-     * C API wants a pointer to it).
+     * extension が返した既存の `{{TYPE}}` をラップする。
+     * `\FFI\CData` がない場合は extension 自身の FFI スコープで `{{TYPE}}[$size]` を確保し、
+     * C API がポインタを要求する箇所へ `new {{TYPE}}()` で完全な aggregate を渡せるようにする。
      */
     public function __construct(?\FFI\CData $cdata = null, int $size = 1)
     {
-        // A struct handed back BY VALUE (e.g. a function returning `{{TYPE}}`, not
-        // `{{TYPE}} *`) can't be `reinterpret`-cast to a pointer. Keep it alive and
-        // expose its address, so accessors and pointer uses see a `{{TYPE}} *` while
-        // by-value re-passing dereferences it (see ArgumentMarshaller::structValue).
+        if ($size < 1) {
+            throw new \InvalidArgumentException('The allocation size must be at least 1.');
+        }
+        // 値で返された aggregate（`{{TYPE}} *` ではなく `{{TYPE}}` を返す関数など）は、
+        // ポインタへ `reinterpret` cast できない。値を保持してアドレスを公開することで、
+        // アクセサやポインタ利用では `{{TYPE}} *` として扱い、値で再度渡すときは
+        // デリファレンスする（ArgumentMarshaller::structValue を参照）。
+        // PHP は union を TYPE_STRUCT と ATTR_UNION の組で表すため、両方をここで扱う。
         if ($cdata !== null && \FFI::typeof($cdata)->getKind() === \FFI\CType::TYPE_STRUCT) {
             $this->byValue = $cdata;
             parent::__construct(\FFI::addr($cdata));
 
             return;
         }
+{{#if opaque}}
+        if ($cdata === null) {
+            $this->opaqueAllocation = \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)
+                ->allocateOpaque('{{TYPE}}', {{OPAQUE_SIZE}}, {{OPAQUE_ALIGNMENT}}, $size);
+            parent::__construct($this->opaqueAllocation->pointer());
+
+            return;
+        }
+{{/if}}
         parent::__construct(
             $cdata !== null
                 ? \Pnlx\FFI\NativeLibraryRegistry::of({{ENTITY}}::class)->reinterpret('{{TYPE}}', $cdata)
@@ -54,8 +66,13 @@ class {{TYPE}} extends {{BASE}}
         );
     }
 
-    /** Retains a by-value struct so the address handed to the parent stays valid. */
+    /** 親へ渡したアドレスを有効に保つため、値渡しされた aggregate を保持する。 */
     private ?\FFI\CData $byValue = null;
+{{#if opaque}}
+
+    /** opaque な aggregate 用のアライン済み実体領域を保持する。 */
+    private ?\Pnlx\FFI\OpaqueAllocation $opaqueAllocation = null;
+{{/if}}
 {{#each fields}}
 {{#if is_int}}
     public function {{getter}}(): int
@@ -91,6 +108,18 @@ class {{TYPE}} extends {{BASE}}
     {
         return \Pnlx\Util::wcStringOrNull($this->cdata()[0]->{{field}});
     }
+{{else}}{{#if aggregate_class}}
+    public function {{getter}}(): {{aggregate_class}}
+    {
+        return new {{aggregate_class}}($this->cdata()[0]->{{field}});
+    }
+
+    public function {{setter}}({{aggregate_class}} $value): static
+    {
+        $this->cdata()[0]->{{field}} = $value->cdata()[0];
+
+        return $this;
+    }
 {{else}}{{#if pointer_class}}
     public function {{getter}}(): ?{{pointer_class}}
     {
@@ -117,5 +146,5 @@ class {{TYPE}} extends {{BASE}}
 
         return $this;
     }
-{{/if}}{{/if}}{{/if}}{{/if}}{{/if}}
+{{/if}}{{/if}}{{/if}}{{/if}}{{/if}}{{/if}}
 {{/each}}}

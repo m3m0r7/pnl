@@ -9,7 +9,7 @@ use super::types::{
     HELPERS_NS, PointerOut, ValueKind, fits_php_scalar, is_void_pointer, pointer_out_param,
     pointer_type_name, reserved_suffix, value_kind, writable_char_buffer,
 };
-use super::{FunctionSignature, PhpPackageTemplateOptions, StructField};
+use super::{AggregateField, FunctionSignature, PhpPackageTemplateOptions};
 
 /// The PHP class name for a C enum: the C tag, suffixed if it collides with a PHP
 /// reserved word so it is a legal class name (`enum`→`enum_`).
@@ -17,7 +17,7 @@ pub(super) fn enum_class_name(c_name: &str) -> String {
     reserved_suffix(c_name)
 }
 
-/// One struct field rendered as a typed accessor pair on the `Types\<tag>` wrapper.
+/// `Types\<tag>` ラッパーへ型付きアクセサの組として出力する aggregate フィールド。
 /// Exactly one type flag is set; with none, a `mixed` accessor reads/writes the raw
 /// `\FFI\CData` field (so a field whose type the value layer can't name is still
 /// reachable). A `char *` field gets a read-only `?string` getter (writing a string
@@ -32,12 +32,13 @@ struct FieldView {
     is_string: bool,
     /// A `wchar_t *` field: the getter decodes a wide string to `?string`.
     is_wide_string: bool,
+    aggregate_class: Option<String>,
     pointer_class: Option<String>,
 }
 
-/// The accessor views for a struct's fields, as JSON for the `Types\<tag>` template.
-pub(super) fn struct_field_views(
-    fields: &[StructField],
+/// struct/union のフィールドを、ラッパーテンプレート用 JSON のアクセサ表現へ変換する。
+pub(super) fn aggregate_field_views(
+    fields: &[AggregateField],
     options: &PhpPackageTemplateOptions<'_>,
 ) -> Vec<serde_json::Value> {
     // PHP method names are case-insensitive, so two fields whose accessors collide
@@ -59,11 +60,18 @@ pub(super) fn struct_field_views(
                 is_float: false,
                 is_string: false,
                 is_wide_string: false,
+                aggregate_class: None,
                 pointer_class: None,
             };
+            if let Some(aggregate) = &field.aggregate {
+                view.aggregate_class = Some(format!(
+                    "{}\\{}",
+                    types_ns(options),
+                    reserved_suffix(aggregate)
+                ));
             // A `wchar_t *` field reads as a wide string; the scalar typedef has
             // already collapsed its type to an `int` pointer, so use the flag.
-            if field.wide_string {
+            } else if field.wide_string {
                 view.is_wide_string = true;
             } else {
                 match value_kind(&field.type_name) {
@@ -429,8 +437,18 @@ pub(super) fn collect_pointer_types(options: &PhpPackageTemplateOptions<'_>) -> 
     // Match the signature-derived naming (`reserved_suffix`, the form
     // `pointer_type_name` produces) so a struct that IS named in a signature is not
     // emitted twice under two class names.
-    for tag in options.struct_fields.keys() {
+    for tag in options.aggregate_fields.keys() {
         names.insert(reserved_suffix(tag));
+    }
+    for name in options.aggregate_layouts.keys() {
+        names.insert(reserved_suffix(name));
+    }
+    for fields in options.aggregate_fields.values() {
+        for field in fields {
+            if let Some(aggregate) = &field.aggregate {
+                names.insert(reserved_suffix(aggregate));
+            }
+        }
     }
     names.into_iter().collect()
 }
@@ -450,11 +468,11 @@ fn method_view(
         .params
         .iter()
         .map(|param| {
-            // A by-value struct param: not a pointer, and its base type names a struct
-            // the cdef defines with a body (so it can be passed/copied by value).
+            // 値渡しの aggregate 引数。ポインタではなく、基底型が cdef 内で本体を持つ
+            // aggregate を指す場合に、値として受け渡し・コピーできる。
             let is_struct_value = !param.type_name.contains('*')
                 && pointer_type_name(&param.type_name)
-                    .is_some_and(|name| options.struct_fields.contains_key(&name));
+                    .is_some_and(|name| options.aggregate_fields.contains_key(&name));
             ArgView {
                 name: param.name.clone(),
                 is_pointer: matches!(

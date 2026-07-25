@@ -189,6 +189,99 @@ class NativeLibrary
     }
 
     /**
+     * 生成した cdef では本体を表現できない完全な native aggregate のために、
+     * ABI 上のサイズとアラインメントを満たす領域を確保する。
+     * 返される所有者は、型付きポインタが使われる間、バイト領域を保持する。
+     *
+     * @throws ExtensionLoadException レイアウトが無効、または領域を確保できない場合。
+     */
+    public function allocateOpaque(
+        string $type,
+        int $elementSize,
+        int $alignment,
+        int $count = 1,
+    ): OpaqueAllocation {
+        if (
+            $elementSize < 1
+            || $alignment < 1
+            || ($alignment & ($alignment - 1)) !== 0
+            || $count < 1
+        ) {
+            throw new ExtensionLoadException(
+                sprintf('Invalid opaque aggregate layout for type %s.', $type),
+            );
+        }
+        $padding = $alignment - 1;
+        if ($count > intdiv(PHP_INT_MAX - $padding, $elementSize)) {
+            throw new ExtensionLoadException(
+                sprintf('Opaque aggregate allocation for type %s is too large.', $type),
+            );
+        }
+
+        $storageSize = ($elementSize * $count) + $padding;
+        try {
+            $storage = $this->ffi->new(sprintf('unsigned char[%d]', $storageSize));
+            if (!$storage instanceof CData) {
+                throw new ExtensionLoadException(
+                    sprintf('Failed to allocate opaque byte storage for type %s.', $type),
+                );
+            }
+            $pointerWidth = FFI::sizeof(FFI::addr($storage));
+            $address = $this->ffi->cast(
+                match ($pointerWidth) {
+                    4 => 'unsigned int',
+                    8 => 'unsigned long long',
+                    default => throw new ExtensionLoadException('Unsupported native pointer width.'),
+                },
+                FFI::addr($storage),
+            );
+            if (!$address instanceof CData) {
+                throw new ExtensionLoadException(
+                    sprintf('Failed to resolve opaque storage address for type %s.', $type),
+                );
+            }
+            $base = self::cdataInteger($address);
+            $aligned = ($base + $padding) & ~$padding;
+            $pointer = $this->ffi->cast($type . ' *', $aligned);
+            if (!$pointer instanceof CData) {
+                throw new ExtensionLoadException(
+                    sprintf('Failed to create opaque pointer for type %s.', $type),
+                );
+            }
+        } catch (Throwable $e) {
+            throw new ExtensionLoadException(
+                sprintf('Failed to allocate opaque C value of type %s.', $type),
+                0,
+                $e,
+            );
+        }
+
+        return new OpaqueAllocation($pointer, $storage);
+    }
+
+    /**
+     * CData の非公開な動的 `cdata` プロパティに依存せず、整数スカラーを読み取る。
+     * `Q`/`L` はマシンのバイトオーダーを使う。
+     */
+    private static function cdataInteger(CData $value): int
+    {
+        $width = FFI::sizeof($value);
+        if ($width !== 4 && $width !== 8) {
+            throw new ExtensionLoadException('Unsupported native pointer width.');
+        }
+        $decoded = unpack(
+            $width === 8 ? 'Qvalue' : 'Lvalue',
+            FFI::string(FFI::addr($value), $width),
+        );
+        $integer = $decoded['value'] ?? null;
+        if (!is_int($integer)) {
+            throw new ExtensionLoadException('Native pointer address does not fit a PHP integer.');
+        }
+
+        return $integer;
+    }
+
+    /**
      * Reinterpret an existing pointer as a pointer to `$type` in this library's FFI
      * scope, so a value handed back as an untyped `void *` (hiredis's `redisCommand`
      * returns a `redisReply *` typed `void *`) can be wrapped in its real type and

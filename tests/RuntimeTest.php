@@ -211,7 +211,10 @@ class RuntimeTest extends TestCase
             'function.aliases.php',
             'example.ffi.php',
             'enums/example_mode.php',
+            'types/example_number.php',
+            'types/example_opaque.php',
             'types/example_point.php',
+            'types/example_value.php',
         ];
 
         $updating = getenv('UPDATE_GOLDEN') === '1';
@@ -370,6 +373,41 @@ class RuntimeTest extends TestCase
         $cls::example_point_init($point, 10, 20);
         self::assertSame(10, $point->getX());
         self::assertSame(20, $point->getY());
+    }
+
+    public function testRuntimeNestedUnionAccessors(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+
+        $number = new \Pnlx\Example\Types\example_number();
+        $number->setInteger(41);
+        $value = new \Pnlx\Example\Types\example_value();
+        $value->setKind(1)->setNumber($number);
+
+        self::assertSame(1, $value->getKind());
+        self::assertSame(41, $value->getNumber()->getInteger());
+        $integer = $cls::example_value_integer($value);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $integer);
+        self::assertSame(41, $integer->toInt());
+
+        $cls::example_value_init($value, 73);
+        self::assertSame(73, $value->getNumber()->getInteger());
+    }
+
+    public function testRuntimeOpaqueAggregateFallback(): void
+    {
+        $runtime = new Runtime(self::$workspace->projectRoot);
+        $runtime->loadEntrypoint(self::EXAMPLE_CLASS);
+        $cls = self::EXAMPLE_CLASS;
+
+        $value = new \Pnlx\Example\Types\example_opaque();
+        $cls::example_opaque_write($value, 1234);
+
+        $word = $cls::example_opaque_read($value);
+        self::assertInstanceOf(\Pnlx\Types\AnySizeInteger::class, $word);
+        self::assertSame(1234, $word->toInt());
     }
 
     public function testAllocatorAllocatesInTheExtensionScope(): void

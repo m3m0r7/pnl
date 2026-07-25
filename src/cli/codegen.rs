@@ -18,8 +18,9 @@ use aliases::render_aliases;
 use php::{render_global_functions, render_methods};
 
 pub use parse::{
-    FunctionSignature, StructField, apply_symbol_aliases, parse_function_signatures,
-    parse_function_signatures_with_enums, parse_signatures_with_unsupported, parse_struct_fields,
+    AggregateField, FunctionSignature, apply_symbol_aliases, parse_aggregate_fields,
+    parse_function_signatures, parse_function_signatures_with_enums,
+    parse_signatures_with_unsupported,
 };
 
 const FFI_TEMPLATE: &str = include_str!("templates/package/src/generated/ffi.php.tpl");
@@ -85,8 +86,11 @@ pub struct PhpPackageTemplateOptions<'a> {
     pub symbols: &'a [crate::native::header_adapter::DataSymbol],
     /// Named C enums surfaced as PHP `enum`s under `<namespace>\Enums`.
     pub enums: &'a [crate::native::header_adapter::EnumDef],
-    /// Struct tag -> its fields, so a `Types\<tag>` wrapper gets typed accessors.
-    pub struct_fields: &'a BTreeMap<String, Vec<StructField>>,
+    /// 完全な struct/union 名から、型付き aggregate アクセサ用フィールドへの対応。
+    pub aggregate_fields: &'a BTreeMap<String, Vec<AggregateField>>,
+    /// ソース上で完全な aggregate の ABI レイアウト。
+    /// `aggregate_fields` にない項目は opaque なアライン済み領域へフォールバックする。
+    pub aggregate_layouts: &'a BTreeMap<String, crate::native::header_adapter::AggregateLayout>,
 }
 
 /// Generate one entity variant. `allow_cdata` selects whether pointer parameters
@@ -285,8 +289,8 @@ pub fn generate_types_php(
         let prefer = match by_ci.get(&key) {
             None => true,
             Some(existing) => {
-                options.struct_fields.contains_key(&name)
-                    && !options.struct_fields.contains_key(existing)
+                options.aggregate_fields.contains_key(&name)
+                    && !options.aggregate_fields.contains_key(existing)
             }
         };
         if prefer {
@@ -306,12 +310,24 @@ pub fn generate_types_php(
             Value::String(format!("\\{}\\{}", options.namespace, options.class_name)),
         );
         context.insert("TYPE".to_owned(), Value::String(type_name.clone()));
-        // Typed field accessors when this pointer type names a struct the cdef
-        // defines with a body; an opaque pointer type just gets the bare wrapper.
-        let fields = options
-            .struct_fields
+        let opaque_layout = options
+            .aggregate_layouts
             .get(type_name)
-            .map(|fields| php::struct_field_views(fields, options))
+            .filter(|_| !options.aggregate_fields.contains_key(type_name));
+        context.insert("opaque".to_owned(), Value::Bool(opaque_layout.is_some()));
+        if let Some(layout) = opaque_layout {
+            context.insert("OPAQUE_SIZE".to_owned(), Value::Number(layout.size.into()));
+            context.insert(
+                "OPAQUE_ALIGNMENT".to_owned(),
+                Value::Number(layout.alignment.into()),
+            );
+        }
+        // cdef 内に本体がある aggregate をポインタ型が指す場合は、型付きアクセサを生成する。
+        // opaque なポインタ型には素のラッパーだけを生成する。
+        let fields = options
+            .aggregate_fields
+            .get(type_name)
+            .map(|fields| php::aggregate_field_views(fields, options))
             .unwrap_or_default();
         context.insert("fields".to_owned(), Value::Array(fields));
         write_generated(
@@ -714,11 +730,18 @@ double demo_scale(double value, int factor);\n";
             description: "Demo native library.",
             symbols: &[],
             enums: &[],
-            struct_fields: {
+            aggregate_fields: {
                 // An empty static keeps the borrow `'static` (a `&BTreeMap::new()`
                 // temporary would not outlive the function).
-                static EMPTY_FIELDS: BTreeMap<String, Vec<StructField>> = BTreeMap::new();
+                static EMPTY_FIELDS: BTreeMap<String, Vec<AggregateField>> = BTreeMap::new();
                 &EMPTY_FIELDS
+            },
+            aggregate_layouts: {
+                static EMPTY_LAYOUTS: BTreeMap<
+                    String,
+                    crate::native::header_adapter::AggregateLayout,
+                > = BTreeMap::new();
+                &EMPTY_LAYOUTS
             },
         }
     }
@@ -860,27 +883,32 @@ void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, co
     }
 
     #[test]
-    fn parses_struct_fields_with_bodies_for_accessors() {
+    fn parses_aggregate_fields_with_bodies_for_accessors() {
         // A struct with a body yields its fields (types resolved through typedefs);
         // an opaque (body-less) struct yields nothing; a nested aggregate/function
         // field is skipped so the accessor degrades rather than mis-parsing.
         let cdef = "typedef unsigned long size_t;\n\
 struct ex_point { int x; int y; };\n\
-struct ex_box { struct ex_point *origin; char *label; size_t len; };\n\
+union ex_number { int integer; float decimal; };\n\
+typedef union ex_number ex_number_alias;\n\
+typedef ex_number_alias ex_number_alias2;\n\
+struct ex_box { struct ex_point *origin; char *label; size_t len; union ex_number number; };\n\
 typedef struct ex_opaque ex_opaque;\n";
-        let fields = parse_struct_fields(cdef);
+        let fields = parse_aggregate_fields(cdef);
 
         assert_eq!(
             fields.get("ex_point"),
             Some(&vec![
-                StructField {
+                AggregateField {
                     name: "x".to_owned(),
                     type_name: "int".to_owned(),
+                    aggregate: None,
                     wide_string: false,
                 },
-                StructField {
+                AggregateField {
                     name: "y".to_owned(),
                     type_name: "int".to_owned(),
+                    aggregate: None,
                     wide_string: false,
                 },
             ])
@@ -891,19 +919,33 @@ typedef struct ex_opaque ex_opaque;\n";
         assert_eq!(box_fields[0].type_name, "struct ex_point *");
         assert_eq!(box_fields[1].type_name, "char *");
         assert_eq!(box_fields[2].type_name, "unsigned long");
+        assert_eq!(box_fields[3].aggregate.as_deref(), Some("ex_number"));
+        assert_eq!(
+            fields
+                .get("ex_number")
+                .expect("ex_number parsed")
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["integer", "decimal"]
+        );
+        assert!(fields.contains_key("ex_number_alias"));
+        assert!(fields.contains_key("ex_number_alias2"));
         // An opaque struct (no body) is not in the map.
         assert!(!fields.contains_key("ex_opaque"));
     }
 
     #[test]
-    fn struct_fields_skip_inline_union_members() {
+    fn aggregate_fields_skip_inline_union_members() {
         // luaL_Buffer's shape: an inline anonymous union. Splitting on top-level `;`
         // only must keep the union as ONE (skipped) member, NOT harvest its inner
         // members as fields — otherwise the union's `long l` would collide with the
         // real `lua_State *L` (both → `getL`).
         let cdef = "struct ex_buf { char *b; long n; void *L; \
 union { long l; double u; char b[8]; } init; };\n";
-        let fields = parse_struct_fields(cdef).remove("ex_buf").expect("parsed");
+        let fields = parse_aggregate_fields(cdef)
+            .remove("ex_buf")
+            .expect("parsed");
         let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
         // Only the top-level members; the union's inner `l`/`u`/`b`/`init` are gone.
         assert_eq!(names, vec!["b", "n", "L"], "fields: {names:?}");

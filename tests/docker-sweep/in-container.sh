@@ -84,8 +84,8 @@ one_package() { # $1 = package name
   [ -f "$d/pnlx.json" ] || { printf '%s\t%s\t%s\n' "$PKG" SKIP 2 > "$RESULTS/status/$PKG.tsv"; return; }
   local proj="/tmp/proj/$PKG"; rm -rf "$proj"; mkdir -p "$proj"
   cat > "$proj/pnl.json" <<EOF
-{ "schema_version": "$SCHEMA", "repositories": [], "load_paths": [], "output_dir": "@pnlx",
-  "features": { "use_functions": true, "allow_cdata": true, "use_php_scalars_in_params": true },
+{ "schema_version": "$SCHEMA", "repositories": [], "library_paths": [], "output_dir": "@pnlx",
+  "features": { "global_functions": true, "cdata_arguments": true, "scalar_params": true },
   "extensions": {} }
 EOF
   local log="$RESULTS/logs/$PKG.log"

@@ -1,7 +1,7 @@
 //! Parsing a generated cdef back into typed [`FunctionSignature`]s (with their
 //! params, return type, and pointer/enum classification) and the shared
-//! [`StructField`]/[`FunctionParam`] types, plus the typedef-resolution helpers
-//! that drive PHP type mapping. The inverse of the rendering side in `render.rs`.
+//! [`AggregateField`]/[`FunctionParam`] 型と、PHP の型マッピングを駆動する
+//! typedef 解決用ヘルパー。`render.rs` にあるレンダリング処理の逆変換にあたる。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,31 +35,34 @@ impl FunctionSignature {
     }
 }
 
-/// One field of a generated struct, for emitting a typed accessor on its wrapper.
+/// 生成された struct/union ラッパーへ型付きアクセサを出力するためのフィールド。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructField {
+pub struct AggregateField {
     pub name: String,
     pub type_name: String,
+    /// 値として埋め込まれた完全な struct/union。
+    /// アクセサは生の `FFI\CData` フィールドを漏らさず、生成済みラッパーを返す。
+    pub aggregate: Option<String>,
     /// A single-level `wchar_t *` field (detected before the scalar typedef collapses
     /// `wchar_t` to `int`): its accessor decodes a wide string to `?string` via
     /// {@see Util::wcStringOrNull} instead of exposing an `int` pointer.
     pub wide_string: bool,
 }
 
-/// Parse the struct definitions the cdef emits with a body (`struct X { int a;
-/// char *b; };`) into their field lists, so the generated `Types\X` wrapper can
-/// expose typed `getA()/setA()` accessors. Opaque structs (forward-declared only,
-/// no body) yield nothing. Field types resolve against the cdef's typedefs exactly
-/// like function parameters, and a field whose declarator carries a nested
-/// aggregate/function type (`{`/`(`) is skipped (the accessor degrades).
-pub fn parse_struct_fields(cdef: &str) -> BTreeMap<String, Vec<StructField>> {
+/// cdef にある完全な struct/union 定義をフィールド一覧へ変換し、
+/// 生成する `Types\X` ラッパーへ型付きアクセサを公開できるようにする。
+/// opaque な aggregate は対象外。フィールド型は関数引数と同様に cdef の typedef で解決する。
+pub fn parse_aggregate_fields(cdef: &str) -> BTreeMap<String, Vec<AggregateField>> {
     let raw_typedefs = raw_typedef_map(cdef);
     let scalar_typedefs = scalar_typedef_map(&raw_typedefs);
     let char_pointer_typedefs = char_pointer_typedef_set(&raw_typedefs);
-    let mut structs = BTreeMap::new();
+    let mut aggregates = BTreeMap::new();
     for line in cdef.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("struct ") else {
+        let Some(rest) = line
+            .strip_prefix("struct ")
+            .or_else(|| line.strip_prefix("union "))
+        else {
             continue;
         };
         let Some(brace) = rest.find('{') else {
@@ -98,18 +101,111 @@ pub fn parse_struct_fields(cdef: &str) -> BTreeMap<String, Vec<StructField>> {
             // Detect a `wchar_t *` field before the scalar typedef collapses
             // `wchar_t` to `int` (the accessor reads it as a wide string).
             let wide_string = is_wide_char_pointer(&type_name);
+            let aggregate = aggregate_value_type(&type_name, &raw_typedefs);
             let mut type_name = resolve_scalar_typedef(&type_name, &scalar_typedefs);
             type_name = resolve_char_pointer_typedef(&type_name, &char_pointer_typedefs);
             type_name = resolve_pointer_typedef(&type_name, &raw_typedefs);
-            fields.push(StructField {
+            fields.push(AggregateField {
                 name,
                 type_name,
+                aggregate,
                 wide_string,
             });
         }
-        structs.insert(tag.to_owned(), fields);
+        aggregates.insert(tag.to_owned(), fields);
     }
-    structs
+
+    // 完全な aggregate の typedef エイリアスは、同じフィールドとレイアウトを持つ。
+    // エイリアスを使うシグネチャや入れ子のメンバーにも同じラッパー動作を生成できるよう、
+    // タグの項目を複製する。
+    loop {
+        let mut added = Vec::new();
+        for (alias, underlying) in &raw_typedefs {
+            if aggregates.contains_key(alias) {
+                continue;
+            }
+            let Some(tag) =
+                direct_aggregate_name(underlying).or_else(|| direct_named_type(underlying))
+            else {
+                continue;
+            };
+            if let Some(fields) = aggregates.get(&tag) {
+                added.push((alias.clone(), fields.clone()));
+            }
+        }
+        if added.is_empty() {
+            break;
+        }
+        for (alias, fields) in added {
+            aggregates.insert(alias, fields);
+        }
+    }
+
+    aggregates
+}
+
+/// 非ポインタのフィールド型から、値として埋め込まれた struct/union 名を解決する。
+fn aggregate_value_type(
+    type_name: &str,
+    raw_typedefs: &BTreeMap<String, String>,
+) -> Option<String> {
+    if type_name.contains('*') || type_name.contains('[') {
+        return None;
+    }
+    if let Some(name) = direct_aggregate_name(type_name) {
+        return Some(name);
+    }
+    let tokens: Vec<&str> = type_name
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+        .collect();
+    let [name] = tokens.as_slice() else {
+        return None;
+    };
+    let mut current = *name;
+    for _ in 0..16 {
+        let underlying = raw_typedefs.get(current)?;
+        if let Some(name) = direct_aggregate_name(underlying) {
+            return Some(name);
+        }
+        let aliases: Vec<&str> = underlying
+            .split_whitespace()
+            .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+            .collect();
+        let [alias] = aliases.as_slice() else {
+            return None;
+        };
+        current = alias;
+    }
+    None
+}
+
+fn direct_aggregate_name(type_name: &str) -> Option<String> {
+    let tokens: Vec<&str> = type_name
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+        .collect();
+    match tokens.as_slice() {
+        ["struct" | "union", name] => Some((*name).to_owned()),
+        _ => None,
+    }
+}
+
+fn direct_named_type(type_name: &str) -> Option<String> {
+    let tokens: Vec<&str> = type_name
+        .split_whitespace()
+        .filter(|token| !matches!(*token, "const" | "volatile" | "restrict"))
+        .collect();
+    match tokens.as_slice() {
+        [name]
+            if name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_') =>
+        {
+            Some((*name).to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Whether a field's raw C type is a single-level pointer to `wchar_t` (ignoring
