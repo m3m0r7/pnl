@@ -232,8 +232,8 @@ fn install_one(
     state: &mut InstallState,
     expected_content_hash: Option<&str>,
 ) -> Result<()> {
-    // A bare package name (no scheme/slash, not a local package dir) is resolved
-    // against the configured repositories, e.g. `pnl install widget`.
+    // A package leaf or `vendor/package` identity (not a local package dir) is
+    // resolved against the configured repositories, e.g. `pnl install widget`.
     if is_bare_package_name(target)
         && !absolutize(root, Path::new(target))
             .join(crate::model::config::PNLX_MANIFEST_FILE)
@@ -356,17 +356,24 @@ pub(super) fn resolved_repositories(manifest: &PnlManifest) -> Vec<Repository> {
     repositories
 }
 
-/// A bare package leaf name (e.g. `widget`, `widget-1.0`) — no URL scheme,
-/// path separator, or `git@` host — to be resolved against the repositories.
+/// A package leaf name (`widget`) or full identity (`vendor/widget`) to resolve
+/// against the repositories. An existing local directory containing `pnlx.json`
+/// takes precedence in [`install_one`].
 pub(super) fn is_bare_package_name(target: &str) -> bool {
-    !target.is_empty()
-        && !target.contains("://")
-        && !target.contains('/')
-        && !target.contains('\\')
-        && !target.contains('@')
-        && target
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    if target.is_empty() || target.contains("://") || target.contains('\\') || target.contains('@')
+    {
+        return false;
+    }
+
+    let segments = target.split('/').collect::<Vec<_>>();
+    (segments.len() == 1 || segments.len() == 2)
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && !matches!(*segment, "." | "..")
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        })
 }
 
 /// Resolve a bare package name by appending it to each configured repository URL
@@ -750,13 +757,7 @@ fn install_local_extension(
     state.packages_root = previous_packages_root;
 
     if !is_dependency {
-        manifest
-            .extensions
-            .entry(extension.name.clone())
-            .or_insert_with(|| ExtensionRequirement {
-                version: format!("={}", extension.version),
-                required: true,
-            });
+        set_manifest_extension_requirement(manifest, &extension.name, &extension.version);
         write_json(
             &root.join(crate::model::config::PNL_MANIFEST_FILE),
             manifest,
@@ -1005,6 +1006,16 @@ fn install_local_extension(
     }
 
     Ok(())
+}
+
+fn set_manifest_extension_requirement(manifest: &mut PnlManifest, package: &str, version: &str) {
+    manifest.extensions.insert(
+        package.to_owned(),
+        ExtensionRequirement {
+            version: format!("={version}"),
+            required: true,
+        },
+    );
 }
 
 fn ensure_not_cyclic(state: &InstallState, package: &str) -> Result<()> {
@@ -1567,11 +1578,25 @@ mod tests {
         use super::is_bare_package_name;
         assert!(is_bare_package_name("widget"));
         assert!(is_bare_package_name("widget-1.0"));
-        assert!(!is_bare_package_name("vendor/pkg"));
+        assert!(is_bare_package_name("vendor/pkg"));
         assert!(!is_bare_package_name("./pkg"));
+        assert!(!is_bare_package_name("packages/vendor/pkg"));
+        assert!(!is_bare_package_name("vendor/"));
         assert!(!is_bare_package_name("https://example.com/pkg"));
         assert!(!is_bare_package_name("git@github.com:o/r.git"));
         assert!(!is_bare_package_name(""));
+    }
+
+    #[test]
+    fn reinstall_updates_the_manifest_requirement() {
+        let mut manifest = crate::model::manifest::PnlManifest::default();
+
+        super::set_manifest_extension_requirement(&mut manifest, "vendor/pkg", "1.0.0");
+        super::set_manifest_extension_requirement(&mut manifest, "vendor/pkg", "1.1.0");
+
+        let requirement = manifest.extensions.get("vendor/pkg").unwrap();
+        assert_eq!(requirement.version, "=1.1.0");
+        assert!(requirement.required);
     }
 
     #[test]
