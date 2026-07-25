@@ -112,6 +112,15 @@ jobs:
       - name: Build release binaries
         run: cargo build --locked --release --bins
 
+      - name: Smoke test Composer CLI shims
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pnl") | .version')"
+          install -d "bin/.native/${package_version}"
+          install -m 0755 target/release/pnl "bin/.native/${package_version}/pnl"
+          install -m 0755 target/release/pnlx "bin/.native/${package_version}/pnlx"
+          test "$(bin/pnl --version)" = "pnl ${package_version}"
+          test "$(bin/pnlx --version)" = "pnlx ${package_version}"
+
       - name: Install Composer dependencies
         run: composer install --no-interaction --prefer-dist --no-progress
 
