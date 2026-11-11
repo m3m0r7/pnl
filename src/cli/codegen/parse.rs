@@ -92,9 +92,31 @@ pub fn parse_aggregate_fields(cdef: &str) -> BTreeMap<String, Vec<AggregateField
             if declaration.is_empty() || declaration.contains('{') || declaration.contains('(') {
                 continue;
             }
+            let (declaration, bitfield) = match declaration.rsplit_once(':') {
+                Some((type_and_name, width)) if width.trim().parse::<usize>().is_ok() => {
+                    (type_and_name.trim(), true)
+                }
+                _ => (declaration, false),
+            };
             let Some((type_name, name)) = split_c_declaration_name(declaration) else {
                 continue;
             };
+            if bitfield
+                && (matches!(type_name.as_str(), "enum" | "struct" | "union")
+                    || matches!(
+                        name.as_str(),
+                        "char"
+                            | "short"
+                            | "int"
+                            | "long"
+                            | "signed"
+                            | "unsigned"
+                            | "_Bool"
+                            | "bool"
+                    ))
+            {
+                continue;
+            }
             if !seen.insert(name.clone()) {
                 continue;
             }
