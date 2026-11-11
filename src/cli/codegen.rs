@@ -936,6 +936,25 @@ typedef struct ex_opaque ex_opaque;\n";
     }
 
     #[test]
+    fn parses_named_bitfields_and_skips_unnamed_padding() {
+        let cdef = "struct ex_attrs { unsigned int bold : 1; unsigned int underline : 2; unsigned int : 0; unsigned int reverse : 1; };\n";
+        let fields = parse_aggregate_fields(cdef)
+            .remove("ex_attrs")
+            .expect("parsed");
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.type_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("bold", "unsigned int"),
+                ("underline", "unsigned int"),
+                ("reverse", "unsigned int"),
+            ]
+        );
+    }
+
+    #[test]
     fn aggregate_fields_skip_inline_union_members() {
         // luaL_Buffer's shape: an inline anonymous union. Splitting on top-level `;`
         // only must keep the union as ONE (skipped) member, NOT harvest its inner

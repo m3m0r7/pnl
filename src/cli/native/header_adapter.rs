@@ -1148,6 +1148,16 @@ fn body_has_type_named_field(body: &str, type_names: &BTreeSet<String>) -> bool 
         // The declared identifier is the last `\w+` token, after dropping an array
         // suffix (`x[4]`) or bitfield width (`x : 3`).
         let field = field.split('[').next().unwrap_or(field);
+        if let Some((type_or_declarator, _)) = field.split_once(':') {
+            let type_or_declarator = type_or_declarator.trim();
+            if is_builtin_value_field_type(type_or_declarator)
+                || type_names.contains(type_or_declarator)
+                || (type_or_declarator.starts_with("enum ")
+                    && type_or_declarator.split_whitespace().count() == 2)
+            {
+                return false;
+            }
+        }
         let field = field.split(':').next().unwrap_or(field);
         field
             .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -1776,10 +1786,24 @@ fn render_union_field(field: &Entity<'_>) -> Option<String> {
             // as the RESOLVED scalar so it is sizable without the gate having to know
             // the typedef name and without depending on that typedef being emitted.
             // This keeps the enclosing struct from going opaque over a scalar alias.
-            if let Some(name) = field.get_name()
-                && let Some(scalar) = field_value_scalar_spelling(&field_type)
-            {
-                return Some(format!("{} {name};", scalar));
+            if let Some(scalar) = field_value_scalar_spelling(&field_type) {
+                let bit_width = if field.is_bit_field() {
+                    Some(field.get_bit_field_width()?)
+                } else {
+                    None
+                };
+                let name = field
+                    .get_name()
+                    .or_else(|| bit_width.map(|_| String::new()))?;
+                let declaration = if name.is_empty() {
+                    scalar
+                } else {
+                    format!("{scalar} {name}")
+                };
+                return Some(match bit_width {
+                    Some(width) => format!("{declaration} : {width};"),
+                    None => format!("{declaration};"),
+                });
             }
             return None;
         }
@@ -1865,7 +1889,14 @@ fn is_builtin_value_field_type(display: &str) -> bool {
 /// field libclang can only describe by source location (which would produce
 /// invalid C), signalling that the whole struct should stay opaque.
 fn render_struct_field(field: &Entity<'_>) -> Option<String> {
-    let name = field.get_name()?;
+    let bit_width = if field.is_bit_field() {
+        Some(field.get_bit_field_width()?)
+    } else {
+        None
+    };
+    let name = field
+        .get_name()
+        .or_else(|| bit_width.map(|_| String::new()))?;
     let field_type = field.get_type()?;
 
     // A function-pointer field (inline `void (*destroy)(…)` or a typedef'd callback)
@@ -1911,7 +1942,15 @@ fn render_struct_field(field: &Entity<'_>) -> Option<String> {
     // it. Give it one element so the aggregate is sizable (a union is sized by its
     // largest member anyway; such a field is only the last member of a struct).
     let display = display.replace("[]", "[1]");
-    Some(format!("{};", declarator(&display, &name)))
+    let declaration = if name.is_empty() {
+        display
+    } else {
+        declarator(&display, &name)
+    };
+    Some(match bit_width {
+        Some(width) => format!("{declaration} : {width};"),
+        None => format!("{declaration};"),
+    })
 }
 
 /// A same-size struct re-expression for a scalar type PHP FFI can't represent,
@@ -3197,6 +3236,26 @@ void *malloc(size_t n);\n";
             "unexpected signatures: {:?}",
             signatures.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn preserves_bitfield_widths_and_unnamed_padding() {
+        let artifacts = artifacts(
+            "typedef unsigned int ex_flags;\n\
+             struct ex_attrs { unsigned int bold : 1; unsigned int underline : 2; unsigned int : 0; unsigned int reverse : 1; ex_flags alias : 3; };\n\
+             struct ex_cell { char width; struct ex_attrs attrs; int fg; };\n\
+             int ex_read(struct ex_cell *cell);",
+        );
+
+        assert!(
+            artifacts.cdef.contains(
+                "struct ex_attrs { unsigned int bold : 1; unsigned int underline : 2; unsigned int : 0; unsigned int reverse : 1; unsigned int alias : 3; };"
+            ),
+            "{}",
+            artifacts.cdef
+        );
+        assert_eq!(artifacts.aggregate_layouts["ex_attrs"].size, 8);
+        assert_eq!(artifacts.aggregate_layouts["ex_cell"].size, 16);
     }
 
     #[test]
